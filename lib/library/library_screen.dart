@@ -78,6 +78,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       controller.addListener(_changed);
       setState(() {});
       if (!controller.initialized) await controller.initialize();
+      await _prepareSync();
     } catch (failure) {
       debugPrint('LIBRARY data_directory_failed: $failure');
       if (mounted) {
@@ -104,6 +105,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     _library?.removeListener(_changed);
     if (widget.controller == null) _library?.dispose();
     _workspace?.removeListener(_changed);
+    _sync?.removeListener(_changed);
     if (widget.readerWorkspace == null) _workspace?.dispose();
     _sync?.dispose();
     _search.dispose();
@@ -281,6 +283,8 @@ class _LibraryScreenState extends State<LibraryScreen>
         throw StateError('Library disposed');
       }
       _sync = sync;
+      sync.addListener(_changed);
+      setState(() {});
       return sync;
     } catch (_) {
       _syncFuture = null;
@@ -288,16 +292,19 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   })();
 
-  Future<void> _openSync() async {
+  Future<void> _openSync({bool scan = false, bool syncNow = false}) async {
     try {
       final sync = await _prepareSync();
       if (!mounted) return;
+      if (_canProvideLibrary) unawaited(sync.connectMyIpad());
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
           builder: (_) => SyncScreen(
             controller: sync,
             openOffline: () => unawaited(_openOffline()),
+            scanOnOpen: scan,
+            syncOnOpen: syncNow,
           ),
         ),
       );
@@ -432,11 +439,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                       icon: const Icon(Icons.folder_open_outlined),
                       label: const Text('选择谱库文件夹'),
                     ),
-                  FilledButton.icon(
-                    onPressed: () => unawaited(_openSync()),
-                    icon: const Icon(Icons.wifi),
-                    label: const Text('连接电脑 / 无线同步'),
-                  ),
+                  _connectionButton(),
                   OutlinedButton.icon(
                     onPressed: () => unawaited(_openOffline()),
                     icon: const Icon(Icons.offline_pin_outlined),
@@ -563,8 +566,34 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   double mathIndent(int depth) => (depth * 12.0).clamp(0, 132);
 
+  Widget _connectionButton() => FilledButton.icon(
+    onPressed: () => unawaited(
+      _openSync(
+        scan: !_canProvideLibrary && _sync?.paired != true,
+        syncNow: !_canProvideLibrary && _sync?.paired == true,
+      ),
+    ),
+    icon: Icon(
+      _canProvideLibrary
+          ? Icons.qr_code
+          : (_sync?.paired == true ? Icons.sync : Icons.qr_code_scanner),
+    ),
+    label: Text(
+      _canProvideLibrary
+          ? '连接我的 iPad'
+          : (_sync?.paired == true ? '立即同步' : '扫描电脑二维码'),
+    ),
+  );
+
   Widget _content(LibraryController library) => Column(
     children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: _connectionButton(),
+        ),
+      ),
       Padding(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
         child: Row(

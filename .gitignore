@@ -59,6 +59,8 @@
 !/lib/reader/sharp_file_image.dart
 !/lib/reader/sharp_pdf_page.dart
 !/lib/sync/offline_library_screen.dart
+!/lib/sync/pairing_qr.dart
+!/lib/sync/qr_scanner.dart
 !/lib/sync/sync_controller.dart
 !/lib/sync/sync_screen.dart
 !/packages/library_core/lib/library_core.dart

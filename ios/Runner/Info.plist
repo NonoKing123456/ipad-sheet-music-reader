@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>连接同一Wi-Fi中的电脑，同步整个曲谱库、批注和曲单，以便离线阅读。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>扫描自己电脑上的连接二维码，记住电脑并同步曲谱。相机画面不会保存或上传。</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -1,6 +1,8 @@
 # iPad Sheet Music Reader
 
-Source-only iPad build repository for version **0.4.1+6**. No scores, user state, credentials, or local build outputs are included.
+Source-only iPad build repository for version **0.4.2+7**. No scores, user state, credentials, or local build outputs are included.
+
+On Windows, select the score folder and press **连接我的 iPad** to display a large QR code. On iPad, press **扫描电脑二维码** once; the app remembers the authenticated connection and immediately downloads the library. Later use **立即同步** with the computer reader open on the same Wi-Fi. Rescan after the computer changes networks. Addresses, ports and pairing codes are inside optional advanced diagnostics. Pairing codes remain single-use and expire in two minutes; no network-wide discovery is used.
 
 The workflow builds a native iPad/iPhone device application with Flutter **3.47.8** (revision `737ba8f885dc774b53b442759999a312c9461e4e`), standard **macos-26 arm64**, and **Xcode 26.6**. It creates an **unsigned** `Payload/Runner.app` IPA container, SHA-256 checksum, and build information. Every nested Mach-O must report **IOS / arm64** before packaging.
 
@@ -11,4 +13,4 @@ The workflow builds a native iPad/iPhone device application with Flutter **3.47.
 3. The initial `main` push containing `.github/workflows/ios-unsigned.yml` triggers the build. Later pushes trigger it only when that workflow path changes. For a manual run, as the owner open **Actions → iOS unsigned device build → Run workflow**, and enable `public_source_confirmed` (default false). Pull requests do not trigger it. Do not switch to a private repository or paid runner to resolve a failure.
 4. Download the three assets from prerelease `unsigned-ipad-<run number>-<attempt>`, inspect build information, and verify the IPA checksum. The job has a 25-minute limit; a failure produces no successful delivery claim. Prereleases are not marked latest. The job has repository contents write permission solely to publish these assets; `GH_TOKEN` is passed only to the final publishing step, and checkout credentials are not persisted.
 
-**Status:** The first cloud iPhoneOS/arm64 build succeeded on 2026-10-31. Download the [unsigned test package](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases/tag/unsigned-ipad-1-1). All six native binaries passed device-platform checks; the downloaded IPA checksum and bundle structure were checked separately. Local signing, installation, and real-iPad behavior remain unvalidated. The unsigned IPA cannot be installed directly. No Apple credentials or personal scores were uploaded.
+**Status:** The previous 0.4.1+6 cloud iPhoneOS/arm64 build succeeded on 2026-10-31, and the owner reports installing and opening it on iPad. This 0.4.2+7 QR connection update has passed focused Windows/Dart checks and a Windows release build. Its native camera integration still requires a cloud device build and a real-iPad scan. The unsigned IPA requires local signing before installation. No Apple credentials or personal scores are uploaded.

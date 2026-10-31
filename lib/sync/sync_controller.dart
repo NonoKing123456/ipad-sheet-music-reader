@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 import '../library/library_controller.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
+import 'pairing_qr.dart';
 
 enum SyncPhase {
   idle,
@@ -86,6 +87,9 @@ class SyncController extends ChangeNotifier {
   String? _serverRoot;
   bool _disposed = false;
   bool _serverBusy = false;
+  bool _preparingConnection = false;
+  String? _autoStartAttemptedRoot;
+  String? _lastSelectedRoot;
   bool initialized = false;
   bool busy = false;
   Timer? _timer;
@@ -104,10 +108,19 @@ class SyncController extends ChangeNotifier {
   DateTime? pairingExpires;
   List<Uri> addresses = const [];
   bool get serving => _server != null;
-  bool get serverBusy => _serverBusy;
+  bool get serverBusy => _serverBusy || _preparingConnection;
   bool get paired => _client != null;
   Uri? get computerAddress => _client?.baseUri;
   int? get port => _server?.port;
+  bool get autoStartServer => _settings['autoStartServer'] == true;
+  String? get pairingQr {
+    final code = pairingCode;
+    final expires = pairingExpires;
+    final origins = addresses.where(PairingQr.isLanOrigin).take(3).toList();
+    if (code == null || expires == null || origins.isEmpty) return null;
+    return PairingQr(origins: origins, code: code, expires: expires).encode();
+  }
+
   int get receivedObjects => _received;
   bool get hasOfflineLibrary => replica?.manifest != null;
   int get offlineCount =>
@@ -172,6 +185,7 @@ class SyncController extends ChangeNotifier {
     _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _tick());
     initialized = true;
     _changed();
+    _maybeAutoStart();
   }
 
   Map<String, dynamic> _decodeSettings(String text) {
@@ -210,8 +224,59 @@ class SyncController extends ChangeNotifier {
   }
 
   void _libraryChanged() {
+    if (_lastSelectedRoot != library.rootPath) {
+      _lastSelectedRoot = library.rootPath;
+      _autoStartAttemptedRoot = null;
+    }
     if (_serverRoot != null && library.rootPath != _serverRoot) {
       unawaited(stopServer(reason: '谱库目录已切换，无线服务已关闭。请在新谱库中重新开启。'));
+    }
+    _maybeAutoStart();
+  }
+
+  void _maybeAutoStart() {
+    final root = library.rootPath;
+    if (!Platform.isWindows ||
+        !autoStartServer ||
+        !initialized ||
+        _disposed ||
+        root == null ||
+        library.scanning ||
+        library.catalogForSync == null ||
+        serverBusy ||
+        serving ||
+        _autoStartAttemptedRoot == root) {
+      return;
+    }
+    // One attempt per selected root. A failure requires an explicit button tap.
+    _autoStartAttemptedRoot = root;
+    unawaited(startServer());
+  }
+
+  Future<void> setAutoStartServer(bool enabled) async {
+    try {
+      await _saveSettings({..._settings, 'autoStartServer': enabled});
+      _changed();
+    } catch (_) {
+      serverMessage = '无法保存自动连接偏好，请检查数据目录权限。';
+      _changed();
+    }
+  }
+
+  Future<void> connectMyIpad() async {
+    if (serverBusy || _disposed) return;
+    _preparingConnection = true;
+    _changed();
+    try {
+      if (!autoStartServer) await setAutoStartServer(true);
+      await startServer();
+      if (serving) {
+        await refreshAddresses();
+        refreshCode();
+      }
+    } finally {
+      _preparingConnection = false;
+      _changed();
     }
   }
 
@@ -223,6 +288,11 @@ class SyncController extends ChangeNotifier {
 
   void _tick() {
     if (_disposed) return;
+    if (serving &&
+        pairingExpires != null &&
+        !pairingExpires!.isAfter(DateTime.now())) {
+      refreshCode();
+    }
     final generation = workspace.store.snapshot.generation;
     if (generation != _seenReaderGeneration) {
       _seenReaderGeneration = generation;
@@ -257,6 +327,8 @@ class SyncController extends ChangeNotifier {
       _changed();
       return;
     }
+    _lastSelectedRoot = root;
+    _autoStartAttemptedRoot = root;
     _serverBusy = true;
     serverMessage = null;
     _changed();
@@ -306,6 +378,7 @@ class SyncController extends ChangeNotifier {
     } finally {
       _serverBusy = false;
       _changed();
+      _maybeAutoStart();
     }
   }
 
@@ -314,19 +387,31 @@ class SyncController extends ChangeNotifier {
     if (port == null) return;
     final hosts = <String>{};
     try {
-      for (final interface in await NetworkInterface.list(
+      final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
-      )) {
+      );
+      interfaces.sort((a, b) {
+        int rank(String name) =>
+            RegExp(
+              r'wi-fi|wlan|wireless|无线',
+              caseSensitive: false,
+            ).hasMatch(name)
+            ? 0
+            : 1;
+        return rank(a.name).compareTo(rank(b.name));
+      });
+      for (final interface in interfaces) {
+        if (!PairingQr.isPhysicalInterface(interface.name)) continue;
         for (final address in interface.addresses) {
-          if (!address.isLoopback) hosts.add(address.address);
+          final uri = Uri(scheme: 'http', host: address.address, port: port);
+          if (PairingQr.isLanOrigin(uri)) hosts.add(address.address);
         }
       }
     } catch (_) {
-      /* Loopback remains available for same-computer testing. */
+      /* No reachable LAN address: show recovery guidance instead of loopback QR. */
     }
     addresses = [
       for (final host in hosts) Uri(scheme: 'http', host: host, port: port),
-      Uri(scheme: 'http', host: '127.0.0.1', port: port),
     ];
     _changed();
   }
@@ -394,34 +479,79 @@ class SyncController extends ChangeNotifier {
       _changed();
       return;
     }
+    await _pairOrigins([uri], code.trim());
+  }
+
+  Future<bool> pairFromQr(String text) async {
+    if (busy || initializationError != null || !initialized) return false;
+    PairingQr qr;
+    try {
+      qr = PairingQr.decode(text);
+    } catch (failure) {
+      phase = SyncPhase.failed;
+      message = failure is FormatException
+          ? failure.message.toString()
+          : '二维码无效，请扫描电脑上的新二维码。';
+      _changed();
+      return false;
+    }
+    return _pairOrigins(qr.origins, qr.code, quickConnect: true);
+  }
+
+  Future<bool> _pairOrigins(
+    List<Uri> origins,
+    String code, {
+    bool quickConnect = false,
+  }) async {
     busy = true;
     phase = SyncPhase.pairing;
     message = '正在连接电脑…';
     _changed();
     try {
-      final folder = _newId();
-      final client = await SyncClient.pair(
-        baseUri: uri,
-        code: code.trim(),
+      String? folder;
+      Object? lastFailure;
+      for (final origin in origins) {
+        final candidate = _newId();
+        try {
+          await SyncClient.pair(
+            baseUri: origin,
+            code: code,
+            stateDirectory: p.join(directory.path, 'clients', candidate),
+            ioTimeout: quickConnect && ioTimeout > const Duration(seconds: 5)
+                ? const Duration(seconds: 5)
+                : ioTimeout,
+          );
+          folder = candidate;
+          break;
+        } catch (failure) {
+          lastFailure = failure;
+        }
+      }
+      if (folder == null) {
+        throw lastFailure ?? StateError('No reachable computer');
+      }
+      final client = await SyncClient.open(
         stateDirectory: p.join(directory.path, 'clients', folder),
         ioTimeout: ioTimeout,
       );
       await _saveSettings({..._settings, 'clientFolder': folder});
       _client = client;
       phase = SyncPhase.idle;
-      message = '已配对。点击同步，下载全库并交换批注和曲单。';
+      message = '已记住这台电脑，以后点击“立即同步”即可。';
+      return true;
     } on SyncProtocolException catch (failure) {
       phase = SyncPhase.failed;
       message = failure.status == 403
-          ? '配对码无效、已使用或已过期，请在电脑刷新配对码后重试。'
+          ? '二维码或配对码已使用、无效或已过期，请在电脑点击“更新二维码”后重扫。'
           : '电脑拒绝配对，请检查服务状态后重试。';
     } catch (_) {
       phase = SyncPhase.failed;
-      message = '连接失败。请检查电脑地址、同一Wi-Fi、电脑服务和局域网权限，再重试。';
+      message = '未能连接电脑。请让两台设备连接同一Wi-Fi，保持电脑阅读器打开，并允许本地网络访问后重扫。';
     } finally {
       busy = false;
       _changed();
     }
+    return false;
   }
 
   Future<void> synchronize() async {

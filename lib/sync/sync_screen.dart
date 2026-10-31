@@ -3,19 +3,26 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:reader_state/reader_state.dart';
 
 import '../reader/annotation_canvas.dart';
 import 'sync_controller.dart';
+import 'qr_scanner.dart';
 
 class SyncScreen extends StatefulWidget {
   const SyncScreen({
     super.key,
     required this.controller,
     required this.openOffline,
+    this.scanOnOpen = false,
+    this.syncOnOpen = false,
   });
   final SyncController controller;
   final VoidCallback openOffline;
+  final bool scanOnOpen;
+  final bool syncOnOpen;
   @override
   State<SyncScreen> createState() => _SyncScreenState();
 }
@@ -25,6 +32,46 @@ class _SyncScreenState extends State<SyncScreen> {
     text: widget.controller.computerAddress?.toString() ?? '',
   );
   final TextEditingController _code = TextEditingController();
+  bool _scanning = false;
+  String? _scanMessage;
+  bool get _desktop =>
+      defaultTargetPlatform != TargetPlatform.iOS &&
+      defaultTargetPlatform != TargetPlatform.android;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (widget.scanOnOpen) unawaited(_scan());
+      if (widget.syncOnOpen) unawaited(widget.controller.synchronize());
+    });
+  }
+
+  Future<void> _scan() async {
+    if (_scanning || widget.controller.busy) return;
+    setState(() {
+      _scanning = true;
+      _scanMessage = null;
+    });
+    try {
+      final value = await QrScanner.scan();
+      if (!mounted || value == null) return;
+      final paired = await widget.controller.pairFromQr(value);
+      if (paired && mounted) await widget.controller.synchronize();
+    } on PlatformException catch (failure) {
+      if (mounted) {
+        setState(
+          () => _scanMessage = failure.message ?? '无法打开相机，请在设置中允许相机访问后重试。',
+        );
+      }
+    } on MissingPluginException {
+      if (mounted) setState(() => _scanMessage = '请使用支持扫码的新版本iPad阅读器。');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
   @override
   void dispose() {
     _address.dispose();
@@ -44,11 +91,37 @@ class _SyncScreenState extends State<SyncScreen> {
           children: [
             if (sync.initializationError != null)
               _status(sync.initializationError!),
-            if (defaultTargetPlatform != TargetPlatform.iOS &&
-                defaultTargetPlatform != TargetPlatform.android)
-              _card('这台电脑提供谱库', [
+            if (_desktop)
+              _card('连接我的 iPad', [
                 Text(sync.library.rootPath ?? '请先返回谱库选择源文件夹。'),
                 const SizedBox(height: 12),
+                const Text(
+                  '电脑和iPad连接同一Wi-Fi。在iPad首页点击“扫描电脑二维码”，对准下方即可。以后只需保持电脑阅读器打开，在iPad点击“立即同步”。',
+                ),
+                if (sync.serving && sync.pairingQr != null)
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 360),
+                        child: AspectRatio(
+                          aspectRatio: 1,
+                          child: QrImageView(
+                            data: sync.pairingQr!,
+                            backgroundColor: Colors.white,
+                            padding: const EdgeInsets.all(20),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (sync.serving && sync.pairingQr == null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 20),
+                    child: Text(
+                      '暂未找到可用的Wi-Fi或有线网络。请将电脑连接到与iPad相同的网络，再点击“更新二维码”。',
+                    ),
+                  ),
                 Wrap(
                   spacing: 12,
                   runSpacing: 8,
@@ -57,24 +130,18 @@ class _SyncScreenState extends State<SyncScreen> {
                       onPressed:
                           sync.serverBusy || sync.initializationError != null
                           ? null
-                          : () => unawaited(
-                              sync.serving
-                                  ? sync.stopServer()
-                                  : sync.startServer(),
-                            ),
-                      icon: Icon(sync.serving ? Icons.stop : Icons.wifi),
-                      label: Text(sync.serving ? '关闭服务' : '开启局域网服务'),
+                          : () => unawaited(sync.connectMyIpad()),
+                      icon: Icon(
+                        sync.serverBusy ? Icons.hourglass_top : Icons.qr_code,
+                      ),
+                      label: Text(
+                        sync.serverBusy
+                            ? '正在准备连接…'
+                            : sync.serving
+                            ? '更新二维码'
+                            : '显示连接二维码',
+                      ),
                     ),
-                    if (sync.serving)
-                      OutlinedButton(
-                        onPressed: sync.refreshCode,
-                        child: const Text('刷新配对码'),
-                      ),
-                    if (sync.serving)
-                      TextButton(
-                        onPressed: () => unawaited(sync.refreshAddresses()),
-                        child: const Text('刷新本机地址'),
-                      ),
                   ],
                 ),
                 if (sync.serverMessage != null)
@@ -82,67 +149,94 @@ class _SyncScreenState extends State<SyncScreen> {
                     padding: const EdgeInsets.only(top: 12),
                     child: Text(sync.serverMessage!),
                   ),
-                if (sync.serving) ...[
-                  const SizedBox(height: 16),
-                  const Text('在阅读设备上填写其中一个电脑地址：'),
-                  for (final address in sync.addresses)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: SelectableText(address.toString()),
-                      subtitle: Text(
-                        address.host == '127.0.0.1'
-                            ? '仅供这台电脑内的另一实例测试'
-                            : '本机网络地址；阅读设备需处于可互通的局域网',
-                      ),
-                    ),
-                  SelectableText(
-                    '配对码：${sync.pairingCode ?? ''}',
-                    style: const TextStyle(
-                      fontSize: 25,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 3,
-                    ),
+                const SizedBox(height: 8),
+                const Text('二维码2分钟有效、使用一次失效；未使用时会自动更新。请只让自己的iPad扫描。'),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('下次打开阅读器，自动连接我的 iPad'),
+                  value: sync.autoStartServer,
+                  onChanged: sync.serverBusy
+                      ? null
+                      : (value) => unawaited(sync.setAutoStartServer(value)),
+                ),
+                if (sync.serving)
+                  TextButton(
+                    onPressed: sync.serverBusy
+                        ? null
+                        : () => unawaited(sync.stopServer()),
+                    child: const Text('暂时停止连接'),
                   ),
-                  const Text('配对码2分钟有效，成功使用一次即失效；过期请刷新。'),
-                ],
               ]),
-            _card('连接电脑', [
-              const Text('与电脑连接同一可信Wi-Fi，在电脑开启服务后填写地址和配对码。资料通过本地网络传输。'),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _address,
-                enabled: !sync.busy,
-                keyboardType: TextInputType.url,
-                autocorrect: false,
-                decoration: const InputDecoration(
-                  labelText: '电脑地址与端口',
-                  hintText: 'http://192.168.1.8:50000',
-                  border: OutlineInputBorder(),
+            if (!_desktop)
+              _card(sync.paired ? '我的电脑已连接' : '扫描电脑二维码', [
+                Text(
+                  sync.paired
+                      ? '已经记住电脑。保持电脑阅读器打开，点击“立即同步”即可。电脑换网络后，可重新扫码更新连接；已有离线谱库会保留。'
+                      : '先在电脑阅读器首页点击“连接我的 iPad”，再扫描电脑上出现的二维码。只需操作一次，资料通过同一Wi-Fi传输。',
                 ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _code,
-                enabled: !sync.busy,
-                keyboardType: TextInputType.number,
-                maxLength: 8,
-                decoration: const InputDecoration(
-                  labelText: '8位临时配对码',
-                  border: OutlineInputBorder(),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed:
+                      sync.busy || _scanning || sync.initializationError != null
+                      ? null
+                      : () => unawaited(_scan()),
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: Text(
+                    _scanning
+                        ? '正在连接…'
+                        : sync.paired
+                        ? '重新扫描电脑二维码'
+                        : '扫描电脑二维码',
+                  ),
                 ),
-              ),
-              FilledButton(
-                onPressed: sync.busy || sync.initializationError != null
-                    ? null
-                    : () => unawaited(sync.pair(_address.text, _code.text)),
-                child: Text(sync.paired ? '重新配对' : '配对电脑'),
-              ),
-              if (sync.paired)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Text('已保存连接：${sync.computerAddress}；重开后可直接同步。'),
+                if (_scanMessage != null) _status(_scanMessage!),
+              ]),
+            ExpansionTile(
+              title: const Text('高级诊断（通常不需要）'),
+              childrenPadding: const EdgeInsets.all(16),
+              children: [
+                if (_desktop) ...[
+                  for (final address in sync.addresses)
+                    SelectableText(address.toString()),
+                  if (sync.serving)
+                    SelectableText('临时配对码：${sync.pairingCode ?? ''}'),
+                ],
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _address,
+                  enabled: !sync.busy,
+                  keyboardType: TextInputType.url,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: '电脑地址与端口',
+                    hintText: 'http://192.168.1.8:50000',
+                    border: OutlineInputBorder(),
+                  ),
                 ),
-            ]),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _code,
+                  enabled: !sync.busy,
+                  keyboardType: TextInputType.number,
+                  maxLength: 8,
+                  decoration: const InputDecoration(
+                    labelText: '8位临时配对码',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                FilledButton(
+                  onPressed: sync.busy || sync.initializationError != null
+                      ? null
+                      : () => unawaited(sync.pair(_address.text, _code.text)),
+                  child: Text(sync.paired ? '重新配对' : '配对电脑'),
+                ),
+                if (sync.paired)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text('已保存连接：${sync.computerAddress}；重开后可直接同步。'),
+                  ),
+              ],
+            ),
             _card('全库离线副本', [
               Text(
                 sync.hasOfflineLibrary
@@ -159,7 +253,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         ? null
                         : () => unawaited(sync.synchronize()),
                     icon: const Icon(Icons.sync),
-                    label: const Text('同步全库、批注和曲单'),
+                    label: const Text('立即同步'),
                   ),
                   OutlinedButton(
                     onPressed: sync.hasOfflineLibrary
