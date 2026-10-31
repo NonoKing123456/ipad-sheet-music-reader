@@ -235,6 +235,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: ReaderStage(
+        hasReadablePage: _ready,
         onToolsVisibilityChanged: (visible) {
           setState(() => _toolsVisible = visible);
           if (!visible) _resetViewport();

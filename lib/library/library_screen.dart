@@ -45,6 +45,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   ReaderWorkspace? _workspace;
   Future<ReaderWorkspace>? _workspaceFuture;
   bool _openingReader = false;
+  LibrarySnapshot? _setListCatalogSnapshot;
+  List<ScoreCatalogEntry> _setListCatalog = const [];
   SyncController? _sync;
   Future<SyncController>? _syncFuture;
   bool get _canProvideLibrary =>
@@ -233,6 +235,50 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (_locate(entry.id) case final ScoreTarget target) target,
   ];
 
+  List<ScoreCatalogEntry> _catalogEntries() {
+    final library = _library!, snapshot = library.snapshot;
+    if (identical(snapshot, _setListCatalogSnapshot)) return _setListCatalog;
+    _setListCatalogSnapshot = snapshot;
+    final online = {
+      for (final source in library.sources) source.id: source.online,
+    };
+    _setListCatalog = List.unmodifiable([
+      for (final entry in snapshot?.entries ?? <LibraryEntry>[])
+        ScoreCatalogEntry(
+          entryId: entry.id,
+          displayPath: entry.relativePath,
+          sourceId: library.sourceIdFor(entry),
+          sourceName: library.sourceNameFor(entry),
+          parentFolderLabel:
+              '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
+          state: entry.status == EntryStatus.missing
+              ? ScoreContentState.missing
+              : online[library.sourceIdFor(entry)] == false
+              ? ScoreContentState.sourceOffline
+              : entry.availability == ContentAvailability.ready
+              ? ScoreContentState.ready
+              : ScoreContentState.unprepared,
+          bytes: entry.currentRevision.size,
+        ),
+    ]);
+    return _setListCatalog;
+  }
+
+  Future<String> _prepareScores(Set<String> ids) async {
+    var ready = 0, unavailable = 0;
+    for (final id in ids) {
+      try {
+        await _library!.ensureReady(id);
+        ready++;
+      } catch (_) {
+        unavailable++;
+      }
+    }
+    return unavailable == 0
+        ? '本次所选曲谱已准备。'
+        : '$ready 份已准备，$unavailable 份尚不可读；曲单内容已保留。';
+  }
+
   Future<ReaderWorkspace> _prepareReader() => _workspaceFuture ??= (() async {
     try {
       final workspace =
@@ -274,6 +320,14 @@ class _LibraryScreenState extends State<LibraryScreen>
             workspace: workspace,
             locate: sync?.locateOffline ?? _locate,
             targets: sync == null ? _targets : () => sync.offlineTargets,
+            catalog: sync == null
+                ? _catalogEntries
+                : () => sync.offlineScoreCatalog,
+            prepare: sync == null ? _prepareScores : sync.prepareOfflineScores,
+            preparationLabel: sync == null ? '准备本曲单' : '下载本曲单缺少内容',
+            preparationNotice: sync == null
+                ? '只准备本曲单所需的本机文件。'
+                : '需要电脑在线。离线时会记住所选曲目，连接后再准备。',
             loader: sync == null ? _loadLocalTarget : null,
             sourceChanges: sync ?? _library,
           ),

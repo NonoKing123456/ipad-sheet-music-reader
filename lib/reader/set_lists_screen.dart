@@ -64,12 +64,19 @@ class SetListsScreen extends StatelessWidget {
     required this.targets,
     this.sourceChanges,
     this.loader,
+    this.catalog,
+    this.prepare,
+    this.preparationLabel = '准备本曲单',
+    this.preparationNotice = '只准备本曲单所需文件，不会下载整个谱库。',
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
   final List<ScoreTarget> Function() targets;
   final Listenable? sourceChanges;
   final ScoreLoader? loader;
+  final ScoreCatalogProvider? catalog;
+  final ScorePreparation? prepare;
+  final String preparationLabel, preparationNotice;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: workspace,
@@ -126,6 +133,10 @@ class SetListsScreen extends StatelessWidget {
                                 targets: targets,
                                 sourceChanges: sourceChanges,
                                 loader: loader,
+                                catalog: catalog,
+                                prepare: prepare,
+                                preparationLabel: preparationLabel,
+                                preparationNotice: preparationNotice,
                               ),
                             ),
                           ),
@@ -148,6 +159,10 @@ class _SetListDetail extends StatelessWidget {
     required this.targets,
     this.sourceChanges,
     this.loader,
+    this.catalog,
+    this.prepare,
+    this.preparationLabel = '准备本曲单',
+    this.preparationNotice = '只准备本曲单所需文件，不会下载整个谱库。',
   });
   final ReaderWorkspace workspace;
   final String listId;
@@ -155,21 +170,109 @@ class _SetListDetail extends StatelessWidget {
   final List<ScoreTarget> Function() targets;
   final Listenable? sourceChanges;
   final ScoreLoader? loader;
+  final ScoreCatalogProvider? catalog;
+  final ScorePreparation? prepare;
+  final String preparationLabel, preparationNotice;
+  List<ScoreCatalogEntry> _catalogEntries() =>
+      catalog?.call() ?? targets().map(ScoreCatalogEntry.fromTarget).toList();
 
-  Future<void> _open(BuildContext context, SetListItem item) async {
-    final target = locate(item.entryId);
-    if (target == null) {
+  Future<void> _prepare(BuildContext context, Set<String> ids) async {
+    final callback = prepare;
+    if (callback == null) return;
+    final entries = {
+      for (final entry in _catalogEntries()) entry.entryId: entry,
+    };
+    final needed = ids
+        .map((id) => entries[id])
+        .whereType<ScoreCatalogEntry>()
+        .where((entry) => entry.needsPreparation)
+        .toList();
+    if (needed.isEmpty) return;
+    final known = needed.every((entry) => entry.bytes != null);
+    final bytes = needed.fold<int>(
+      0,
+      (total, entry) => total + (entry.bytes ?? 0),
+    );
+    final size = !known
+        ? '体积未知'
+        : bytes >= 1024 * 1024
+        ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+        : '${(bytes / 1024).toStringAsFixed(1)} KB';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('准备曲单曲谱'),
+        content: Text('${needed.length} 份曲谱 · $size\n$preparationNotice'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('开始准备'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    String message;
+    try {
+      message = await callback(needed.map((entry) => entry.entryId).toSet());
+    } catch (_) {
+      message = '准备尚未完成，曲单已保留；请检查连接、来源和空间后重试。';
+    }
+    if (context.mounted) {
+      final current = {
+        for (final entry in _catalogEntries()) entry.entryId: entry,
+      };
+      final unready = workspace.store.snapshot
+          .setListById(listId)!
+          .activeItems
+          .map((item) => item.entryId)
+          .toSet()
+          .where((id) => current[id]?.readable != true)
+          .length;
+      if (unready > 0) message = '$message 本曲单仍有$unready份未准备。';
       ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('这份曲谱暂时缺失，请返回谱库检查。')));
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  Future<void> _open(
+    BuildContext context,
+    SetListItem item,
+    ScoreCatalogEntry? metadata,
+  ) async {
+    if (metadata?.state == ScoreContentState.missing ||
+        metadata?.state == ScoreContentState.sourceOffline) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${metadata!.statusLabel}，请先恢复来源；曲单关联已保留。')),
+      );
       return;
     }
+    var target = locate(item.entryId);
+    if (target == null &&
+        metadata?.needsPreparation == true &&
+        prepare != null) {
+      await _prepare(context, {item.entryId});
+      if (!context.mounted) return;
+      target = locate(item.entryId);
+    }
+    if (target == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('这份曲谱尚未准备，请连接电脑更新目录并准备本曲单。')),
+      );
+      return;
+    }
+    final ready = target;
     await Navigator.push(
       context,
       MaterialPageRoute<void>(
         builder: (_) => LibraryReaderScreen(
           workspace: workspace,
           locate: locate,
-          initialTarget: target,
+          initialTarget: ready,
           setListId: listId,
           itemId: item.id,
           sourceChanges: sourceChanges,
@@ -185,6 +288,19 @@ class _SetListDetail extends StatelessWidget {
     builder: (context, _) {
       final list = workspace.store.snapshot.setListById(listId)!;
       final items = list.activeItems;
+      final metadata = {
+        for (final entry in _catalogEntries()) entry.entryId: entry,
+      };
+      final unique = items.map((item) => item.entryId).toSet();
+      final unready = unique
+          .where((id) => metadata[id]?.readable != true)
+          .length;
+      final old = unique
+          .where((id) => metadata[id]?.state == ScoreContentState.readableOld)
+          .length;
+      final needed = unique
+          .where((id) => metadata[id]?.needsPreparation == true)
+          .toSet();
       return Scaffold(
         appBar: AppBar(
           title: Text(list.name),
@@ -211,7 +327,7 @@ class _SetListDetail extends StatelessWidget {
             builder: (_) => _AddScores(
               workspace: workspace,
               listId: listId,
-              targets: targets(),
+              targets: _catalogEntries(),
             ),
           ),
           icon: const Icon(Icons.playlist_add),
@@ -229,18 +345,31 @@ class _SetListDetail extends StatelessWidget {
               ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              child: Row(
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  Expanded(
-                    child: Text(
-                      '${items.length} 首 · 拖动右侧手柄排序',
-                      style: const TextStyle(color: Color(0xff65736b)),
-                    ),
+                  Text(
+                    '${items.length} 首 · $unready 份未准备${old > 0 ? ' · $old 份旧版可读' : ''}',
+                    style: const TextStyle(color: Color(0xff65736b)),
                   ),
+                  if (prepare != null && needed.isNotEmpty)
+                    TextButton.icon(
+                      onPressed: () => unawaited(_prepare(context, needed)),
+                      icon: const Icon(Icons.download_outlined),
+                      label: Text(preparationLabel),
+                    ),
                   FilledButton.icon(
                     onPressed: items.isEmpty
                         ? null
-                        : () => unawaited(_open(context, items.first)),
+                        : () => unawaited(
+                            _open(
+                              context,
+                              items.first,
+                              metadata[items.first.entryId],
+                            ),
+                          ),
                     icon: const Icon(Icons.play_arrow),
                     label: const Text('顺序阅读'),
                   ),
@@ -267,14 +396,14 @@ class _SetListDetail extends StatelessWidget {
                       },
                       itemBuilder: (context, index) {
                         final item = items[index];
-                        final target = locate(item.entryId);
+                        final target = metadata[item.entryId];
                         return Card(
                           key: ValueKey(item.id),
                           child: ListTile(
                             leading: CircleAvatar(child: Text('${index + 1}')),
                             title: Text(
                               target == null
-                                  ? '暂时缺失的曲谱'
+                                  ? '目录尚未更新的曲谱'
                                   : p.posix.basename(
                                       target.displayPath.replaceAll('\\', '/'),
                                     ),
@@ -283,16 +412,44 @@ class _SetListDetail extends StatelessWidget {
                             ),
                             subtitle: Text(
                               target == null
-                                  ? '保留原曲谱关联，恢复文件后可以继续使用。'
-                                  : target.parentFolderLabel ??
-                                        scoreParentFolder(target.displayPath),
+                                  ? '请更新目录，原曲谱关联仍保留。'
+                                  : '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            onTap: () => unawaited(_open(context, item)),
+                            onTap: () =>
+                                unawaited(_open(context, item, target)),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                if (target != null)
+                                  Tooltip(
+                                    message: target.statusLabel,
+                                    child: Icon(
+                                      target.state == ScoreContentState.ready
+                                          ? Icons.check_circle_outline
+                                          : target.state ==
+                                                ScoreContentState.readableOld
+                                          ? Icons.update
+                                          : target.state ==
+                                                    ScoreContentState.missing ||
+                                                target.state ==
+                                                    ScoreContentState
+                                                        .sourceOffline
+                                          ? Icons.error_outline
+                                          : Icons.cloud_download_outlined,
+                                      size: 18,
+                                    ),
+                                  ),
+                                if (prepare != null &&
+                                    target?.needsPreparation == true)
+                                  IconButton(
+                                    tooltip: '准备这份曲谱',
+                                    icon: const Icon(Icons.download_outlined),
+                                    onPressed: () => unawaited(
+                                      _prepare(context, {item.entryId}),
+                                    ),
+                                  ),
                                 IconButton(
                                   tooltip: '从曲单移除',
                                   onPressed: () => unawaited(
@@ -332,7 +489,7 @@ class _AddScores extends StatefulWidget {
   });
   final ReaderWorkspace workspace;
   final String listId;
-  final List<ScoreTarget> targets;
+  final List<ScoreCatalogEntry> targets;
   @override
   State<_AddScores> createState() => _AddScoresState();
 }
@@ -409,8 +566,7 @@ class _AddScoresState extends State<_AddScores> {
                         ),
                       ),
                       subtitle: Text(
-                        target.parentFolderLabel ??
-                            scoreParentFolder(target.displayPath),
+                        '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),

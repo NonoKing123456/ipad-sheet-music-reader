@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'reader/reader_screen.dart';
+import 'reader/reader_stage.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
 
@@ -62,6 +63,7 @@ class ScoreReaderApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '曲谱阅读器',
+      navigatorObservers: [readerRouteVisibility],
       debugShowCheckedModeBanner: false,
       locale: const Locale('zh', 'CN'),
       supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],

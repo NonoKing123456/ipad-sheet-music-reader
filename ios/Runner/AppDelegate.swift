@@ -11,6 +11,7 @@ import AVFoundation
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var scannerChannel: FlutterMethodChannel?
   private var rasterChannel: FlutterMethodChannel?
+  private var readerActivityChannel: FlutterMethodChannel?
   private var scanPending = false
   override func application(
     _ application: UIApplication,
@@ -28,6 +29,15 @@ import AVFoundation
     rasterChannel = raster
     raster.setMethodCallHandler { call, result in
       RasterDecodeBridge.shared.handle(call, result: result)
+    }
+
+    let activity = FlutterMethodChannel(
+      name: "score_reader/reader_activity",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    readerActivityChannel = activity
+    activity.setMethodCallHandler { call, result in
+      ReaderWakeBridge.shared.handle(call, result: result)
     }
 
     let channel = FlutterMethodChannel(
@@ -175,6 +185,39 @@ private final class PairingScannerController: UIViewController, AVCaptureMetadat
   }
 }
 
+
+/// Only visible foreground readers hold tokens. One old route cannot release
+/// another route's wake request, and UIKit backgrounding independently restores
+/// the normal idle timer even before Dart receives its lifecycle notification.
+private final class ReaderWakeBridge: NSObject {
+  static let shared = ReaderWakeBridge()
+  private var owners = Set<String>()
+  private var foreground = UIApplication.shared.applicationState == .active
+  override init() {
+    super.init()
+    NotificationCenter.default.addObserver(self, selector: #selector(resign), name: UIApplication.willResignActiveNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(resign), name: UIApplication.didEnterBackgroundNotification, object: nil)
+    NotificationCenter.default.addObserver(self, selector: #selector(activate), name: UIApplication.didBecomeActiveNotification, object: nil)
+  }
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard call.method == "setReaderActive" else { result(FlutterMethodNotImplemented); return }
+    guard let arguments = call.arguments as? [String: Any],
+          let token = arguments["token"] as? String,
+          let active = arguments["active"] as? Bool else {
+      result(FlutterError(code: "invalid_reader_activity", message: "Invalid reader activity", details: nil)); return
+    }
+    DispatchQueue.main.async {
+      if active { self.owners.insert(token) } else { self.owners.remove(token) }
+      self.apply()
+      result(nil)
+    }
+  }
+  @objc private func resign() { foreground = false; apply() }
+  @objc private func activate() { foreground = true; apply() }
+  private func apply() {
+    UIApplication.shared.isIdleTimerDisabled = foreground && !owners.isEmpty && UIApplication.shared.applicationState == .active
+  }
+}
 
 /// ImageIO streaming downsample for sources larger than the Flutter pixel
 /// budget. The source is never rewritten. Only a target-sized, temporary PNG

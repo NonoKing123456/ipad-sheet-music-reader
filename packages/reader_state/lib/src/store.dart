@@ -135,17 +135,20 @@ class ReaderStateStore {
       _enqueue(() async {
         final requested =
             rebuild?.call(_snapshot.strokesFor(page)) ?? replacements;
-        final strokes = List<AnnotationStroke>.of(_snapshot.pages[page] ?? []);
+        final strokes = <AnnotationStroke>[];
         final edits = <_StrokeEdit>[];
         final now = DateTime.now().toUtc();
-        for (final entry in requested.entries) {
-          final index =
-              strokes.indexWhere((s) => s.id == entry.key && !s.isDeleted);
-          if (index < 0) continue;
-          final original = strokes[index];
-          strokes[index] = original.withDeletion(true, now);
+        for (final original in _snapshot.pages[page] ?? <AnnotationStroke>[]) {
+          final paths = requested[original.id];
+          if (paths == null || original.isDeleted) {
+            strokes.add(original);
+            continue;
+          }
+          // Keep the tombstone as an order anchor and insert its replacement
+          // fragments here, below every stroke that was painted above it.
+          strokes.add(original.withDeletion(true, now));
           edits.add(_StrokeEdit(original.id, false, true));
-          for (final points in entry.value.where((p) => p.isNotEmpty)) {
+          for (final points in paths.where((p) => p.isNotEmpty)) {
             final fragment = AnnotationStroke(
                 id: _newId(),
                 style: original.style,

@@ -9,6 +9,52 @@ bool get isMobileReader =>
     defaultTargetPlatform == TargetPlatform.android;
 bool get canPreviewReader => defaultTargetPlatform == TargetPlatform.windows;
 
+/// Root navigation visibility distinguishes opaque pages from local popups.
+class ReaderRouteVisibilityObserver extends NavigatorObserver
+    with ChangeNotifier {
+  final _routes = <Route<dynamic>>[];
+  bool isVisible(Route<dynamic>? route) {
+    final index = route == null ? -1 : _routes.indexOf(route);
+    if (index < 0) return false;
+    return !_routes
+        .skip(index + 1)
+        .any((next) => next is ModalRoute && next.opaque);
+  }
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute == null) _routes.clear();
+    _routes.add(route);
+    notifyListeners();
+  }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _routes.remove(route);
+    notifyListeners();
+  }
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    _routes.remove(route);
+    notifyListeners();
+  }
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    final index = oldRoute == null ? -1 : _routes.indexOf(oldRoute);
+    if (index >= 0) _routes.removeAt(index);
+    if (newRoute != null) {
+      _routes.insert(index < 0 ? _routes.length : index, newRoute);
+    }
+    notifyListeners();
+  }
+}
+
+final readerRouteVisibility = ReaderRouteVisibilityObserver();
+const _readerActivityChannel = MethodChannel('score_reader/reader_activity');
+int _readerWakeSerial = 0;
+
 /// Controls float above the unchanged full viewport. They never resize paper.
 class ReaderStage extends StatefulWidget {
   const ReaderStage({
@@ -53,6 +99,42 @@ class _ReaderStageState extends State<ReaderStage>
   late final AnimationController _animation;
   late final Animation<double> _curve;
   bool _reduceMotion = false;
+  final _wakeToken = 'reader-${++_readerWakeSerial}';
+  ModalRoute<dynamic>? _route;
+  bool _wakeHeld = false;
+  bool _foreground =
+      (WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed) ==
+      AppLifecycleState.resumed;
+
+  void _setWake(bool value) {
+    if (defaultTargetPlatform != TargetPlatform.iOS || value == _wakeHeld) {
+      return;
+    }
+    _wakeHeld = value;
+    unawaited(
+      _readerActivityChannel
+          .invokeMethod<void>('setReaderActive', {
+            'token': _wakeToken,
+            'active': value,
+          })
+          .catchError((Object _) {
+            debugPrint('READER keep_awake_unavailable');
+          }),
+    );
+  }
+
+  void _updateWake() => _setWake(
+    widget.hasReadablePage &&
+        _foreground &&
+        readerRouteVisibility.isVisible(_route),
+  );
+
+  @override
+  void didUpdateWidget(covariant ReaderStage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _updateWake();
+  }
+
   void _toggle() => _show(!_tools);
   void _show(bool show) {
     setState(() => _tools = show);
@@ -67,6 +149,8 @@ class _ReaderStageState extends State<ReaderStage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _route = ModalRoute.of(context);
+    _updateWake();
     _reduceMotion = MediaQuery.disableAnimationsOf(context);
     if (_reduceMotion) _animation.value = _tools ? 1 : 0;
   }
@@ -85,6 +169,7 @@ class _ReaderStageState extends State<ReaderStage>
       reverseCurve: Curves.easeInCubic,
     );
     WidgetsBinding.instance.addObserver(this);
+    readerRouteVisibility.addListener(_updateWake);
     FocusManager.instance.addEarlyKeyEventHandler(_pageKey);
     _immerse();
   }
@@ -131,11 +216,15 @@ class _ReaderStageState extends State<ReaderStage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _immerse();
+    _foreground = state == AppLifecycleState.resumed;
+    _updateWake();
+    if (_foreground) _immerse();
   }
 
   @override
   void dispose() {
+    _setWake(false);
+    readerRouteVisibility.removeListener(_updateWake);
     WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeEarlyKeyEventHandler(_pageKey);
     _animation.dispose();

@@ -37,6 +37,56 @@ class ScoreTarget {
   DocumentKey get key => DocumentKey(entryId: entryId, revisionId: revisionId);
 }
 
+enum ScoreContentState {
+  ready,
+  notDownloaded,
+  unprepared,
+  readableOld,
+  missing,
+  sourceOffline,
+}
+
+/// Catalog identity does not imply that local bytes are ready to open.
+class ScoreCatalogEntry {
+  const ScoreCatalogEntry({
+    required this.entryId,
+    required this.displayPath,
+    required this.state,
+    this.parentFolderLabel,
+    this.sourceId,
+    this.sourceName = '谱库',
+    this.bytes,
+  });
+  factory ScoreCatalogEntry.fromTarget(ScoreTarget target) => ScoreCatalogEntry(
+    entryId: target.entryId,
+    displayPath: target.displayPath,
+    parentFolderLabel: target.parentFolderLabel,
+    state: ScoreContentState.ready,
+  );
+  final String entryId, displayPath, sourceName;
+  final String? parentFolderLabel, sourceId;
+  final ScoreContentState state;
+  final int? bytes;
+  bool get readable =>
+      state == ScoreContentState.ready ||
+      state == ScoreContentState.readableOld;
+  bool get needsPreparation =>
+      state == ScoreContentState.notDownloaded ||
+      state == ScoreContentState.unprepared ||
+      state == ScoreContentState.readableOld;
+  String get statusLabel => switch (state) {
+    ScoreContentState.ready => '已准备',
+    ScoreContentState.notDownloaded => '未下载',
+    ScoreContentState.unprepared => '待准备',
+    ScoreContentState.readableOld => '离线旧版可读，有更新待下载',
+    ScoreContentState.missing => '源曲谱缺失',
+    ScoreContentState.sourceOffline => '来源暂离线',
+  };
+}
+
+typedef ScoreCatalogProvider = List<ScoreCatalogEntry> Function();
+typedef ScorePreparation = Future<String> Function(Set<String> entryIds);
+
 class LoadedScore {
   LoadedScore({
     required this.target,

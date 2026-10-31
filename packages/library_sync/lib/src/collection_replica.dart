@@ -297,14 +297,25 @@ class ReplicaCollectionView {
         }));
   }
 
-  Future<void> select(OfflineRule rule) async {
+  Future<void> select(OfflineRule rule) => selectMany([rule]);
+
+  /// Apply explicit item selections in one durable write; unrelated rules keep
+  /// their order and intent. Last rule still wins exactly as before.
+  Future<void> selectMany(Iterable<OfflineRule> rules) async {
+    final updates = <(String, String?, String?), OfflineRule>{};
+    for (final rule in rules) {
+      final key = (rule.sourceId, rule.folder, rule.entryId);
+      updates.remove(key); updates[key] = rule;
+    }
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
     try {
-      selection = selection.withRule(rule);
+      selection = OfflineSelection([
+        for (final old in selection.rules)
+          if (!updates.containsKey((old.sourceId, old.folder, old.entryId))) old,
+        ...updates.values,
+      ]);
       await _persist();
-    } finally {
-      await lease.close();
-    }
+    } finally { await lease.close(); }
   }
 
   Future<void> receive(CatalogItem item, Stream<List<int>> bytes,

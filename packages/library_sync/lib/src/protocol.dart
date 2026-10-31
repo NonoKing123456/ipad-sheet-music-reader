@@ -566,7 +566,8 @@ class SyncClient {
   /// v2 directory updates never imply downloading an unselected source. v1
   /// fallback remains confined to its original complete-library endpoint.
   Future<LibrarySyncResult> syncCollection(ReplicaCollectionView replica,
-      {SyncCancellation? cancellation,
+      {Set<String>? onlyEntryIds,
+      SyncCancellation? cancellation,
       FutureOr<void> Function(LibrarySyncProgress progress)?
           onProgress}) async {
     final http = HttpClient()..connectionTimeout = ioTimeout;
@@ -587,6 +588,10 @@ class SyncClient {
         index = CollectionIndex.fromJson(await _json(http, '/v2/catalog'));
       } on SyncProtocolException catch (e) {
         if (e.status != 404) rethrow;
+        // A v1 complete-manifest sync cannot promise a scoped download. Do not
+        // turn one set-list request into an unexpected whole-library transfer.
+        if (onlyEntryIds != null) return const LibrarySyncResult(
+          LibrarySyncStatus.partial, 0, 'Scoped preparation requires a v2 computer', LibrarySyncFailure.sourceNotReady);
         final result = await syncLibrary(replica.objects,
             cancellation: cancellation, onProgress: onProgress);
         if (result.status == LibrarySyncStatus.complete)
@@ -596,9 +601,14 @@ class SyncClient {
       cancellation?.check();
       await replica.updateIndex(index);
       final targets = index.entries
-          .where((e) => !e.missing && replica.selection.includes(e))
+          .where((e) => !e.missing && (onlyEntryIds == null || onlyEntryIds.contains(e.entryId)) && replica.selection.includes(e))
           .toList();
-      report(targets.length);
+      final eligible = targets.map((item) => item.entryId).toSet();
+      final unavailable = onlyEntryIds?.difference(eligible).length ?? 0;
+      final total = targets.length + unavailable;
+      failed = unavailable > 0;
+      processed = unavailable;
+      report(total);
       for (var item in targets) {
         cancellation?.check();
         if (!replica.selection.includes(item)) continue;
@@ -610,7 +620,7 @@ class SyncClient {
             if (!source.online) {
               failed = true;
               processed++;
-              report(targets.length);
+              report(total);
               continue;
             }
             final resolved =
@@ -628,7 +638,7 @@ class SyncClient {
                 !replica.selection.includes(item)) {
               failed = true;
               processed++;
-              report(targets.length);
+              report(total);
               continue;
             }
             if (!await replica.objects.hasVerifiedObject(item.object)) {
@@ -654,7 +664,7 @@ class SyncClient {
               error is FileSystemException) rethrow;
         }
         processed++;
-        report(targets.length);
+        report(total);
       }
       await replica.flush();
       return LibrarySyncResult(

@@ -388,6 +388,17 @@ class SyncConflictsScreen extends StatelessWidget {
   }
 
   Widget _variant(Map<String, Object?> json, String label, String kind) {
+    if (kind == 'strokeOrder') {
+      final count = (json['order'] as List? ?? const []).length;
+      final deleted = (json['deletedIds'] as List? ?? const []).length;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('笔迹叠放顺序有差异，双方记录已保留'),
+          Text('$label：$count 笔记录，${count - deleted} 笔可见'),
+        ],
+      );
+    }
     if (kind == 'setList') {
       final items = (json['items'] as List? ?? []).cast<Map>();
       return Column(
@@ -474,15 +485,16 @@ class SyncConflictsScreen extends StatelessWidget {
                             ),
                         ],
                       ),
-                      ExpansionTile(
-                        title: const Text('原始版本详情'),
-                        children: [
-                          SelectableText(
-                            const JsonEncoder.withIndent('  ')
-                                .convert(conflict.toJson()),
-                          ),
-                        ],
-                      ),
+                      if (conflict.kind != 'strokeOrder')
+                        ExpansionTile(
+                          title: const Text('原始版本详情'),
+                          children: [
+                            SelectableText(
+                              const JsonEncoder.withIndent('  ')
+                                  .convert(conflict.toJson()),
+                            ),
+                          ],
+                        ),
                     ],
                   ),
                 ),

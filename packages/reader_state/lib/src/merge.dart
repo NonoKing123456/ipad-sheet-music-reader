@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:collection';
 import 'package:crypto/crypto.dart';
 import 'models.dart';
 
@@ -53,14 +54,12 @@ ReaderMergeResult mergeReaderSnapshots(
     required ReaderSnapshot remote,
     required String peerId,
     String? operationId}) {
-  final conflicts = <String, MergeConflict>{
-    for (final c in [
-      ...base.conflicts,
-      ...local.conflicts,
-      ...remote.conflicts
-    ])
-      c.id: c
-  };
+  final conflicts = <String, MergeConflict>{};
+  for (final c in [...base.conflicts, ...local.conflicts, ...remote.conflicts]) {
+    final prior = conflicts[c.id];
+    conflicts[c.id] = prior != null && prior.kind == 'strokeOrder' && c.kind == 'strokeOrder'
+        ? _unionOrderConflict(prior, c) : c;
+  }
   void conflict(
       String kind, String key, Map<String, Object?> a, Map<String, Object?> b) {
     final variants = [canonicalReaderJson(a), canonicalReaderJson(b)]..sort();
@@ -105,16 +104,44 @@ ReaderMergeResult mergeReaderSnapshots(
     Map<String, AnnotationStroke> index(ReaderSnapshot s) =>
         {for (final x in s.pages[page] ?? <AnnotationStroke>[]) x.id: x};
     final b = index(base), l = index(local), r = index(remote);
-    final ids = {...b.keys, ...l.keys, ...r.keys}.toList()..sort();
-    pages[page] = [
+    final ids = {...b.keys, ...l.keys, ...r.keys};
+    final merged = {
       for (final id in ids)
-        AnnotationStroke.fromJson(Map<String, dynamic>.from(choose(
+        id: AnnotationStroke.fromJson(Map<String, dynamic>.from(choose(
             'stroke',
             canonicalReaderJson([page.toJson(), id]),
             b[id]?.toJson(),
             l[id]?.toJson(),
             r[id]?.toJson())!))
-    ];
+    };
+    final before = base.pages[page] ?? <AnnotationStroke>[];
+    final left = local.pages[page] ?? <AnnotationStroke>[];
+    final right = remote.pages[page] ?? <AnnotationStroke>[];
+    final ordered = _mergeStrokeOrder(before, left, right, ids, () {
+      final knownGeometry = <String, Set<String>>{};
+      void remember(Map<String, Object?> json) {
+        final id = json['id'];
+        if (id is String && json['style'] is Map && json['points'] is List) {
+          knownGeometry.putIfAbsent(id, () => {}).add(_geometryKey(json));
+        }
+      }
+      for (final stroke in merged.values) { remember(stroke.toJson()); }
+      for (final prior in conflicts.values) {
+        if (prior.kind == 'stroke') {
+          remember(prior.first); remember(prior.second);
+        } else if (prior.kind == 'strokeOrder') {
+          for (final variant in [prior.first, prior.second]) {
+            for (final json in variant['strokeVariants'] as List? ?? const []) {
+              if (json is Map) remember(Map<String, Object?>.from(json));
+            }
+          }
+        }
+      }
+      conflict('strokeOrder', canonicalReaderJson([page.toJson()]),
+          _orderVariant(page, before, left, merged, knownGeometry),
+          _orderVariant(page, before, right, merged, knownGeometry));
+    });
+    pages[page] = [for (final id in ordered) merged[id]!];
   }
 
   Map<String, ScoreSetList> lists(ReaderSnapshot s) =>
@@ -211,6 +238,7 @@ ReaderMergeResult mergeReaderSnapshots(
         local.bookmarks[key]?.toJson(),
         remote.bookmarks[key]?.toJson())!));
   }
+  _retainOrderGeometry(conflicts, pages, [base, local, remote]);
   final allConflicts = conflicts.values.toList()
     ..sort((a, b) => a.id.compareTo(b.id));
   final snapshot = local.next(
@@ -223,4 +251,287 @@ ReaderMergeResult mergeReaderSnapshots(
         if (operationId != null) operationId
       });
   return ReaderMergeResult(snapshot, snapshot.conflicts);
+}
+
+
+String _geometryKey(Map<String, Object?> stroke) => sha256
+    .convert(utf8.encode(canonicalReaderJson([stroke['style'], stroke['points']])))
+    .toString();
+
+/// Order variants refer to the merged page/content conflicts, rather than
+/// duplicating every sampled point. Only otherwise unavailable geometry is
+/// included. Visibility and differing version counters allow either branch's
+/// visual state to be reconstructed without treating clocks as order authority.
+Map<String, Object?> _orderVariant(PageKey page, List<AnnotationStroke> base,
+    List<AnnotationStroke> branch, Map<String, AnnotationStroke> merged,
+    Map<String, Set<String>> knownGeometry) {
+  final refs = <String, String>{}, versions = <String, int>{};
+  final missing = <Map<String, Object?>>[];
+  for (final stroke in branch) {
+    final json = stroke.toJson(), key = _geometryKey(stroke.toJson());
+    refs[stroke.id] = key;
+    versions[stroke.id] = stroke.version;
+    if (!(knownGeometry[stroke.id]?.contains(key) ?? false)) missing.add(json);
+  }
+  return {
+    'page': page.toJson(),
+    'baseOrder': base.map((stroke) => stroke.id).toList(),
+    'order': branch.map((stroke) => stroke.id).toList(),
+    'deletedIds': branch.where((stroke) => stroke.isDeleted).map((stroke) => stroke.id).toList(),
+    if (refs.isNotEmpty) 'geometryRefs': refs,
+    if (versions.isNotEmpty) 'versions': versions,
+    if (missing.isNotEmpty) 'strokeVariants': missing,
+  };
+}
+
+List<String> _mergeStrokeOrder(List<AnnotationStroke> base,
+    List<AnnotationStroke> local, List<AnnotationStroke> remote,
+    Set<String> ids, void Function() conflict) {
+  List<String> order(List<AnnotationStroke> strokes) => strokes.map((s) => s.id).toList();
+  final bo = order(base), lo = order(local), ro = order(remote);
+  final baseRank = {for (var i = 0; i < bo.length; i++) bo[i]: i};
+  final graph = <String, Set<String>>{};
+  void chain(Map<String, Set<String>> edges, List<String> sequence) {
+    for (var i = 1; i < sequence.length; i++) {
+      edges.putIfAbsent(sequence[i - 1], () => {}).add(sequence[i]);
+    }
+  }
+  chain(graph, bo);
+  for (final branch in [lo, ro]) {
+    chain(graph, branch);
+    // A branch containing no base anchor is still derived from the shared
+    // ancestor; absence is not deletion. A new prefix before known base ink is
+    // likewise not silently accepted as evidence that it predates that ink.
+    if (bo.isNotEmpty && branch.isNotEmpty && !baseRank.containsKey(branch.first)) {
+      graph.putIfAbsent(bo.last, () => {}).add(branch.first);
+    }
+  }
+  final normal = _topologicalStrokeOrder(ids, graph);
+  if (normal != null) return normal;
+  conflict();
+
+  bool compatible(List<String> branch) {
+    var previous = -1;
+    final anchors = branch.where(baseRank.containsKey).toList();
+    if (anchors.isNotEmpty && branch.first != anchors.first) return false;
+    for (final id in anchors) {
+      final rank = baseRank[id]!;
+      if (rank <= previous) return false;
+      previous = rank;
+    }
+    return true;
+  }
+  final candidates = [lo, ro].where(compatible).toList();
+  candidates.sort((a, b) {
+    final anchorsA = a.where(baseRank.containsKey).length;
+    final anchorsB = b.where(baseRank.containsKey).length;
+    final count = anchorsB.compareTo(anchorsA);
+    return count != 0 ? count : canonicalReaderJson(a).compareTo(canonicalReaderJson(b));
+  });
+  final primary = candidates.isEmpty ? <String>[] : candidates.first;
+  final hard = <String, Set<String>>{};
+  chain(hard, bo); chain(hard, primary);
+  if (bo.isNotEmpty && primary.isNotEmpty && !primary.any(baseRank.containsKey)) {
+    hard.putIfAbsent(bo.last, () => {}).add(primary.first);
+  }
+  final primaryIds = primary.toSet();
+  final preference = [...primary, ...bo.where((id) => !primaryIds.contains(id))];
+  final rank = {for (var i = 0; i < preference.length; i++) preference[i]: i};
+  // The fallback can break only conflicting soft edges. It keeps the complete
+  // base and a base-compatible branch as hard constraints, identically when
+  // local/remote are exchanged. Both original orders remain in the conflict.
+  return _topologicalStrokeOrder(ids, graph, hard: hard, rank: rank)!;
+}
+
+List<String>? _topologicalStrokeOrder(Set<String> ids,
+    Map<String, Set<String>> graph,
+    {Map<String, Set<String>>? hard, Map<String, int>? rank}) {
+  final incoming = {for (final id in ids) id: 0};
+  final hardIncoming = {for (final id in ids) id: 0};
+  for (final targets in graph.values) {
+    for (final id in targets) { incoming[id] = incoming[id]! + 1; }
+  }
+  for (final targets in hard?.values ?? <Set<String>>[]) {
+    for (final id in targets) { hardIncoming[id] = hardIncoming[id]! + 1; }
+  }
+  final ready = SplayTreeSet<String>()..addAll(ids.where((id) => incoming[id] == 0));
+  final hardReady = SplayTreeSet<String>((a, b) {
+    final comparison = (rank?[a] ?? ids.length).compareTo(rank?[b] ?? ids.length);
+    return comparison != 0 ? comparison : a.compareTo(b);
+  })..addAll(ids.where((id) => hardIncoming[id] == 0));
+  final result = <String>[], emitted = <String>{};
+  while (result.length < ids.length) {
+    if (ready.isEmpty && hard == null) return null;
+    if (ready.isEmpty && hardReady.isEmpty) throw StateError('Cyclic hard stroke order');
+    final id = ready.isNotEmpty ? ready.first : hardReady.first;
+    ready.remove(id); hardReady.remove(id); emitted.add(id); result.add(id);
+    for (final next in graph[id] ?? <String>{}) {
+      if (emitted.contains(next)) continue;
+      incoming[next] = incoming[next]! - 1;
+      if (incoming[next] == 0) ready.add(next);
+    }
+    for (final next in hard?[id] ?? <String>{}) {
+      if (emitted.contains(next)) continue;
+      hardIncoming[next] = hardIncoming[next]! - 1;
+      if (hardIncoming[next] == 0) hardReady.add(next);
+    }
+  }
+  return result;
+}
+
+
+/// An order conflict can outlive the page geometry it originally referenced.
+/// Pin only referenced shapes that would otherwise disappear on this merge.
+/// Existing conflict IDs/orders stay immutable; one archived shape can satisfy
+/// references from several conflicts without duplicating a whole page.
+void _retainOrderGeometry(Map<String, MergeConflict> conflicts,
+    Map<PageKey, List<AnnotationStroke>> pages, List<ReaderSnapshot> inputs) {
+  final referenced = <(String, String)>{};
+  for (final conflict in conflicts.values.where((c) => c.kind == 'strokeOrder')) {
+    for (final variant in [conflict.first, conflict.second]) {
+      for (final extra in variant['geometryAlternatives'] as List? ?? const []) {
+        if (extra is Map && extra['id'] is String && extra['hash'] is String) {
+          referenced.add((extra['id'] as String, extra['hash'] as String));
+        }
+      }
+      final refs = variant['geometryRefs'];
+      if (refs is Map) {
+        for (final entry in refs.entries) {
+          if (entry.key is String && entry.value is String) {
+            referenced.add((entry.key as String, entry.value as String));
+          }
+        }
+      }
+    }
+  }
+  if (referenced.isEmpty) return;
+  final ids = referenced.map((key) => key.$1).toSet();
+  final available = <(String, String)>{};
+  void present(Map<String, Object?> json) {
+    final id = json['id'];
+    if (id is String && ids.contains(id) && json['style'] is Map && json['points'] is List) {
+      available.add((id, _geometryKey(json)));
+    }
+  }
+  void variants(Iterable<MergeConflict> values, void Function(Map<String, Object?>) visit) {
+    for (final conflict in values) {
+      if (conflict.kind == 'stroke') {
+        visit(conflict.first); visit(conflict.second);
+      } else if (conflict.kind == 'strokeOrder') {
+        for (final variant in [conflict.first, conflict.second]) {
+          for (final json in variant['strokeVariants'] as List? ?? const []) {
+            if (json is Map) visit(Map<String, Object?>.from(json));
+          }
+        }
+      }
+    }
+  }
+  for (final strokes in pages.values) {
+    for (final stroke in strokes) { if (ids.contains(stroke.id)) present(stroke.toJson()); }
+  }
+  variants(conflicts.values, present);
+  final missing = referenced.difference(available);
+  if (missing.isEmpty) return;
+  final missingIds = missing.map((key) => key.$1).toSet();
+  final candidates = <(String, String), Map<String, Object?>>{};
+  void candidate(Map<String, Object?> json) {
+    final id = json['id'];
+    if (id is! String || !missingIds.contains(id) || json['style'] is! Map || json['points'] is! List) return;
+    final key = (id, _geometryKey(json));
+    if (!missing.contains(key)) return;
+    final prior = candidates[key];
+    if (prior == null || canonicalReaderJson(json).compareTo(canonicalReaderJson(prior)) < 0) candidates[key] = json;
+  }
+  for (final input in inputs) {
+    for (final strokes in input.pages.values) {
+      for (final stroke in strokes) { if (missingIds.contains(stroke.id)) candidate(stroke.toJson()); }
+    }
+    variants(input.conflicts, candidate);
+  }
+  for (final id in conflicts.keys.toList()..sort()) {
+    final conflict = conflicts[id]!;
+    if (conflict.kind != 'strokeOrder') continue;
+    var changed = false;
+    Map<String, Object?> pin(Map<String, Object?> original) {
+      final refs = original['geometryRefs'];
+      if (refs is! Map) return original;
+      final added = <Map<String, Object?>>[];
+      final wanted = <(String, String)>{
+        for (final id in refs.keys.whereType<String>()) (id, refs[id].toString()),
+        for (final extra in original['geometryAlternatives'] as List? ?? const [])
+          if (extra is Map && extra['id'] is String && extra['hash'] is String)
+            (extra['id'] as String, extra['hash'] as String),
+      }.toList()..sort((a, b) {
+        final id = a.$1.compareTo(b.$1); return id != 0 ? id : a.$2.compareTo(b.$2);
+      });
+      for (final key in wanted) {
+        if (!missing.contains(key) || candidates[key] == null) continue;
+        added.add(candidates[key]!); missing.remove(key); changed = true;
+      }
+      if (added.isEmpty) return original;
+      return {...original, 'strokeVariants': _orderedGeometryVariants([
+        ...original['strokeVariants'] as List? ?? const [], ...added,
+      ])};
+    }
+    final first = pin(conflict.first), second = pin(conflict.second);
+    if (changed) conflicts[id] = MergeConflict(id: conflict.id, kind: conflict.kind,
+      objectKey: conflict.objectKey, peerId: conflict.peerId, first: first, second: second);
+  }
+}
+
+
+List<Map<String, Object?>> _orderedGeometryVariants(List values) {
+  final unique = <String, Map<String, Object?>>{};
+  for (final value in values) {
+    if (value is! Map) continue;
+    final json = Map<String, Object?>.from(value);
+    if (json['id'] is! String || json['style'] is! Map || json['points'] is! List) continue;
+    final key = '${json['id']}/${_geometryKey(json)}';
+    final prior = unique[key];
+    if (prior == null || canonicalReaderJson(json).compareTo(canonicalReaderJson(prior)) < 0) unique[key] = json;
+  }
+  return [for (final key in unique.keys.toList()..sort()) unique[key]!];
+}
+
+MergeConflict _unionOrderConflict(MergeConflict a, MergeConflict b) {
+  Map<String, Object?> identity(Map<String, Object?> value) => {
+    for (final key in ['page', 'baseOrder', 'order', 'deletedIds']) key: value[key],
+  };
+  final same = canonicalReaderJson(identity(a.first)) == canonicalReaderJson(identity(b.first));
+  final swapped = canonicalReaderJson(identity(a.first)) == canonicalReaderJson(identity(b.second));
+  final rightFirst = !same && swapped ? b.second : b.first;
+  final rightSecond = !same && swapped ? b.first : b.second;
+  Map<String, Object?> unite(Map<String, Object?> x, Map<String, Object?> y) {
+    final primary = canonicalReaderJson(x).compareTo(canonicalReaderJson(y)) <= 0 ? x : y;
+    final refs = <String, String>{};
+    final alternatives = <(String, String)>{};
+    for (final value in [x, y]) {
+      for (final extra in value['geometryAlternatives'] as List? ?? const []) {
+        if (extra is Map && extra['id'] is String && extra['hash'] is String) alternatives.add((extra['id'] as String, extra['hash'] as String));
+      }
+      if (value['geometryRefs'] case final Map values) {
+        for (final entry in values.entries) {
+          if (entry.key is! String || entry.value is! String) continue;
+          final id = entry.key as String, hash = entry.value as String, prior = refs[entry.key];
+          if (prior != null && prior != hash) {
+            alternatives.add((id, prior)); alternatives.add((id, hash));
+          }
+          refs[id] = prior == null || hash.compareTo(prior) < 0 ? hash : prior;
+        }
+      }
+    }
+    final extra = _orderedGeometryVariants([
+      ...x['strokeVariants'] as List? ?? const [], ...y['strokeVariants'] as List? ?? const [],
+    ]);
+    final alternate = alternatives.where((key) => refs[key.$1] != key.$2).toList()
+      ..sort((a, b) { final id = a.$1.compareTo(b.$1); return id != 0 ? id : a.$2.compareTo(b.$2); });
+    return {...primary,
+      if (refs.isNotEmpty) 'geometryRefs': refs,
+      if (alternate.isNotEmpty) 'geometryAlternatives': [for (final key in alternate) {'id': key.$1, 'hash': key.$2}],
+      if (extra.isNotEmpty) 'strokeVariants': extra,
+    };
+  }
+  final primary = canonicalReaderJson(a.toJson()).compareTo(canonicalReaderJson(b.toJson())) <= 0 ? a : b;
+  return MergeConflict(id: a.id, kind: a.kind, objectKey: primary.objectKey,
+      peerId: primary.peerId, first: unite(a.first, rightFirst), second: unite(a.second, rightSecond));
 }

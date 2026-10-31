@@ -115,23 +115,113 @@ class SyncController extends ChangeNotifier {
       (replica?.manifest == null
           ? []
           : const [LibrarySourceInfo('legacy', '原谱库', online: false)]);
-  String sourceNameFor(String entryId) {
-    final id = collection?.itemFor(entryId)?.sourceId;
-    for (final source in offlineSources) {
-      if (source.id == id || id == null) return source.name;
+  LibrarySnapshot? _scoreCatalogSnapshot;
+  final _scoreCatalog = <String, ScoreCatalogEntry>{};
+  List<ScoreCatalogEntry> _scoreCatalogValues = const [];
+  void _indexScoreCatalog() {
+    final snapshot = offlineSnapshot;
+    if (identical(snapshot, _scoreCatalogSnapshot)) return;
+    _scoreCatalogSnapshot = snapshot;
+    _scoreCatalog.clear();
+    final names = {for (final source in offlineSources) source.id: source.name};
+    final online = {
+      for (final source in offlineSources) source.id: source.online,
+    };
+    final selected = activeCollection;
+    if (selected != null) {
+      for (final item in selected.currentItems) {
+        final old = selected.readableItemFor(item.entryId);
+        final readable = old != null && selected.isReady(old);
+        final state = item.missing
+            ? ScoreContentState.missing
+            : !readable
+            ? online[item.sourceId] == false
+                  ? ScoreContentState.sourceOffline
+                  : ScoreContentState.notDownloaded
+            : old.revisionId != item.revisionId
+            ? ScoreContentState.readableOld
+            : ScoreContentState.ready;
+        final name = names[item.sourceId] ?? '谱库';
+        _scoreCatalog[item.entryId] = ScoreCatalogEntry(
+          entryId: item.entryId,
+          displayPath: item.relativePath,
+          parentFolderLabel: '$name · ${scoreParentFolder(item.relativePath)}',
+          state: state,
+          sourceId: item.sourceId,
+          sourceName: name,
+          bytes: item.length,
+        );
+      }
+    } else if (snapshot != null) {
+      for (final entry in snapshot.entries) {
+        _scoreCatalog[entry.id] = ScoreCatalogEntry(
+          entryId: entry.id,
+          displayPath: entry.relativePath,
+          sourceId: 'legacy',
+          sourceName: names['legacy'] ?? '谱库',
+          parentFolderLabel:
+              '${names['legacy'] ?? '谱库'} · ${scoreParentFolder(entry.relativePath)}',
+          state: entry.status == EntryStatus.missing
+              ? ScoreContentState.missing
+              : entry.availability == ContentAvailability.ready
+              ? ScoreContentState.ready
+              : ScoreContentState.notDownloaded,
+          bytes: entry.currentRevision.size,
+        );
+      }
     }
-    return '谱库';
+    _scoreCatalogValues = List.unmodifiable(_scoreCatalog.values);
   }
 
-  String? sourceIdFor(String entryId) =>
-      collection?.itemFor(entryId)?.sourceId ??
-      (replica?.manifest == null ? null : 'legacy');
+  List<ScoreCatalogEntry> get offlineScoreCatalog {
+    _indexScoreCatalog();
+    return _scoreCatalogValues;
+  }
+
+  String sourceNameFor(String entryId) {
+    _indexScoreCatalog();
+    return _scoreCatalog[entryId]?.sourceName ?? '谱库';
+  }
+
+  String? sourceIdFor(String entryId) {
+    _indexScoreCatalog();
+    return _scoreCatalog[entryId]?.sourceId;
+  }
+
   bool hasPendingVersion(String id) {
-    final current = collection?.itemFor(id),
-        readable = collection?.readableItemFor(id);
-    return readable != null &&
-        current != null &&
-        readable.revisionId != current.revisionId;
+    _indexScoreCatalog();
+    return _scoreCatalog[id]?.state == ScoreContentState.readableOld;
+  }
+
+  Future<String> prepareOfflineScores(Set<String> entryIds) async {
+    if (busy) return '正在更新，请完成后再准备曲单。';
+    if (hasUnsavedEdits) return '请先保存或重试未保存的批注，再准备曲单。';
+    _indexScoreCatalog();
+    final selected = entryIds
+        .map((id) => _scoreCatalog[id])
+        .whereType<ScoreCatalogEntry>()
+        .where((entry) => entry.needsPreparation && entry.sourceId != null)
+        .toList();
+    if (selected.isEmpty) return '没有需要下载的曲谱；源缺失的文件需先在电脑恢复。';
+    await collection!.selectMany([
+      for (final entry in selected)
+        OfflineRule(
+          sourceId: entry.sourceId!,
+          entryId: entry.entryId,
+          selected: true,
+        ),
+    ]);
+    _changed();
+    if (!paired) return '已记住所选曲目，尚未下载。请连接电脑后再准备本曲单。';
+    final scope = entryIds
+        .where(
+          (id) =>
+              _scoreCatalog[id]?.needsPreparation == true ||
+              _scoreCatalog[id]?.readable != true,
+        )
+        .toSet();
+    await synchronize(onlyEntryIds: scope);
+    return message ?? '准备尚未完成，请检查电脑连接后重试。';
   }
 
   LibrarySnapshot? _downloadFolderSnapshot;
@@ -314,7 +404,7 @@ class SyncController extends ChangeNotifier {
           .where((e) => e.availability == ContentAvailability.ready)
           .length ??
       0;
-  bool get hasUnsavedEdits => workspace.pending.isNotEmpty || workspace.saving;
+  bool get hasUnsavedEdits => workspace.unsavedCount > 0 || workspace.saving;
 
   void _changed() {
     if (!_disposed) notifyListeners();
@@ -769,10 +859,11 @@ class SyncController extends ChangeNotifier {
     return false;
   }
 
-  Future<void> synchronize() =>
-      _syncTask ??= _synchronize().whenComplete(() => _syncTask = null);
+  Future<void> synchronize({Set<String>? onlyEntryIds}) =>
+      _syncTask ??= _synchronize(onlyEntryIds: onlyEntryIds)
+          .whenComplete(() => _syncTask = null);
 
-  Future<void> _synchronize() async {
+  Future<void> _synchronize({Set<String>? onlyEntryIds}) async {
     if (busy || _client == null || replica == null) return;
     if (hasUnsavedEdits) {
       message = '请先等待保存完成或重试未保存笔迹；本次没有开始同步。';
@@ -793,6 +884,7 @@ class SyncController extends ChangeNotifier {
     try {
       final result = await _client!.syncCollection(
         collection!,
+        onlyEntryIds: onlyEntryIds,
         cancellation: cancellation,
         onProgress: (progress) {
           processedObjects = progress.processed;
@@ -806,8 +898,10 @@ class SyncController extends ChangeNotifier {
             ? SyncPhase.cancelled
             : SyncPhase.partial;
         message =
-            '${_libraryFailureMessage(result.failure)}已离线的曲谱仍可阅读，已完成文件保留，可重试所选下载。';
+            '${onlyEntryIds != null && result.error == 'Scoped preparation requires a v2 computer' ? '这台电脑版本暂不支持按曲单准备，请先更新电脑端。' : _libraryFailureMessage(result.failure)}已离线的曲谱仍可阅读，已完成文件保留，可重试所选下载。';
         if (result.status == LibrarySyncStatus.cancelled ||
+            (onlyEntryIds != null &&
+                result.error == 'Scoped preparation requires a v2 computer') ||
             hasUnsavedEdits ||
             (result.failure != LibrarySyncFailure.sourceNotReady &&
                 result.failure != LibrarySyncFailure.integrity)) {
@@ -838,7 +932,11 @@ class SyncController extends ChangeNotifier {
       }
       phase = contentPartial ? SyncPhase.partial : SyncPhase.complete;
       message =
-          '${contentPartial ? '部分所选曲谱尚未下载，可重试；' : '目录与所选离线内容已更新；'}${workspace.store.snapshot.conflicts.isEmpty ? '已保存的批注和曲单交换完成。' : '有待处理的批注或曲单版本，双方均已保留。'}';
+          '${contentPartial
+              ? '部分所选曲谱尚未下载，可重试；'
+              : onlyEntryIds != null
+              ? '本次所选曲目已准备；其他离线选择保持不变。'
+              : '目录与所选离线内容已更新；'}${workspace.store.snapshot.conflicts.isEmpty ? '已保存的批注和曲单交换完成。' : '有待处理的批注或曲单版本，双方均已保留。'}';
     } catch (_) {
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
