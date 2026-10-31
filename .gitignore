@@ -47,6 +47,7 @@
 !/lib/library/library_screen.dart
 !/lib/main.dart
 !/lib/reader/annotation_canvas.dart
+!/lib/reader/incremental_stroke_path.dart
 !/lib/reader/library_reader_screen.dart
 !/lib/reader/raster_plan.dart
 !/lib/reader/reader_input.dart

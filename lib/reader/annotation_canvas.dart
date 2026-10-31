@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:reader_state/reader_state.dart';
 
 import 'reader_workspace.dart';
+import 'incremental_stroke_path.dart';
 
 double _segmentDistance(Offset point, Offset a, Offset b) {
   final delta = b - a;
@@ -206,7 +207,8 @@ class AnnotationCanvas extends StatefulWidget {
 
 class _AnnotationCanvasState extends State<AnnotationCanvas> {
   final Set<int> _touches = {};
-  final List<NormalizedPoint> _draft = [];
+  IncrementalStrokePath? _path;
+  List<NormalizedPoint> get _draft => _path?.points ?? const [];
   final List<List<NormalizedPoint>> _segments = [];
   final Map<String, List<List<NormalizedPoint>>> _replacements = {};
   final _sweeps = <(Offset, Offset)>[];
@@ -227,8 +229,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.page != widget.page || !widget.enabled) _clear();
     if (!oldWidget.suspended && widget.suspended) {
-      if (_draft.isNotEmpty) _segments.add(List.of(_draft));
-      _draft.clear();
+      _finishSegment();
       _previousErase = null;
       _cursor = null;
     }
@@ -236,7 +237,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
 
   void _clear() {
     final writing = _pointer != null;
-    _draft.clear();
+    _path = null;
     _segments.clear();
     _replacements.clear();
     _sweeps.clear();
@@ -244,6 +245,11 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     _cursor = null;
     _previousErase = null;
     if (writing) widget.onWritingChanged?.call(false);
+  }
+
+  void _finishSegment() {
+    if (_draft.isNotEmpty) _segments.add(List.of(_draft));
+    _path = null;
   }
 
   void _ensurePreviewBase(Size size) {
@@ -302,7 +308,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     }
   }
 
-  void _sample(Offset position, Size size) {
+  void _sample(Offset position, Size size, {bool exact = false}) {
     if (_paused || size.isEmpty) return;
     final clamped = Offset(
       position.dx.clamp(0.0, size.width),
@@ -320,13 +326,9 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
         clamped.dx / size.width,
         clamped.dy / size.height,
       );
-      if (_draft.isEmpty ||
-          (Offset(_draft.last.x * size.width, _draft.last.y * size.height) -
-                      clamped)
-                  .distance >=
-              .7) {
-        _draft.add(point);
-      }
+      (_path ??= IncrementalStrokePath(
+        paperAspect: size.aspectRatio,
+      )).add(point, exact: exact);
     }
   }
 
@@ -334,8 +336,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     if (event.kind == PointerDeviceKind.touch) {
       _touches.add(event.pointer);
       if (_paused) {
-        if (_draft.isNotEmpty) _segments.add(List.of(_draft));
-        _draft.clear();
+        _finishSegment();
         _previousErase = null;
         _cursor = null;
         setState(() {});
@@ -361,7 +362,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   void _up(PointerUpEvent event, Size size) {
     if (_touches.remove(event.pointer)) return;
     if (_pointer != event.pointer) return;
-    _sample(event.localPosition, size);
+    _sample(event.localPosition, size, exact: true);
     final page = widget.page;
     if (_erasing && _sweeps.isNotEmpty) {
       final replacements = Map<String, List<List<NormalizedPoint>>>.from(
@@ -400,7 +401,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
         ),
       );
     } else if (!_erasing) {
-      if (_draft.isNotEmpty) _segments.add(List.of(_draft));
+      _finishSegment();
       for (final points in _segments) {
         unawaited(widget.workspace.addStroke(page, _style!, points));
       }
@@ -424,7 +425,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
           painter: AnnotationPainter(
             strokes: strokes,
             pending: widget.workspace.pendingFor(widget.page),
-            draft: List.of(_draft),
+            draft: _draft,
             draftSegments: List.of(_segments),
             draftStyle: _style ?? widget.style,
             eraserPosition: _erasing ? _cursor : null,

@@ -163,7 +163,7 @@ class _ReaderInputState extends State<ReaderInput> {
       translation: translation,
       pageAspect: widget.pageAspect,
       obstruction: obstruction,
-      verticalLocked: !widget.editing,
+      verticalLocked: !widget.editing && scale <= 1.000001,
     );
     controller.value = Matrix4.diagonal3Values(scale, scale, 1)
       ..setTranslationRaw(bounded.dx, bounded.dy, 0);
@@ -251,11 +251,11 @@ class _ReaderInputState extends State<ReaderInput> {
           !_pinching &&
           _inkPointers.isEmpty &&
           _touches.length == 1 &&
-          (widget.editing || controller.value.getMaxScaleOnAxis() > 1.01)) {
+          (widget.editing || controller.value.getMaxScaleOnAxis() > 1.000001)) {
         final m = controller.value;
         final scale = m.getMaxScaleOnAxis();
         var delta = event.localPosition - _lastTouch;
-        if (scale <= 1.01 && _origin != null) {
+        if (scale <= 1.000001 && _origin != null) {
           final travel = event.localPosition - _origin!;
           if (_singleAxis == null && travel.distance >= 12) {
             if (travel.dy.abs() > travel.dx.abs() * 1.2) {
@@ -267,7 +267,7 @@ class _ReaderInputState extends State<ReaderInput> {
           }
           if (_singleAxis == Axis.vertical) delta = Offset(0, delta.dy);
         }
-        if (scale > 1.01 || _singleAxis == Axis.vertical) {
+        if (scale > 1.000001 || _singleAxis == Axis.vertical) {
           _matrix(scale, Offset(m.storage[12], m.storage[13]) + delta);
           _cancelled = true;
         }

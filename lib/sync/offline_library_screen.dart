@@ -25,6 +25,75 @@ class OfflineLibraryScreen extends StatefulWidget {
   State<OfflineLibraryScreen> createState() => _OfflineLibraryScreenState();
 }
 
+class _OfflineStatusIcon extends StatelessWidget {
+  const _OfflineStatusIcon({
+    required this.availability,
+    required this.pendingVersion,
+  });
+
+  final ContentAvailability availability;
+  final bool pendingVersion;
+
+  @override
+  Widget build(BuildContext context) {
+    final ready = availability == ContentAvailability.ready;
+    final unreadable = availability == ContentAvailability.unreadable;
+    final label = ready
+        ? pendingVersion
+              ? '离线旧版可读，有更新待下载'
+              : '已离线'
+        : unreadable
+        ? '本机内容不可读，请重新下载'
+        : '未下载';
+    return Tooltip(
+      message: label,
+      excludeFromSemantics: true,
+      child: Semantics(
+        label: label,
+        child: ExcludeSemantics(
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: Stack(
+              children: [
+                Icon(
+                  ready
+                      ? Icons.description_outlined
+                      : Icons.cloud_download_outlined,
+                ),
+                if (ready || unreadable)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surface,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        unreadable
+                            ? Icons.error
+                            : pendingVersion
+                            ? Icons.update
+                            : Icons.check_circle,
+                        size: 13,
+                        color: unreadable
+                            ? Theme.of(context).colorScheme.error
+                            : pendingVersion
+                            ? const Color(0xff996515)
+                            : const Color(0xff3e7350),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   final TextEditingController _search = TextEditingController();
   final Set<String> _collapsed = {};
@@ -463,34 +532,33 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   }
                                   final entry =
                                       entries[index - children.length];
-                                  return ListTile(
-                                    leading: Icon(
+                                  final ready =
                                       entry.availability ==
-                                              ContentAvailability.ready
-                                          ? Icons.description_outlined
-                                          : Icons.cloud_download_outlined,
+                                      ContentAvailability.ready;
+                                  final pending =
+                                      ready && sync.hasPendingVersion(entry.id);
+                                  return ListTile(
+                                    leading: _OfflineStatusIcon(
+                                      availability: entry.availability,
+                                      pendingVersion: pending,
                                     ),
                                     title: Text(
                                       p.posix.basenameWithoutExtension(
                                         entry.relativePath,
                                       ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                     ),
                                     subtitle: Text(
-                                      '${sync.sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}\n${entry.availability == ContentAvailability.ready
-                                          ? sync.hasPendingVersion(entry.id)
-                                                ? '离线旧版 · 有更新待下载'
-                                                : '已离线'
-                                          : '未下载'}',
-                                      maxLines: 2,
+                                      '${sync.sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}',
+                                      maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     onTap: () => unawaited(_open(entry)),
                                     trailing: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        if (entry.availability !=
-                                                ContentAvailability.ready ||
-                                            sync.hasPendingVersion(entry.id))
+                                        if (!ready || pending)
                                           IconButton(
                                             tooltip: '下载到iPad',
                                             icon: const Icon(
@@ -523,8 +591,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                               value: 'unselect',
                                               child: Text('取消离线选择'),
                                             ),
-                                            if (entry.availability ==
-                                                ContentAvailability.ready)
+                                            if (ready)
                                               const PopupMenuItem(
                                                 value: 'remove',
                                                 child: Text('移除本机下载'),
