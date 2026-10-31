@@ -119,12 +119,11 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   Future<void> _selectRoot() async {
     try {
-      final root = await getDirectoryPath(confirmButtonText: '使用这个谱库');
+      final root = await getDirectoryPath(confirmButtonText: '添加这个谱库');
       if (root != null && mounted) {
         _search.clear();
         _collapsedFolders.clear();
-        await _sync?.stopServer();
-        await _library?.selectRoot(root);
+        await _library?.addSource(root);
       }
     } catch (failure) {
       debugPrint('LIBRARY picker_failed: $failure');
@@ -179,6 +178,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             locate: _locate,
             initialTarget: target,
             sourceChanges: library,
+            loader: _loadLocalTarget,
           ),
         ),
       );
@@ -195,20 +195,36 @@ class _LibraryScreenState extends State<LibraryScreen>
     final library = _library;
     if (library?.snapshot == null) return null;
     for (final entry in library!.snapshot!.availableEntries) {
-      if (entry.id == id &&
-          entry.availability == ContentAvailability.ready &&
-          entry.currentRevision.contentHash != null) {
+      if (entry.id == id) {
         return ScoreTarget(
           entryId: entry.id,
           revisionId: entry.currentRevisionId,
           filePath: library.absolutePathFor(entry),
           displayPath: library.absolutePathFor(entry),
-          parentFolderLabel: scoreParentFolder(entry.relativePath),
+          parentFolderLabel:
+              '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
           contentHash: entry.currentRevision.contentHash,
+          validateBeforeRead: () =>
+              library.validateForRead(entry.id, entry.currentRevisionId),
         );
       }
     }
     return null;
+  }
+
+  Future<LoadedScore> _loadLocalTarget(ScoreTarget target) async {
+    await _library!.ensureReady(target.entryId);
+    final resolved = _locate(target.entryId);
+    if (resolved == null || resolved.revisionId != target.revisionId) {
+      throw StateError('Source changed while preparing the selected score.');
+    }
+    return loadScore(
+      resolved,
+      cacheDirectory: p.join(
+        p.dirname(_workspace!.store.statePath),
+        'reading-cache',
+      ),
+    );
   }
 
   List<ScoreTarget> _targets() => [
@@ -258,6 +274,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             workspace: workspace,
             locate: sync?.locateOffline ?? _locate,
             targets: sync == null ? _targets : () => sync.offlineTargets,
+            loader: sync == null ? _loadLocalTarget : null,
             sourceChanges: sync ?? _library,
           ),
         ),
@@ -378,10 +395,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                 icon: const Icon(Icons.description_outlined),
               ),
               if (_canProvideLibrary)
-                IconButton(
-                  tooltip: '选择谱库文件夹',
+                TextButton.icon(
                   onPressed: library == null ? null : _selectRoot,
-                  icon: const Icon(Icons.folder_open_outlined),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                  label: const Text('添加谱库文件夹'),
                 ),
               const SizedBox(width: 8),
             ],
@@ -434,7 +451,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               Text(
                 _canProvideLibrary
                     ? '保留原来的整理方式，按文件夹浏览，按曲名和路径搜索。\n支持 PDF、JPG、PNG 和 WebP。'
-                    : '连接同一Wi-Fi下的电脑，同步完整谱库。\n已同步的曲谱、批注和曲单可在断网后使用。',
+                    : '连接电脑更新目录，再选择要带走的文件夹或曲谱。\n已下载的曲谱、批注和曲单可断网使用。',
                 textAlign: TextAlign.center,
                 style: TextStyle(height: 1.8, color: Color(0xff65736b)),
               ),
@@ -448,7 +465,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                     FilledButton.icon(
                       onPressed: _selectRoot,
                       icon: const Icon(Icons.folder_open_outlined),
-                      label: const Text('选择谱库文件夹'),
+                      label: const Text('添加谱库文件夹'),
                     ),
                   _connectionButton(),
                   OutlinedButton.icon(
@@ -473,7 +490,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     ),
   );
 
-  Widget _sidebar(LibraryController library) => ColoredBox(
+  Widget _sidebar(LibraryController library) => Material(
     color: const Color(0xfff6f5ef),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -495,13 +512,43 @@ class _LibraryScreenState extends State<LibraryScreen>
             ],
           ),
         ),
-        Expanded(child: ListView(children: [_folderNode(library, '', 0)])),
+        Expanded(
+          child: ListView(
+            children: [
+              for (final source in library.sources) ...[
+                ListTile(
+                  key: ValueKey('source-${source.id}'),
+                  leading: const Icon(Icons.library_music_outlined),
+                  selected:
+                      source.id == library.selectedSourceId &&
+                      library.currentFolder.isEmpty,
+                  title: Text(
+                    source.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: source.online ? null : const Text('文件夹暂未连接'),
+                  onTap: () {
+                    _search.clear();
+                    library.setSource(source.id);
+                  },
+                ),
+                if (source.id == library.selectedSourceId)
+                  for (final folder in library.folders.where(
+                    (f) => f.isNotEmpty && _parent(f).isEmpty,
+                  ))
+                    _folderNode(library, folder, 1),
+              ],
+            ],
+          ),
+        ),
         Padding(
           padding: const EdgeInsets.all(16),
           child: Tooltip(
-            message: library.rootPath!,
+            message:
+                library.selectedSource?.catalog.rootPath ?? library.rootPath!,
             child: Text(
-              library.rootPath!,
+              library.selectedSource?.catalog.rootPath ?? library.rootPath!,
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11, color: Color(0xff65736b)),
@@ -643,9 +690,10 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
             PopupMenuButton<String>(
               tooltip: '更多刷新选项',
+              enabled: !library.scanning,
               onSelected: (_) => unawaited(library.rescan(verifyAll: true)),
               itemBuilder: (_) => const [
-                PopupMenuItem(value: 'verify', child: Text('完整校验文件内容')),
+                PopupMenuItem(value: 'verify', child: Text('完整校验此谱库内容')),
               ],
             ),
           ],
@@ -669,7 +717,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                     : library.currentFolder,
                 child: Text(
                   library.currentFolder.isEmpty
-                      ? '谱库根目录'
+                      ? '${library.selectedSource?.name ?? '谱库'} · 根目录'
                       : library.currentFolder,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -809,9 +857,10 @@ class _LibraryScreenState extends State<LibraryScreen>
             overflow: TextOverflow.ellipsis,
           ),
           subtitle: Tooltip(
-            message: scoreParentFolder(entry.relativePath),
+            message:
+                '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
             child: Text(
-              scoreParentFolder(entry.relativePath),
+              '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),

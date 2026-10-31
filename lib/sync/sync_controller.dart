@@ -10,6 +10,7 @@ import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
 
 import '../library/library_controller.dart';
+import '../library/score_path_label.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import 'pairing_qr.dart';
@@ -46,6 +47,7 @@ class _LiveLibrarySource implements LibrarySource {
   final String root;
   final String libraryId;
   CatalogLibrarySource get _current {
+    if (!library.legacySourceEnabled) throw LibrarySourceNotReady();
     final catalog = library.catalogForSync;
     if (library.rootPath != root || catalog == null) {
       throw StateError('Source changed.');
@@ -102,6 +104,81 @@ class SyncController extends ChangeNotifier {
   int? totalObjects;
   bool committingLibrary = false;
   ReplicaLibraryView? replica;
+  ReplicaCollectionView? collection;
+  Future<void>? _syncTask;
+  ReplicaCollectionView? get activeCollection =>
+      collection?.index == null ? null : collection;
+  LibrarySnapshot? get offlineSnapshot =>
+      activeCollection?.snapshot ?? replica?.snapshot;
+  List<LibrarySourceInfo> get offlineSources =>
+      collection?.index?.sources ??
+      (replica?.manifest == null
+          ? []
+          : const [LibrarySourceInfo('legacy', '原谱库', online: false)]);
+  String sourceNameFor(String entryId) {
+    final id = collection?.itemFor(entryId)?.sourceId;
+    for (final source in offlineSources) {
+      if (source.id == id || id == null) return source.name;
+    }
+    return '谱库';
+  }
+
+  String? sourceIdFor(String entryId) =>
+      collection?.itemFor(entryId)?.sourceId ??
+      (replica?.manifest == null ? null : 'legacy');
+  bool hasPendingVersion(String id) {
+    final current = collection?.itemFor(id),
+        readable = collection?.readableItemFor(id);
+    return readable != null &&
+        current != null &&
+        readable.revisionId != current.revisionId;
+  }
+
+  (int, int) get selectedDownloadTotals {
+    final selected =
+        collection?.index?.entries.where(
+          (e) => !e.missing && collection!.selection.includes(e),
+        ) ??
+        <CatalogItem>[];
+    return (selected.length, selected.fold<int>(0, (n, e) => n + e.length));
+  }
+
+  (int, int) downloadEstimate({
+    required String sourceId,
+    String? folder,
+    String? entryId,
+  }) {
+    final entries =
+        collection?.index?.entries.where(
+          (e) =>
+              !e.missing &&
+              e.sourceId == sourceId &&
+              (entryId != null
+                  ? e.entryId == entryId
+                  : folderContains(folder ?? '', e.relativePath)),
+        ) ??
+        <CatalogItem>[];
+    return (entries.length, entries.fold<int>(0, (n, e) => n + e.length));
+  }
+
+  Future<void> selectOffline(OfflineRule rule) async {
+    if (busy) {
+      cancel();
+      await _syncTask;
+    }
+    await collection?.select(rule);
+    _changed();
+  }
+
+  Future<void> removeOfflineDownload(String id) async {
+    if (busy) {
+      cancel();
+      await _syncTask;
+    }
+    await collection?.removeDownload(id);
+    _changed();
+  }
+
   LibrarySnapshot? _targetSnapshot;
   final Map<String, ScoreTarget> _offlineTargets = {};
   List<ScoreTarget> _readyTargets = const [];
@@ -112,7 +189,8 @@ class SyncController extends ChangeNotifier {
 
   void _indexOfflineTargets() {
     final view = replica;
-    final snapshot = view?.snapshot;
+    final selected = activeCollection;
+    final snapshot = offlineSnapshot;
     if (identical(snapshot, _targetSnapshot)) return;
     _targetSnapshot = snapshot;
     _offlineTargets.clear();
@@ -122,11 +200,16 @@ class SyncController extends ChangeNotifier {
         _offlineTargets[entry.id] = ScoreTarget(
           entryId: entry.id,
           revisionId: entry.currentRevisionId,
-          filePath: view.presentationPathFor(entry.id),
+          filePath:
+              selected?.presentationPathFor(entry.id) ??
+              view.presentationPathFor(entry.id),
           displayPath: entry.relativePath,
+          parentFolderLabel:
+              '${sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}',
           contentHash: entry.currentRevision.contentHash,
           verifiedImmutable: true,
           validateBeforeRead: () =>
+              selected?.validateForRead(entry.id, entry.currentRevisionId) ??
               view.validateForRead(entry.id, entry.currentRevisionId),
         );
       }
@@ -156,9 +239,10 @@ class SyncController extends ChangeNotifier {
   }
 
   int get receivedObjects => _received;
-  bool get hasOfflineLibrary => replica?.manifest != null;
+  bool get hasOfflineLibrary =>
+      collection?.index != null || replica?.manifest != null;
   int get offlineCount =>
-      replica?.snapshot.availableEntries
+      offlineSnapshot?.availableEntries
           .where((e) => e.availability == ContentAvailability.ready)
           .length ??
       0;
@@ -215,6 +299,11 @@ class SyncController extends ChangeNotifier {
       replica = await ReplicaLibraryView.open(
         rootDirectory: p.join(directory.path, 'replica'),
       );
+      collection = await ReplicaCollectionView.open(replica!);
+      if (collection!.persistenceFailed) {
+        phase = SyncPhase.partial;
+        message = '有些离线记录尚未写入，已验证的曲谱仍可阅读。请检查空间后重试。';
+      }
     } catch (failure) {
       initializationError =
           '${initializationError == null ? '' : '${initializationError!}\n'}离线谱库无法恢复 [SYNC-REPLICA-${_storageFailureKind(failure)}]。已有文件未被清空，请保留此提示以便排查。';
@@ -394,6 +483,14 @@ class SyncController extends ChangeNotifier {
       await _saveSettings({..._settings, 'roots': roots});
       started = await SyncServer.start(
         source: _LiveLibrarySource(library, root, identity['id'] as String),
+        collectionSource: CatalogCollectionSource(
+          id: identity['id'] as String,
+          legacyLibraryId: library.legacySourceEnabled
+              ? identity['id'] as String
+              : null,
+          bindings: () => library.sources,
+          onMaterialized: library.refreshSourceMetadata,
+        ),
         readerStore: workspace.store,
         stateDirectory: p.join(
           directory.path,
@@ -604,7 +701,10 @@ class SyncController extends ChangeNotifier {
     return false;
   }
 
-  Future<void> synchronize() async {
+  Future<void> synchronize() =>
+      _syncTask ??= _synchronize().whenComplete(() => _syncTask = null);
+
+  Future<void> _synchronize() async {
     if (busy || _client == null || replica == null) return;
     if (hasUnsavedEdits) {
       message = '请先等待保存完成或重试未保存笔迹；本次没有开始同步。';
@@ -618,13 +718,13 @@ class SyncController extends ChangeNotifier {
     _receivedBeforeRun = replica!.verificationStats.downloadObjectsVerified;
     _received = 0;
     phase = SyncPhase.transferring;
-    message = '正在核对并接收全库…';
+    message = '正在更新目录和所选离线内容…';
     final cancellation = SyncCancellation();
     _cancellation = cancellation;
     _changed();
     try {
-      final result = await _client!.syncLibrary(
-        replica!,
+      final result = await _client!.syncCollection(
+        collection!,
         cancellation: cancellation,
         onProgress: (progress) {
           processedObjects = progress.processed;
@@ -638,16 +738,22 @@ class SyncController extends ChangeNotifier {
             ? SyncPhase.cancelled
             : SyncPhase.partial;
         message =
-            '${_libraryFailureMessage(result.failure)}${hasOfflineLibrary ? '仍可阅读上次完整离线库。' : '尚未建立完整离线库。'}已完整接收的文件可在重试时复用。';
-        return;
+            '${_libraryFailureMessage(result.failure)}已离线的曲谱仍可阅读，已完成文件保留，可重试所选下载。';
+        if (result.status == LibrarySyncStatus.cancelled ||
+            hasUnsavedEdits ||
+            (result.failure != LibrarySyncFailure.sourceNotReady &&
+                result.failure != LibrarySyncFailure.integrity)) {
+          return;
+        }
       }
       if (hasUnsavedEdits) {
         phase = SyncPhase.partial;
-        message = '全库已完整下载，但有正在保存或未保存的笔迹，批注和曲单尚未交换。请保存后再同步。';
+        message = '目录和离线内容已更新，但有笔迹尚未保存，保存后可交换批注和曲单。';
         return;
       }
       phase = SyncPhase.merging;
-      message = '全库已下载，正在交换批注和曲单…';
+      final contentPartial = result.status != LibrarySyncStatus.complete;
+      message = '正在交换已保存的批注和曲单…';
       _changed();
       await _client!.syncReaderState(
         workspace.store,
@@ -659,12 +765,12 @@ class SyncController extends ChangeNotifier {
       cancellation.check();
       if (hasUnsavedEdits) {
         phase = SyncPhase.partial;
-        message = '全库已完整下载，本次已保存记录已交换；仍有正在保存或未保存的笔迹，请保存后再次同步。';
+        message = '已保存记录已交换；仍有笔迹正在保存，请保存后再次同步。';
         return;
       }
-      phase = SyncPhase.complete;
+      phase = contentPartial ? SyncPhase.partial : SyncPhase.complete;
       message =
-          '全库已完整同步，可离线阅读。${workspace.store.snapshot.conflicts.isEmpty ? '本次批注和曲单交换已完成；同步期间的新编辑请再次同步。' : '有待处理的批注或曲单版本，双方内容均已保留。'}';
+          '${contentPartial ? '部分所选曲谱尚未下载，可重试；' : '目录与所选离线内容已更新；'}${workspace.store.snapshot.conflicts.isEmpty ? '已保存的批注和曲单交换完成。' : '有待处理的批注或曲单版本，双方均已保留。'}';
     } catch (_) {
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
@@ -692,12 +798,12 @@ class SyncController extends ChangeNotifier {
           '电脑提供的是另一份谱库，本次未覆盖已有副本。请连接原电脑并选择原谱库。',
         LibrarySyncFailure.sourceNotReady =>
           '电脑谱库还有未下载或无法读取的文件，请在电脑补全文件并刷新后重试。',
-        LibrarySyncFailure.connection => '本次全库同步未完成，请检查电脑服务、Wi-Fi与局域网权限后重试。',
+        LibrarySyncFailure.connection => '连接中断，请检查电脑服务、Wi-Fi与局域网权限后重试。',
         LibrarySyncFailure.authentication => '电脑未接受现有配对，请刷新配对码并重新配对。',
         LibrarySyncFailure.integrity => '收到的文件未通过完整性校验，请刷新电脑谱库后重试。',
         LibrarySyncFailure.localStorage => '离线文件无法保存，请检查磁盘空间与应用数据目录权限后重试。',
         LibrarySyncFailure.cancelled => '本次同步已取消。',
-        LibrarySyncFailure.unknown || null => '本次全库同步未完成，请检查电脑与网络后重试。',
+        LibrarySyncFailure.unknown || null => '本次更新尚未完成，请检查电脑与网络后重试。',
       };
 
   void cancel() {
@@ -711,11 +817,24 @@ class SyncController extends ChangeNotifier {
     message = '正在完整校验离线文件，较大谱库需要一些时间…';
     _changed();
     try {
-      await replica!.verifyAll();
+      final selected = activeCollection;
+      var unavailable = 0;
+      if (selected == null) {
+        await replica!.verifyAll();
+        unavailable = replica!.snapshot.availableEntries
+            .where((e) => e.availability != ContentAvailability.ready)
+            .length;
+      } else {
+        for (final entry in selected.snapshot.availableEntries) {
+          final item = selected.readableItemFor(entry.id);
+          if (item != null &&
+              !await replica!.hasVerifiedObject(item.object, verifyAll: true)) {
+            unavailable++;
+          }
+        }
+        await selected.updateIndex(selected.index!);
+      }
       phase = SyncPhase.idle;
-      final unavailable = replica!.snapshot.availableEntries
-          .where((e) => e.availability != ContentAvailability.ready)
-          .length;
       message = unavailable == 0
           ? '离线文件校验完成。'
           : '$unavailable 份离线文件无法读取，请重新同步修复。';

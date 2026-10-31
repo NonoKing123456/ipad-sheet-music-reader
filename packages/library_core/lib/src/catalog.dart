@@ -42,6 +42,18 @@ class LibraryCatalog {
   final FileIdentityResolver? fileIdentityResolver;
   LibrarySnapshot _snapshot;
   final _storageWarnings = <String>[];
+  int contentHashOperations = 0, contentHashBytesRead = 0;
+
+  Future<String> _hashFile(File file) {
+    contentHashOperations++;
+    return sha256
+        .bind(file.openRead().map((chunk) {
+          contentHashBytesRead += chunk.length;
+          return chunk;
+        }))
+        .first
+        .then((digest) => digest.toString());
+  }
 
   LibrarySnapshot get snapshot => _snapshot;
   List<String> get storageWarnings => List.unmodifiable(_storageWarnings);
@@ -73,17 +85,95 @@ class LibraryCatalog {
   /// Metadata cache avoids re-hashing unchanged files. [verifyAll] explicitly
   /// rechecks their bytes, including same-size/same-timestamp replacements.
   /// Known deferred files remain deferred even during full verification.
-  Future<ScanResult> rescan({bool verifyAll = false}) => _withLock(() async {
+  Future<ScanResult> rescan(
+          {bool verifyAll = false, bool metadataOnly = false}) =>
+      _withLock(() async {
         final disk = await _loadSnapshot();
         if (disk.generation != _snapshot.generation) {
           throw const ConcurrentCatalogWriteException(
               'The catalogue changed elsewhere; reload before rescanning.');
         }
-        final result = await _scan(verifyAll: verifyAll);
+        final result =
+            await _scan(verifyAll: verifyAll, metadataOnly: metadataOnly);
         await _saveSnapshot(result.snapshot);
         _snapshot = result.snapshot;
         return result;
       });
+
+  /// Materialize one selected file without enumerating or hashing its siblings.
+  /// Filling an unchanged unknown revision preserves its identity and references.
+  Future<LibraryEntry> materialize(String entryId) => _withLock(() async {
+        final disk = await _loadSnapshot();
+        if (disk.generation != _snapshot.generation) {
+          _snapshot = disk;
+        }
+        final entry = _snapshot.entryById(entryId);
+        if (entry == null || entry.status != EntryStatus.available) {
+          throw StateError('Unknown or missing selected file.');
+        }
+        final path = await validatedPathFor(entry);
+        final file = File(path), before = await File(path).stat();
+        final current = entry.currentRevision;
+        if (current.contentHash != null &&
+            before.size == current.size &&
+            before.modified.toUtc() == current.modifiedUtc &&
+            entry.availability == ContentAvailability.ready) return entry;
+        if (await fileAccessProbe?.call(path, before) == FileAccess.deferred) {
+          throw StateError('Selected file is not available on this computer.');
+        }
+        final hash = await _hashFile(file);
+        final after = await file.stat();
+        if (after.type != FileSystemEntityType.file ||
+            after.size != before.size ||
+            after.modified != before.modified ||
+            await validatedPathFor(entry) != path) {
+          throw const FileSystemException(
+              'Selected file changed while hashing.');
+        }
+        final now = DateTime.now().toUtc();
+        final updated = _updateEntry(
+            entry,
+            _ObservedFile(
+                entry.relativePath,
+                after.size,
+                after.modified.toUtc(),
+                hash,
+                ContentAvailability.ready,
+                entry.platformFileId),
+            now);
+        final next = LibrarySnapshot(
+            rootPath: rootPath,
+            generation: _snapshot.generation + 1,
+            entries: [
+              for (final e in _snapshot.entries) e.id == entry.id ? updated : e
+            ],
+            folders: _snapshot.folders,
+            savedUtc: now);
+        await _saveSnapshot(next);
+        _snapshot = next;
+        return updated;
+      });
+
+  /// Revalidate the actual path at read boundaries; no links outside the source.
+  Future<String> validatedPathFor(LibraryEntry entry) async {
+    final path = p.normalize(p.absolute(absolutePathFor(entry)));
+    if (!_atOrWithin(rootPath, path) ||
+        p.equals(rootPath, path) ||
+        await FileSystemEntity.type(path, followLinks: false) !=
+            FileSystemEntityType.file) {
+      throw const FileSystemException(
+          'Selected path is not a regular source file.');
+    }
+    final actual = p.normalize(await File(path).resolveSymbolicLinks());
+    final root = p.normalize(await Directory(rootPath).resolveSymbolicLinks());
+    if (!p.equals(root, rootPath) ||
+        !p.equals(actual, path) ||
+        !_atOrWithin(root, actual)) {
+      throw const FileSystemException(
+          'Selected path changed or contains a link.');
+    }
+    return actual;
+  }
 
   List<LibraryEntry> search(String query, {String? withinFolder}) {
     final scope = _relativeScope(withinFolder ?? '');
@@ -125,7 +215,8 @@ class LibraryCatalog {
     return p.joinAll([rootPath, ...relative.split('/')]);
   }
 
-  Future<ScanResult> _scan({required bool verifyAll}) async {
+  Future<ScanResult> _scan(
+      {required bool verifyAll, required bool metadataOnly}) async {
     final now = DateTime.now().toUtc();
     final previousByPath = <String, LibraryEntry>{};
     for (final entry in _snapshot.entries) {
@@ -201,7 +292,10 @@ class LibraryCatalog {
         String? platformFileId;
         try {
           final probe = fileAccessProbe;
-          if (probe != null &&
+          if (metadataOnly &&
+              !(sameMetadata && previous.currentRevision.contentHash != null)) {
+            availability = ContentAvailability.deferred;
+          } else if (probe != null &&
               await probe(entity.path, stat) == FileAccess.deferred) {
             availability = ContentAvailability.deferred;
             hash = sameMetadata ? previous.currentRevision.contentHash : null;
@@ -212,7 +306,7 @@ class LibraryCatalog {
               previous.currentRevision.contentHash != null) {
             hash = previous.currentRevision.contentHash;
           } else {
-            hash = (await sha256.bind(entity.openRead()).first).toString();
+            hash = await _hashFile(entity);
             final after = await entity.stat();
             if (after.size != stat.size || after.modified.toUtc() != modified) {
               throw const FileSystemException('File changed while hashing.');

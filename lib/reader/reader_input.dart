@@ -12,6 +12,7 @@ Offset clampReaderPan({
   required Offset translation,
   double? pageAspect,
   EdgeInsets? obstruction,
+  bool verticalLocked = false,
 }) {
   final fitted = pageAspect == null
       ? viewport
@@ -39,7 +40,9 @@ Offset clampReaderPan({
   }
   return Offset(
     translation.dx.clamp(minX, maxX),
-    translation.dy.clamp(minY, maxY),
+    verticalLocked
+        ? viewport.height * (1 - scale) / 2
+        : translation.dy.clamp(minY, maxY),
   );
 }
 
@@ -160,6 +163,7 @@ class _ReaderInputState extends State<ReaderInput> {
       translation: translation,
       pageAspect: widget.pageAspect,
       obstruction: obstruction,
+      verticalLocked: !widget.editing,
     );
     controller.value = Matrix4.diagonal3Values(scale, scale, 1)
       ..setTranslationRaw(bounded.dx, bounded.dy, 0);

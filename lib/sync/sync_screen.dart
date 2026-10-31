@@ -11,6 +11,14 @@ import '../reader/annotation_canvas.dart';
 import 'sync_controller.dart';
 import 'qr_scanner.dart';
 
+String _contentSize(int bytes) => bytes >= 1024 * 1024 * 1024
+    ? '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB'
+    : bytes >= 1024 * 1024
+    ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+    : bytes >= 1024
+    ? '${(bytes / 1024).toStringAsFixed(1)} KB'
+    : '$bytes B';
+
 class SyncScreen extends StatefulWidget {
   const SyncScreen({
     super.key,
@@ -93,10 +101,14 @@ class _SyncScreenState extends State<SyncScreen> {
               _status(sync.initializationError!),
             if (_desktop)
               _card('连接我的 iPad', [
-                Text(sync.library.rootPath ?? '请先返回谱库选择源文件夹。'),
+                Text(
+                  sync.library.sources.isEmpty
+                      ? '请先添加谱库文件夹。'
+                      : '${sync.library.sources.length} 个谱库 · ${sync.library.sources.map((s) => s.name).join('、')}',
+                ),
                 const SizedBox(height: 12),
                 const Text(
-                  '电脑和iPad连接同一Wi-Fi。在iPad首页点击“扫描电脑二维码”，对准下方即可。以后只需保持电脑阅读器打开，在iPad点击“立即同步”。',
+                  '电脑和iPad连接同一Wi-Fi。在iPad扫描下方二维码，以后保持电脑阅读器打开，点击“更新目录与所选内容”。',
                 ),
                 if (sync.serving && sync.pairingQr != null)
                   Center(
@@ -171,7 +183,7 @@ class _SyncScreenState extends State<SyncScreen> {
               _card(sync.paired ? '我的电脑已连接' : '扫描电脑二维码', [
                 Text(
                   sync.paired
-                      ? '已经记住电脑。保持电脑阅读器打开，点击“立即同步”即可。电脑换网络后，可重新扫码更新连接；已有离线谱库会保留。'
+                      ? '已记住电脑，打开电脑阅读器后可更新目录与所选内容。电脑换网络后重新扫码，已有离线内容保留。'
                       : '先在电脑阅读器首页点击“连接我的 iPad”，再扫描电脑上出现的二维码。只需操作一次，资料通过同一Wi-Fi传输。',
                 ),
                 const SizedBox(height: 12),
@@ -237,11 +249,14 @@ class _SyncScreenState extends State<SyncScreen> {
                   ),
               ],
             ),
-            _card('全库离线副本', [
+            _card('目录与离线内容', [
               Text(
                 sync.hasOfflineLibrary
                     ? '已保存 ${sync.offlineCount} 份可用曲谱，可断网阅读。'
-                    : '尚未建立完整离线谱库。首次同步需接收并校验整个指定谱库。',
+                    : '先更新目录，再在谱库中选择文件夹或单曲。新谱库不会自动下载。',
+              ),
+              Text(
+                '已选择 ${sync.selectedDownloadTotals.$1} 份曲谱 · ${_contentSize(sync.selectedDownloadTotals.$2)}',
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -253,7 +268,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         ? null
                         : () => unawaited(sync.synchronize()),
                     icon: const Icon(Icons.sync),
-                    label: const Text('立即同步'),
+                    label: const Text('更新目录与所选内容'),
                   ),
                   OutlinedButton(
                     onPressed: sync.hasOfflineLibrary
@@ -281,7 +296,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   child: Text(
                     sync.totalObjects == null
                         ? '正在取得电脑谱库清单…'
-                        : '${sync.committingLibrary ? '文件已核验，正在提交完整离线库' : '正在核对并下载文件'} · ${sync.processedObjects} / ${sync.totalObjects} 份',
+                        : '正在更新所选内容 · ${sync.processedObjects} / ${sync.totalObjects} 份',
                   ),
                 ),
               if (sync.message != null)
@@ -290,12 +305,12 @@ class _SyncScreenState extends State<SyncScreen> {
                   child: _status(sync.message!),
                 ),
               const SizedBox(height: 10),
-              const Text('同步中断后可重试；上次完整副本继续保留。电脑删除的条目标为缺失，已有缓存不会自动永久删除。'),
+              const Text('中断可重试，已有离线内容保留。取消选择不会删除下载或批注。'),
               TextButton(
                 onPressed: sync.busy || !sync.hasOfflineLibrary
                     ? null
                     : () => unawaited(sync.verifyOfflineLibrary()),
-                child: const Text('完整校验离线文件（读取全部内容）'),
+                child: const Text('完整校验已下载文件'),
               ),
             ]),
             if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
@@ -317,7 +332,7 @@ class _SyncScreenState extends State<SyncScreen> {
               const Padding(
                 padding: EdgeInsets.all(12),
                 child: Text(
-                  '首次连接时请允许“本地网络”。若未连接成功，在系统“设置 → 隐私与安全性 → 本地网络”允许本应用，然后返回重试。请保持应用在前台完成全库同步。',
+                  '首次连接请允许“本地网络”。若连接失败，可在系统设置中允许本应用访问本地网络后重试。请保持应用在前台完成目录更新和所选下载。',
                 ),
               ),
           ],

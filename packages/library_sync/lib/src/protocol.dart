@@ -8,6 +8,8 @@ import 'package:reader_state/reader_state.dart';
 import 'manifest.dart';
 import 'replica.dart';
 import 'storage.dart';
+import 'collection.dart';
+import 'collection_replica.dart';
 
 class SyncProtocolException implements Exception {
   const SyncProtocolException(this.message, [this.status, this.code]);
@@ -81,8 +83,9 @@ bool _constantEqual(String a, String b) {
 
 class SyncServer {
   SyncServer._(this.source, this.readerStore, this.stateDirectory, this._lease,
-      this._state, this.ioTimeout, this.maxJsonBytes);
+      this._state, this.ioTimeout, this.maxJsonBytes, this.collectionSource);
   final LibrarySource source;
+  final CollectionLibrarySource? collectionSource;
   final ReaderStateStore readerStore;
   final String stateDirectory;
   final Duration ioTimeout;
@@ -105,6 +108,7 @@ class SyncServer {
       required String stateDirectory,
       InternetAddress? address,
       int port = 0,
+      CollectionLibrarySource? collectionSource,
       Duration ioTimeout = const Duration(seconds: 30),
       int maxJsonBytes = 16 * 1024 * 1024}) async {
     final dir = p.normalize(p.absolute(stateDirectory));
@@ -120,8 +124,8 @@ class SyncServer {
           {'schema': 1, 'peers': <String, dynamic>{}};
       if (state['schema'] != 1)
         throw const FormatException('Unsupported peer schema.');
-      final server = SyncServer._(
-          source, readerStore, dir, lease, state, ioTimeout, maxJsonBytes);
+      final server = SyncServer._(source, readerStore, dir, lease, state,
+          ioTimeout, maxJsonBytes, collectionSource);
       server._server =
           await HttpServer.bind(address ?? InternetAddress.loopbackIPv4, port);
       server._server.idleTimeout = ioTimeout;
@@ -213,7 +217,36 @@ class SyncServer {
         return;
       }
       final peerId = _authenticate(request);
-      if (request.method == 'GET' && path == '/manifest') {
+      final collection = collectionSource;
+      if (collection != null &&
+          request.method == 'GET' &&
+          path == '/v2/catalog') {
+        await _reply(request.response, (await collection.index()).toJson());
+      } else if (collection != null &&
+          request.method == 'POST' &&
+          path == '/v2/prepare') {
+        final body = await _readBody(request, ioTimeout, 4096);
+        final item = await collection.prepare(
+            body['entryId'] as String, body['revisionId'] as String);
+        await _reply(request.response, item.toJson());
+      } else if (collection != null &&
+          request.method == 'GET' &&
+          path == '/v2/object') {
+        final id = request.uri.queryParameters['entryId'] ?? '';
+        final revision = request.uri.queryParameters['revisionId'] ?? '';
+        final item = (await collection.index()).entry(id);
+        if (item == null ||
+            item.missing ||
+            item.hash == null ||
+            item.revisionId != revision) {
+          throw const SyncProtocolException('Object not available.', 404);
+        }
+        final stream = await collection.openSelectedObject(id, revision);
+        request.response.headers.contentType = ContentType.binary;
+        request.response.contentLength = item.length;
+        await request.response.addStream(stream.timeout(ioTimeout));
+        await request.response.close();
+      } else if (request.method == 'GET' && path == '/manifest') {
         await _reply(request.response, (await source.manifest()).toJson());
       } else if (request.method == 'GET' && path == '/object') {
         final id = request.uri.queryParameters['entryId'] ?? '';
@@ -527,6 +560,129 @@ class SyncClient {
       cancellation?.removeListener(cancel);
       http.close(force: true);
       await lease?.close();
+    }
+  }
+
+  /// v2 directory updates never imply downloading an unselected source. v1
+  /// fallback remains confined to its original complete-library endpoint.
+  Future<LibrarySyncResult> syncCollection(ReplicaCollectionView replica,
+      {SyncCancellation? cancellation,
+      FutureOr<void> Function(LibrarySyncProgress progress)?
+          onProgress}) async {
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    void cancel() => http.close(force: true);
+    cancellation?.addListener(cancel);
+    var downloaded = 0, processed = 0, failed = false;
+    void report(int total) {
+      if (onProgress != null) {
+        unawaited(Future<void>.sync(() => onProgress(LibrarySyncProgress(
+                LibrarySyncPhase.transferring, processed, total)))
+            .catchError((Object _) {}));
+      }
+    }
+
+    try {
+      CollectionIndex index;
+      try {
+        index = CollectionIndex.fromJson(await _json(http, '/v2/catalog'));
+      } on SyncProtocolException catch (e) {
+        if (e.status != 404) rethrow;
+        final result = await syncLibrary(replica.objects,
+            cancellation: cancellation, onProgress: onProgress);
+        if (result.status == LibrarySyncStatus.complete)
+          await replica.importLegacy();
+        return result;
+      }
+      cancellation?.check();
+      await replica.updateIndex(index);
+      final targets = index.entries
+          .where((e) => !e.missing && replica.selection.includes(e))
+          .toList();
+      report(targets.length);
+      for (var item in targets) {
+        cancellation?.check();
+        if (!replica.selection.includes(item)) continue;
+        try {
+          if (item.hash == null ||
+              !await replica.objects.hasVerifiedObject(item.object)) {
+            final source =
+                index.sources.firstWhere((s) => s.id == item.sourceId);
+            if (!source.online) {
+              failed = true;
+              processed++;
+              report(targets.length);
+              continue;
+            }
+            final resolved =
+                CatalogItem.fromJson(await _json(http, '/v2/prepare', body: {
+              'entryId': item.entryId,
+              'revisionId': item.revisionId,
+            }));
+            if (resolved.entryId != item.entryId ||
+                resolved.sourceId != item.sourceId) {
+              throw const FormatException('Selected object identity changed.');
+            }
+            item = resolved;
+            if (item.hash == null ||
+                item.missing ||
+                !replica.selection.includes(item)) {
+              failed = true;
+              processed++;
+              report(targets.length);
+              continue;
+            }
+            if (!await replica.objects.hasVerifiedObject(item.object)) {
+              final response =
+                  await _request(http, 'GET', '/v2/object', query: {
+                'entryId': item.entryId,
+                'revisionId': item.revisionId,
+              });
+              await replica.receive(item, response.timeout(ioTimeout),
+                  cancellation: cancellation);
+              downloaded++;
+            } else {
+              replica.rememberResolved(item);
+            }
+          }
+        } catch (error) {
+          if (error is SyncCancelled || cancellation?.isCancelled == true)
+            rethrow;
+          failed = true;
+          if (error is SocketException ||
+              error is TimeoutException ||
+              error is HttpException ||
+              error is FileSystemException) rethrow;
+        }
+        processed++;
+        report(targets.length);
+      }
+      await replica.flush();
+      return LibrarySyncResult(
+          failed ? LibrarySyncStatus.partial : LibrarySyncStatus.complete,
+          downloaded,
+          failed
+              ? 'Some selected files are unavailable; other downloads are retained.'
+              : null,
+          failed ? LibrarySyncFailure.sourceNotReady : null);
+    } catch (error) {
+      final failure = cancellation?.isCancelled == true
+          ? LibrarySyncFailure.cancelled
+          : _libraryFailure(error);
+      return LibrarySyncResult(
+          failure == LibrarySyncFailure.cancelled
+              ? LibrarySyncStatus.cancelled
+              : LibrarySyncStatus.partial,
+          downloaded,
+          _libraryFailureMessage(failure),
+          failure);
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+      // A cancelled/partial batch retains verified objects and their bounded
+      // metadata without serializing the entire directory for every object.
+      try {
+        await replica.flush();
+      } catch (_) {/* Normal-path errors are reported above. */}
     }
   }
 

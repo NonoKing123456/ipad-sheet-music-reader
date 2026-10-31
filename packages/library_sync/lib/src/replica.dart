@@ -165,6 +165,21 @@ class ReplicaLibraryView {
       downloadBytesReceived: _downloadBytesReceived,
       cachedObjectsReused: _cachedObjectsReused);
   SyncManifest? get manifest => _manifest;
+  Map<String, Object?> exportVerificationCache() => {
+        for (final e in _verified.entries) e.key: e.value.toJson(),
+      };
+  void restoreVerificationCache(Map<String, dynamic> records) {
+    for (final e in records.entries) {
+      try {
+        if (p.basename(e.key) == e.key) {
+          _verified[e.key] = _VerifiedObject.fromJson(asMap(e.value));
+        }
+      } catch (_) {
+        /* Invalid metadata falls back to actual byte verification. */
+      }
+    }
+  }
+
   String get _indexPath => p.join(rootDirectory, 'manifest.json');
   static Future<ReplicaLibraryView> open(
       {required String rootDirectory, bool verifyAll = false}) async {
@@ -262,8 +277,11 @@ class ReplicaLibraryView {
     _verified[key] = _VerifiedObject(
         e.hash!, stat.size, stat.modified.microsecondsSinceEpoch, stat.mode);
     _verificationDirty = true;
-    if (_manifest?.entries.any((existing) => existing.entryId == e.entryId &&
-        existing.revisionId == e.revisionId && existing.hash == e.hash) == true &&
+    if (_manifest?.entries.any((existing) =>
+                existing.entryId == e.entryId &&
+                existing.revisionId == e.revisionId &&
+                existing.hash == e.hash) ==
+            true &&
         _ready.add(_objectPath(e))) {
       _presentation = null;
     }

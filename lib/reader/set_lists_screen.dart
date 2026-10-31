@@ -63,11 +63,13 @@ class SetListsScreen extends StatelessWidget {
     required this.locate,
     required this.targets,
     this.sourceChanges,
+    this.loader,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
   final List<ScoreTarget> Function() targets;
   final Listenable? sourceChanges;
+  final ScoreLoader? loader;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: workspace,
@@ -123,6 +125,7 @@ class SetListsScreen extends StatelessWidget {
                                 locate: locate,
                                 targets: targets,
                                 sourceChanges: sourceChanges,
+                                loader: loader,
                               ),
                             ),
                           ),
@@ -144,12 +147,14 @@ class _SetListDetail extends StatelessWidget {
     required this.locate,
     required this.targets,
     this.sourceChanges,
+    this.loader,
   });
   final ReaderWorkspace workspace;
   final String listId;
   final ScoreLocator locate;
   final List<ScoreTarget> Function() targets;
   final Listenable? sourceChanges;
+  final ScoreLoader? loader;
 
   Future<void> _open(BuildContext context, SetListItem item) async {
     final target = locate(item.entryId);
@@ -168,6 +173,7 @@ class _SetListDetail extends StatelessWidget {
           setListId: listId,
           itemId: item.id,
           sourceChanges: sourceChanges,
+          loader: loader,
         ),
       ),
     );
@@ -343,7 +349,9 @@ class _AddScoresState extends State<_AddScores> {
     final matches = widget.targets
         .where(
           (target) => terms.every(
-            (term) => target.displayPath.toLowerCase().contains(term),
+            (term) => '${target.displayPath} ${target.parentFolderLabel ?? ''}'
+                .toLowerCase()
+                .contains(term),
           ),
         )
         .toList();

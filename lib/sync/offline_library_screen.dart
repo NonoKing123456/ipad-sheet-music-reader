@@ -4,6 +4,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:library_core/library_core.dart';
+import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
 
 import '../reader/library_reader_screen.dart';
@@ -30,6 +31,86 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   String _folder = '';
   bool _withinFolder = false;
   bool _opening = false;
+  String? _sourceId, _dismissedMessage;
+  String? get _activeSourceId {
+    final sources = widget.controller.offlineSources;
+    if (sources.any((s) => s.id == _sourceId)) return _sourceId;
+    return sources.isEmpty ? null : sources.first.id;
+  }
+
+  void _selectSource(String id) => setState(() {
+    _sourceId = id;
+    _folder = '';
+    _search.clear();
+    _collapsed.clear();
+  });
+  String _size(int bytes) => bytes >= 1024 * 1024 * 1024
+      ? '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB'
+      : bytes >= 1024 * 1024
+      ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
+      : '${(bytes / 1024).toStringAsFixed(1)} KB';
+  Future<void> _download({
+    String? sourceId,
+    String? folder,
+    LibraryEntry? entry,
+  }) async {
+    final sync = widget.controller;
+    final source =
+        sourceId ??
+        (entry == null ? _activeSourceId : sync.sourceIdFor(entry.id));
+    if (source == null) return;
+    final (count, bytes) = sync.downloadEstimate(
+      sourceId: source,
+      folder: folder,
+      entryId: entry?.id,
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          entry == null
+              ? (folder?.isEmpty ?? true)
+                    ? '下载整个谱库'
+                    : '下载文件夹'
+              : '下载到iPad',
+        ),
+        content: Text('$count 份曲谱 · ${_size(bytes)}\n需要电脑在线，已下载的内容会复用。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: count == 0 ? null : () => Navigator.pop(context, true),
+            child: const Text('下载到iPad'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await sync.selectOffline(
+        OfflineRule(
+          sourceId: source,
+          folder: entry == null ? folder ?? '' : null,
+          entryId: entry?.id,
+          selected: true,
+        ),
+      );
+      if (sync.paired) {
+        await sync.synchronize();
+      } else if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已记住所选曲谱，连接电脑后可下载。')));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('未能保存下载选择，请检查空间后重试。')));
+      }
+    }
+  }
+
   @override
   void dispose() {
     _search.dispose();
@@ -61,9 +142,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     if (_opening) return;
     final target = widget.controller.locateOffline(entry.id);
     if (target == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('离线文件缺失或无法读取，请连接电脑重新同步修复。')));
+      await _download(entry: entry);
       return;
     }
     _opening = true;
@@ -106,22 +185,36 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     builder: (context, _) {
       final sync = widget.controller;
       final view = sync.replica;
-      final folders = view?.snapshot.folders ?? const [''];
+      final folders =
+          sync.activeCollection?.index?.folders[_activeSourceId] ??
+          view?.snapshot.folders ??
+          const [''];
       final folder = folders.contains(_folder) ? _folder : '';
       final searching = _search.text.trim().isNotEmpty;
-      final listing = view?.listFolder(folder);
-      final entries = searching
-          ? (view?.search(
-                  _search.text,
-                  withinFolder: _withinFolder ? folder : null,
-                ) ??
-                <LibraryEntry>[])
-          : (listing?.entries ?? <LibraryEntry>[]);
+      final terms = _search.text.toLowerCase().trim().split(RegExp(r'\s+'));
+      final entries =
+          (sync.offlineSnapshot?.availableEntries ?? <LibraryEntry>[]).where((
+            entry,
+          ) {
+            final sourceId = sync.sourceIdFor(entry.id);
+            if (!searching) {
+              return sourceId == _activeSourceId &&
+                  _parent(entry.relativePath) == folder;
+            }
+            if (_withinFolder &&
+                (sourceId != _activeSourceId ||
+                    !folderContains(folder, entry.relativePath))) {
+              return false;
+            }
+            final text = '${sync.sourceNameFor(entry.id)}/${entry.relativePath}'
+                .toLowerCase();
+            return terms.every(text.contains);
+          }).toList();
       final children = searching
           ? <String>[]
-          : (listing?.folders ?? <String>[]);
+          : folders.where((f) => f.isNotEmpty && _parent(f) == folder).toList();
       final missing =
-          view?.snapshot.entries
+          sync.offlineSnapshot?.entries
               .where((e) => e.status == EntryStatus.missing)
               .toList() ??
           <LibraryEntry>[];
@@ -186,8 +279,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                             Expanded(
                               child: Text(
                                 sync.hasOfflineLibrary
-                                    ? '已保存 ${sync.offlineCount} 份曲谱，断网可读'
-                                    : '先扫描电脑二维码，同步后曲谱会显示在这里',
+                                    ? '已离线 ${sync.offlineCount} 份曲谱'
+                                    : '连接电脑更新目录，再选择要下载的曲谱',
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -204,7 +297,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                 sync.busy
                                     ? '正在同步…'
                                     : sync.paired
-                                    ? '立即同步'
+                                    ? '更新目录与所选内容'
                                     : '扫描电脑二维码',
                               ),
                             ),
@@ -216,13 +309,46 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                           padding: const EdgeInsets.all(12),
                           child: Text(sync.initializationError!),
                         ),
+                      if (sync.busy)
+                        const LinearProgressIndicator(minHeight: 2),
+                      if (sync.message != null &&
+                          sync.message != _dismissedMessage &&
+                          (sync.phase == SyncPhase.partial ||
+                              sync.phase == SyncPhase.failed ||
+                              sync.phase == SyncPhase.cancelled))
+                        ListTile(
+                          dense: true,
+                          title: Text(
+                            sync.message!,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TextButton(
+                                onPressed: sync.busy
+                                    ? null
+                                    : () => unawaited(sync.synchronize()),
+                                child: const Text('重试'),
+                              ),
+                              IconButton(
+                                tooltip: '关闭此提示',
+                                onPressed: () => setState(
+                                  () => _dismissedMessage = sync.message,
+                                ),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                        ),
                       Padding(
                         padding: const EdgeInsets.all(16),
                         child: TextField(
                           controller: _search,
                           onChanged: (_) => setState(() {}),
                           decoration: InputDecoration(
-                            labelText: '搜索离线曲名或文件夹',
+                            labelText: '搜索曲名、谱库或文件夹',
                             prefixIcon: const Icon(Icons.search),
                             suffixIcon: _search.text.isEmpty
                                 ? null
@@ -248,11 +374,20 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                             ),
                             Expanded(
                               child: Text(
-                                folder.isEmpty ? '离线谱库根目录' : folder,
+                                folder.isEmpty ? '谱库根目录' : folder,
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            if (_activeSourceId != null)
+                              TextButton.icon(
+                                onPressed: () =>
+                                    unawaited(_download(folder: folder)),
+                                icon: const Icon(Icons.download_outlined),
+                                label: Text(
+                                  folder.isEmpty ? '下载整个谱库' : '下载此文件夹',
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -315,6 +450,14 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       ),
                                       title: Text(p.posix.basename(child)),
                                       subtitle: Text(child),
+                                      trailing: IconButton(
+                                        tooltip: '下载到iPad',
+                                        icon: const Icon(
+                                          Icons.download_outlined,
+                                        ),
+                                        onPressed: () =>
+                                            unawaited(_download(folder: child)),
+                                      ),
                                       onTap: () => _selectFolder(child),
                                     );
                                   }
@@ -325,7 +468,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       entry.availability ==
                                               ContentAvailability.ready
                                           ? Icons.description_outlined
-                                          : Icons.error_outline,
+                                          : Icons.cloud_download_outlined,
                                     ),
                                     title: Text(
                                       p.posix.basenameWithoutExtension(
@@ -333,11 +476,63 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       ),
                                     ),
                                     subtitle: Text(
-                                      scoreParentFolder(entry.relativePath),
+                                      '${sync.sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}\n${entry.availability == ContentAvailability.ready
+                                          ? sync.hasPendingVersion(entry.id)
+                                                ? '离线旧版 · 有更新待下载'
+                                                : '已离线'
+                                          : '未下载'}',
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     onTap: () => unawaited(_open(entry)),
+                                    trailing: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (entry.availability !=
+                                                ContentAvailability.ready ||
+                                            sync.hasPendingVersion(entry.id))
+                                          IconButton(
+                                            tooltip: '下载到iPad',
+                                            icon: const Icon(
+                                              Icons.download_outlined,
+                                            ),
+                                            onPressed: () => unawaited(
+                                              _download(entry: entry),
+                                            ),
+                                          ),
+                                        PopupMenuButton<String>(
+                                          tooltip: '离线选项',
+                                          onSelected: (value) => unawaited(
+                                            value == 'remove'
+                                                ? sync.removeOfflineDownload(
+                                                    entry.id,
+                                                  )
+                                                : sync.selectOffline(
+                                                    OfflineRule(
+                                                      sourceId: sync
+                                                          .sourceIdFor(
+                                                            entry.id,
+                                                          )!,
+                                                      entryId: entry.id,
+                                                      selected: false,
+                                                    ),
+                                                  ),
+                                          ),
+                                          itemBuilder: (_) => [
+                                            const PopupMenuItem(
+                                              value: 'unselect',
+                                              child: Text('取消离线选择'),
+                                            ),
+                                            if (entry.availability ==
+                                                ContentAvailability.ready)
+                                              const PopupMenuItem(
+                                                value: 'remove',
+                                                child: Text('移除本机下载'),
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
                                   );
                                 },
                               ),
@@ -361,7 +556,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       );
     },
   );
-  Widget _tree(List<String> folders) => ColoredBox(
+  Widget _tree(List<String> folders) => Material(
     color: const Color(0xfff6f5ef),
     child: ListView(
       padding: const EdgeInsets.symmetric(vertical: 16),
@@ -370,7 +565,29 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           padding: EdgeInsets.all(16),
           child: Text('离线文件夹', style: TextStyle(fontWeight: FontWeight.w600)),
         ),
-        _node('', folders, 0),
+        for (final source in widget.controller.offlineSources) ...[
+          ListTile(
+            title: Text(
+              source.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            leading: const Icon(Icons.library_music_outlined),
+            selected: _activeSourceId == source.id && _folder.isEmpty,
+            onTap: () => _selectSource(source.id),
+            trailing: IconButton(
+              tooltip: '下载整个谱库',
+              icon: const Icon(Icons.download_outlined),
+              onPressed: () =>
+                  unawaited(_download(sourceId: source.id, folder: '')),
+            ),
+          ),
+          if (_activeSourceId == source.id)
+            for (final folder in folders.where(
+              (f) => f.isNotEmpty && _parent(f).isEmpty,
+            ))
+              _node(folder, folders, 1),
+        ],
       ],
     ),
   );

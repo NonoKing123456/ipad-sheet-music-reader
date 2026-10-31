@@ -86,3 +86,6 @@
 !/lib/library/score_path_label.dart
 !/lib/reader/paper_color_sampler.dart
 !/lib/reader/reader_tool_button.dart
+!/lib/library/windows_file_identity.dart
+!/packages/library_sync/lib/src/collection.dart
+!/packages/library_sync/lib/src/collection_replica.dart
