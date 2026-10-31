@@ -13,29 +13,33 @@ Offset clampReaderPan({
   double? pageAspect,
   EdgeInsets? obstruction,
 }) {
-  if (obstruction == null) {
-    return Offset(
-      translation.dx.clamp(viewport.width * (1 - scale), 0.0),
-      translation.dy.clamp(viewport.height * (1 - scale), 0.0),
-    );
-  }
   final fitted = pageAspect == null
       ? viewport
       : applyBoxFit(BoxFit.contain, Size(pageAspect, 1), viewport).destination;
   final paper = Alignment.center.inscribe(fitted, Offset.zero & viewport);
-  final left = math.min(obstruction.left, viewport.width * .45),
-      right = math.min(obstruction.right, viewport.width * .45);
-  final top = math.min(obstruction.top, viewport.height * .45),
-      bottom = math.min(obstruction.bottom, viewport.height * .45);
-  final mx = math.min(24.0, (viewport.width - left - right) / 4),
-      my = math.min(24.0, (viewport.height - top - bottom) / 4);
-  final ax = left + mx - paper.left * scale,
-      bx = viewport.width - right - mx - paper.right * scale;
-  final ay = top + my - paper.top * scale,
-      by = viewport.height - bottom - my - paper.bottom * scale;
+  (double, double) normalBounds(double start, double end, double extent) {
+    if ((end - start) * scale <= extent) {
+      final centered = extent / 2 - (start + end) * scale / 2;
+      return (centered, centered);
+    }
+    return (extent - end * scale, -start * scale);
+  }
+
+  final (minX, maxX) = normalBounds(paper.left, paper.right, viewport.width);
+  var (minY, maxY) = normalBounds(paper.top, paper.bottom, viewport.height);
+  if (obstruction != null) {
+    final top = math.min(obstruction.top, viewport.height * .45),
+        bottom = math.min(obstruction.bottom, viewport.height * .45);
+    final margin = math.min(24.0, (viewport.height - top - bottom) / 4);
+    minY = math.min(
+      minY,
+      viewport.height - bottom - margin - paper.bottom * scale,
+    );
+    maxY = math.max(maxY, top + margin - paper.top * scale);
+  }
   return Offset(
-    translation.dx.clamp(math.min(ax, bx), math.max(ax, bx)),
-    translation.dy.clamp(math.min(ay, by), math.max(ay, by)),
+    translation.dx.clamp(minX, maxX),
+    translation.dy.clamp(minY, maxY),
   );
 }
 
@@ -57,6 +61,8 @@ class ReaderInput extends StatefulWidget {
     this.onTransformGestureChanged,
     this.panInsets,
     this.pageAspect,
+    this.editing = false,
+    this.gestureGeneration = 0,
   });
 
   final Widget child;
@@ -71,6 +77,8 @@ class ReaderInput extends StatefulWidget {
   final ValueChanged<bool>? onTransformGestureChanged;
   final EdgeInsets? panInsets;
   final double? pageAspect;
+  final bool editing;
+  final int gestureGeneration;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -85,6 +93,31 @@ class _ReaderInputState extends State<ReaderInput> {
   Offset _sceneAnchor = Offset.zero, _lastTouch = Offset.zero;
   Size _size = Size.zero;
   bool _pinching = false;
+  Axis? _singleAxis;
+  int _touchGeneration = 0;
+
+  @override
+  void didUpdateWidget(covariant ReaderInput oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.editing != widget.editing ||
+        oldWidget.gestureGeneration != widget.gestureGeneration) {
+      final transforming = _touches.length >= 2;
+      final generation = ++_touchGeneration;
+      _pointers.clear();
+      _touches.clear();
+      _origin = null;
+      _pinching = false;
+      _singleAxis = null;
+      _cancelled = true;
+      if (transforming) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && generation == _touchGeneration) {
+            widget.onTransformGestureChanged?.call(false);
+          }
+        });
+      }
+    }
+  }
 
   void _anchorPinch() {
     if (_touches.length != 2 || widget.transform == null) return;
@@ -98,7 +131,7 @@ class _ReaderInputState extends State<ReaderInput> {
   void _matrix(double scale, Offset translation) {
     final controller = widget.transform;
     if (controller == null) return;
-    EdgeInsets? obstruction = widget.panInsets;
+    EdgeInsets? obstruction = widget.editing ? widget.panInsets : null;
     if (obstruction != null) {
       final box =
           (widget.viewportKey?.currentContext?.findRenderObject() ??
@@ -174,6 +207,10 @@ class _ReaderInputState extends State<ReaderInput> {
       return;
     }
     _pointers.add(event.pointer);
+    if (_pointers.length == 1) {
+      _touchGeneration++;
+      _singleAxis = null;
+    }
     if (event.kind == PointerDeviceKind.touch) {
       _touches[event.pointer] = event.localPosition;
       _lastTouch = event.localPosition;
@@ -210,15 +247,26 @@ class _ReaderInputState extends State<ReaderInput> {
           !_pinching &&
           _inkPointers.isEmpty &&
           _touches.length == 1 &&
-          controller.value.getMaxScaleOnAxis() > 1.01) {
+          (widget.editing || controller.value.getMaxScaleOnAxis() > 1.01)) {
         final m = controller.value;
-        _matrix(
-          m.getMaxScaleOnAxis(),
-          Offset(m.storage[12], m.storage[13]) +
-              event.localPosition -
-              _lastTouch,
-        );
-        _cancelled = true;
+        final scale = m.getMaxScaleOnAxis();
+        var delta = event.localPosition - _lastTouch;
+        if (scale <= 1.01 && _origin != null) {
+          final travel = event.localPosition - _origin!;
+          if (_singleAxis == null && travel.distance >= 12) {
+            if (travel.dy.abs() > travel.dx.abs() * 1.2) {
+              _singleAxis = Axis.vertical;
+              delta = travel;
+            } else if (travel.dx.abs() > travel.dy.abs() * 1.2) {
+              _singleAxis = Axis.horizontal;
+            }
+          }
+          if (_singleAxis == Axis.vertical) delta = Offset(0, delta.dy);
+        }
+        if (scale > 1.01 || _singleAxis == Axis.vertical) {
+          _matrix(scale, Offset(m.storage[12], m.storage[13]) + delta);
+          _cancelled = true;
+        }
       }
       _lastTouch = event.localPosition;
     }

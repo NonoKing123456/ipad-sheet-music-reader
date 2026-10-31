@@ -44,7 +44,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
   int _openGeneration = 0;
   double _scale = 1;
   ImageDisplayInfo? _imageInfo;
-  EdgeInsets _panInsets = EdgeInsets.zero;
+  int _inputGeneration = 0;
+
+  void _resetViewport() {
+    setState(() {
+      _inputGeneration++;
+      _transform.value = Matrix4.identity();
+    });
+  }
+
   final Stopwatch _openWatch = Stopwatch();
   final Map<int, Stopwatch> _pageWatches = {};
   final Set<int> _renderedPages = {};
@@ -106,6 +114,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _page = 1;
       _visiblePage = 1;
       _imageInfo = null;
+      _inputGeneration++;
       _renderedPages.clear();
       _pageWatches.clear();
       _transform.value = Matrix4.identity();
@@ -171,6 +180,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _pageWatches[next] = Stopwatch()..start();
     setState(() {
       _page = next;
+      _inputGeneration++;
       _transform.value = Matrix4.identity();
     });
     debugPrint(
@@ -218,10 +228,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: ReaderStage(
-        onObstructionChanged: (insets) => setState(() => _panInsets = insets),
+        onToolsVisibilityChanged: (visible) {
+          if (!visible) _resetViewport();
+        },
         onPrevious: () => _turn(-1),
         onNext: () => _turn(1),
-        onViewportChanged: () => _transform.value = Matrix4.identity(),
+        onViewportChanged: _resetViewport,
         top: _header(),
         bottom: _footer(),
         contentBuilder: (toggleTools) => _tabletFrame(toggleTools),
@@ -373,7 +385,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       allowPointerPageTurns: _scale <= 1.01,
       transform: _transform,
       viewportKey: _viewportKey,
-      panInsets: _panInsets,
+      gestureGeneration: _inputGeneration,
       pageAspect: _document == null
           ? null
           : _document!.pages[_visiblePage - 1].width /

@@ -199,3 +199,107 @@ class _ToolPreview extends CustomPainter {
   bool shouldRepaint(_ToolPreview old) =>
       old.tool != tool || old.value != value;
 }
+
+/// The last successful sample belongs to the eyedropper, independently of the
+/// active palette color. An empty swatch has a slash; white samples have a rim.
+class ReaderSampleColorButton extends StatelessWidget {
+  const ReaderSampleColorButton({
+    super.key,
+    required this.sample,
+    required this.picking,
+    required this.busy,
+    required this.usingSample,
+    required this.onPressed,
+  });
+  final Color? sample;
+  final bool picking, busy, usingSample;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = picking
+        ? '取消吸色'
+        : sample == null
+        ? '吸取谱面底色'
+        : '底色画笔：使用此颜色或重新吸色';
+    return Semantics(
+      button: true,
+      selected: picking || usingSample,
+      label: label,
+      value: sample == null ? '尚未吸色' : '最近吸取的颜色',
+      onTap: onPressed,
+      child: ExcludeSemantics(
+        child: IconButton(
+          tooltip: label,
+          onPressed: onPressed,
+          isSelected: picking || usingSample,
+          style: IconButton.styleFrom(
+            fixedSize: const Size(44, 44),
+            minimumSize: const Size(44, 44),
+            maximumSize: const Size(44, 44),
+            padding: EdgeInsets.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            backgroundColor: picking || usingSample
+                ? Theme.of(context).colorScheme.secondaryContainer
+                : Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+          icon: SizedBox.square(
+            dimension: 30,
+            child: Stack(
+              children: [
+                const Positioned(
+                  left: 0,
+                  top: 0,
+                  child: Icon(Icons.colorize, size: 23),
+                ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    key: const ValueKey('sample-color-swatch'),
+                    width: 15,
+                    height: 15,
+                    decoration: BoxDecoration(
+                      color: sample ?? Colors.transparent,
+                      border: Border.all(
+                        color: const Color(0xff52615c),
+                        width: 1.5,
+                      ),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: sample == null
+                        ? const Icon(
+                            Icons.remove,
+                            key: ValueKey('sample-color-empty'),
+                            size: 12,
+                          )
+                        : null,
+                  ),
+                ),
+                if (picking)
+                  const Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Icon(Icons.add_circle, size: 11),
+                  ),
+                if (usingSample && !picking)
+                  const Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Icon(Icons.check_circle, size: 11),
+                  ),
+                if (busy)
+                  const Positioned.fill(
+                    child: CircularProgressIndicator(strokeWidth: 1.5),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

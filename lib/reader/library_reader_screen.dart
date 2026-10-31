@@ -52,6 +52,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   late final PaperColorSampler _colorSampler =
       widget.colorSampler ?? PaperColorSampler();
   bool _picking = false, _sampling = false;
+  bool _editing = !isMobileReader;
+  int _inputGeneration = 0;
+  int? _lastSample;
+  bool _usingSample = false, _sampleMenuOpen = false;
+  final _sampleButtonKey = GlobalKey();
   int _pickEpoch = 0;
   String? _pickMessage;
   EdgeInsets _panInsets = EdgeInsets.zero;
@@ -109,6 +114,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   void _changed() {
     if (!mounted) return;
     if (_shownPage != _session.pageKey) {
+      _inputGeneration++;
       _cancelPick();
       _prewarmEpoch++;
       _prewarmScore = null;
@@ -204,6 +210,89 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _cancelPick();
     _tool = tool;
   });
+
+  Future<void> _sampleAction() async {
+    if (_writing) return;
+    if (_picking || _lastSample == null) {
+      _togglePicking();
+      return;
+    }
+    final anchor =
+        _sampleButtonKey.currentContext!.findRenderObject()! as RenderBox;
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
+    final page = _visiblePage, generation = _inputGeneration;
+    final sample = _lastSample!;
+    setState(() => _sampleMenuOpen = true);
+    final choice = await showMenu<String>(
+      context: context,
+      requestFocus: false,
+      position: RelativeRect.fromRect(
+        anchor.localToGlobal(Offset.zero, ancestor: overlay) & anchor.size,
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: 'use',
+          height: 48,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  color: Color(sample),
+                  border: Border.all(color: const Color(0xff52615c)),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Text('使用此颜色'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(value: 'pick', height: 48, child: Text('重新吸色')),
+      ],
+    );
+    if (!mounted) return;
+    setState(() => _sampleMenuOpen = false);
+    if (!_editing || generation != _inputGeneration || page != _visiblePage) {
+      return;
+    }
+    if (choice == 'pick') {
+      _togglePicking();
+    } else if (choice == 'use') {
+      setState(() {
+        _cancelPick();
+        _color = sample;
+        _tool = ReaderTool.pen;
+        _usingSample = true;
+      });
+    }
+  }
+
+  void _setEditing(bool editing) {
+    setState(() {
+      _editing = editing;
+      if (!editing) {
+        _inputGeneration++;
+        _cancelPick();
+        _touchTransforming = false;
+        _transform.value = Matrix4.identity();
+      }
+    });
+  }
+
+  void _resetViewport() {
+    setState(() {
+      _inputGeneration++;
+      _cancelPick();
+      _touchTransforming = false;
+      _transform.value = Matrix4.identity();
+    });
+  }
+
   void _togglePicking() {
     if (_writing) return;
     setState(() {
@@ -237,6 +326,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       } else {
         setState(() {
           _color = color.toARGB32() | 0xff000000;
+          _lastSample = _color;
+          _usingSample = true;
           _tool = ReaderTool.pen;
           _picking = false;
         });
@@ -265,13 +356,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         statusLabel: workspace.unsavedCount > 0
             ? '${workspace.unsavedCount} 笔未保存'
             : '阅读状态',
-        onToolsVisibilityChanged: (visible) {
-          if (!visible && _picking) setState(_cancelPick);
-        },
+        onToolsVisibilityChanged: _setEditing,
+        allowOverlayPageKeys: _sampleMenuOpen,
         onObstructionChanged: (insets) => setState(() => _panInsets = insets),
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
-        onViewportChanged: () => _transform.value = Matrix4.identity(),
+        onViewportChanged: _resetViewport,
         top: Material(
           color: const Color(0xfffaf9f5),
           child: Column(
@@ -309,6 +399,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       icon: const Icon(Icons.tablet_mac_outlined),
                       onPressed: () => setState(() {
                         _tablet = !_tablet;
+                        _inputGeneration++;
+                        _cancelPick();
                         _transform.value = Matrix4.identity();
                       }),
                     ),
@@ -318,6 +410,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       icon: const Icon(Icons.screen_rotation_outlined),
                       onPressed: () => setState(() {
                         _landscape = !_landscape;
+                        _inputGeneration++;
+                        _cancelPick();
                         _transform.value = Matrix4.identity();
                       }),
                     ),
@@ -395,6 +489,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       ) ??
                       current.aspectFor(_session.page),
                   mouseInk: true,
+                  editing: _editing,
+                  gestureGeneration: _inputGeneration,
                   onTransformGestureChanged: (active) =>
                       setState(() => _touchTransforming = active),
                   transform: _transform,
@@ -589,22 +685,18 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 onSelect: () => _selectTool(tool),
                 onChanged: (value) => setState(() => _sizes[tool] = value),
               ),
-            IconButton(
-              tooltip: _picking ? '取消吸色' : '吸取谱面底色',
-              isSelected: _picking,
+            ReaderSampleColorButton(
+              key: _sampleButtonKey,
+              sample: _lastSample == null ? null : Color(_lastSample!),
+              picking: _picking,
+              busy: _sampling,
+              usingSample: _usingSample && _tool == ReaderTool.pen,
               onPressed:
                   _visiblePage == null ||
                       _visiblePage != _session.pageKey ||
                       _writing
                   ? null
-                  : _togglePicking,
-              icon: _sampling
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.colorize),
+                  : _sampleAction,
             ),
             for (final (name, color) in [
               ('红色', 0xffc12b32),
@@ -617,6 +709,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 child: InkWell(
                   onTap: () => setState(() {
                     _cancelPick();
+                    _usingSample = false;
                     _color = color;
                   }),
                   child: SizedBox(
@@ -631,12 +724,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                           shape: BoxShape.circle,
                           color: Color(color),
                           border: Border.all(
-                            color: _color == color
+                            color: !_usingSample && _color == color
                                 ? Colors.white
                                 : Colors.transparent,
                             width: 3,
                           ),
-                          boxShadow: _color == color
+                          boxShadow: !_usingSample && _color == color
                               ? const [
                                   BoxShadow(
                                     color: Colors.black38,
@@ -675,6 +768,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   );
 
   void _navigate(NavigationDirection direction) {
+    if (_sampleMenuOpen) {
+      _sampleMenuOpen = false;
+      Navigator.of(context).pop();
+    }
     if (_picking) setState(_cancelPick);
     final step = direction == NavigationDirection.forward ? 1 : -1;
     _direction = step;
