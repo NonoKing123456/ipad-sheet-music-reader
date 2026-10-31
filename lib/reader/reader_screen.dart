@@ -6,6 +6,7 @@ import 'package:path/path.dart' as path;
 import 'package:pdfrx/pdfrx.dart';
 
 import 'reader_input.dart';
+import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
 import 'reader_preview_frame.dart';
 import 'reader_page_window.dart';
@@ -31,11 +32,13 @@ class ReaderScreen extends StatefulWidget {
 class _ReaderScreenState extends State<ReaderScreen> {
   final TransformationController _transform = TransformationController();
   final GlobalKey _viewportKey = GlobalKey();
+  final GlobalKey _seekRegionKey = GlobalKey();
   final List<String> _recent = [];
   PdfDocument? _document;
   String? _filePath;
   String? _error;
   bool _loading = false;
+  bool _toolsVisible = !isMobileReader;
   bool _tablet = false;
   bool _landscape = false;
   int _page = 1;
@@ -172,7 +175,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   void _turn(int direction) {
     if (!_ready) return;
-    final next = _page + direction;
+    _seek(_page + direction);
+  }
+
+  void _seek(int next) {
+    if (!_ready) return;
     if (next < 1 || next > _pageCount) {
       return;
     }
@@ -229,6 +236,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return Scaffold(
       body: ReaderStage(
         onToolsVisibilityChanged: (visible) {
+          setState(() => _toolsVisible = visible);
           if (!visible) _resetViewport();
         },
         onPrevious: () => _turn(-1),
@@ -318,6 +326,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   icon: const Icon(Icons.screen_rotation_outlined),
                   onPressed: () => setState(() => _landscape = !_landscape),
                 ),
+              if (_ready) ...[
+                IconButton(
+                  tooltip: '缩小',
+                  onPressed: () => _zoom(1 / 1.25),
+                  icon: const Icon(Icons.remove, size: 20),
+                ),
+                IconButton(
+                  tooltip: '恢复整页',
+                  onPressed: () => _transform.value = Matrix4.identity(),
+                  icon: const Icon(Icons.fit_screen, size: 20),
+                ),
+                IconButton(
+                  tooltip: '放大',
+                  onPressed: () => _zoom(1.25),
+                  icon: const Icon(Icons.add, size: 20),
+                ),
+              ],
               const SizedBox(width: 8),
               FilledButton.icon(
                 onPressed: _chooseFile,
@@ -385,6 +410,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       allowPointerPageTurns: _scale <= 1.01,
       transform: _transform,
       viewportKey: _viewportKey,
+      touchControlKey: _seekRegionKey,
       gestureGeneration: _inputGeneration,
       pageAspect: _document == null
           ? null
@@ -505,55 +531,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Widget _footer() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      decoration: const BoxDecoration(
-        color: Color(0xfffaf9f5),
-        border: Border(top: BorderSide(color: Color(0xffdedfd7))),
-      ),
-      child: Wrap(
-        crossAxisAlignment: WrapCrossAlignment.center,
-        alignment: WrapAlignment.spaceBetween,
-        children: [
-          IconButton(
-            tooltip: '上一页 · Page Up',
-            onPressed: _ready ? () => _turn(-1) : null,
-            icon: const Icon(Icons.chevron_left),
-          ),
-          Text(
-            _ready ? '$_visiblePage / $_pageCount' : '本地阅读',
-            key: const ValueKey('page-indicator'),
-            style: const TextStyle(
-              fontFeatures: [FontFeature.tabularFigures()],
-            ),
-          ),
-          IconButton(
-            tooltip: '下一页 · Page Down',
-            onPressed: _ready ? () => _turn(1) : null,
-            icon: const Icon(Icons.chevron_right),
-          ),
-          if (_ready) ...[
-            IconButton(
-              tooltip: '缩小',
-              onPressed: () => _zoom(1 / 1.25),
-              icon: const Icon(Icons.remove, size: 20),
-            ),
-            Tooltip(
-              message: '恢复整页',
-              child: TextButton(
-                onPressed: () => _transform.value = Matrix4.identity(),
-                child: Text('${(_scale * 100).round()}%'),
-              ),
-            ),
-            IconButton(
-              tooltip: '放大',
-              onPressed: () => _zoom(1.25),
-              icon: const Icon(Icons.add, size: 20),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
+  Widget _footer() => !_ready || !_toolsVisible
+      ? const SizedBox.shrink()
+      : ReaderPageSeekBar(
+          hitRegionKey: _seekRegionKey,
+          key: ValueKey(_openGeneration),
+          currentPage: _visiblePage,
+          pageCount: _pageCount,
+          onSeek: (page, _) => _seek(page),
+        );
 }

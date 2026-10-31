@@ -60,6 +60,7 @@ class ReaderInput extends StatefulWidget {
     this.onCenterTap,
     this.transform,
     this.viewportKey,
+    this.touchControlKey,
     this.mouseInk = false,
     this.onTransformGestureChanged,
     this.panInsets,
@@ -76,6 +77,7 @@ class ReaderInput extends StatefulWidget {
   final VoidCallback? onCenterTap;
   final TransformationController? transform;
   final GlobalKey? viewportKey;
+  final GlobalKey? touchControlKey;
   final bool mouseInk;
   final ValueChanged<bool>? onTransformGestureChanged;
   final EdgeInsets? panInsets;
@@ -203,6 +205,17 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _down(PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.touch ||
+        event.kind == PointerDeviceKind.mouse) {
+      final box = widget.touchControlKey?.currentContext?.findRenderObject();
+      if (box is RenderBox &&
+          box.hasSize &&
+          (Offset.zero & box.size).contains(
+            box.globalToLocal(event.position),
+          )) {
+        return;
+      }
+    }
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus ||
         (widget.mouseInk && event.kind == PointerDeviceKind.mouse)) {

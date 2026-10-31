@@ -192,6 +192,7 @@ class AnnotationCanvas extends StatefulWidget {
     this.eraserRadiusFraction = .018,
     this.onWritingChanged,
     this.suspended = false,
+    this.mouseControlKey,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -199,6 +200,7 @@ class AnnotationCanvas extends StatefulWidget {
   final StrokeStyle style;
   final bool eraser;
   final bool suspended;
+  final GlobalKey? mouseControlKey;
   final double eraserRadiusFraction;
   final ValueChanged<bool>? onWritingChanged;
   @override
@@ -333,6 +335,16 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   }
 
   void _down(PointerDownEvent event, Size size) {
+    if (event.kind == PointerDeviceKind.mouse) {
+      final box = widget.mouseControlKey?.currentContext?.findRenderObject();
+      if (box is RenderBox &&
+          box.hasSize &&
+          (Offset.zero & box.size).contains(
+            box.globalToLocal(event.position),
+          )) {
+        return;
+      }
+    }
     if (event.kind == PointerDeviceKind.touch) {
       _touches.add(event.pointer);
       if (_paused) {

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -207,23 +208,21 @@ Future<LoadedScore> loadScore(
       renderPath: readingPath,
     );
   }
-  final codec = await ui.instantiateImageCodec(
-    await File(readingPath).readAsBytes(),
-    targetWidth: 2200,
-    allowUpscaling: false,
-  );
+  // Metadata only: decoding a frame here used to allocate a redundant bitmap
+  // before the reader's budgeted renderer decoded the same file again.
+  final buffer = await ui.ImmutableBuffer.fromFilePath(readingPath);
+  ui.ImageDescriptor? descriptor;
   try {
-    final frame = await codec.getNextFrame();
-    final aspect = frame.image.width / frame.image.height;
-    frame.image.dispose();
+    descriptor = await ui.ImageDescriptor.encoded(buffer);
     return LoadedScore(
       target: target,
       pageCount: 1,
-      imageAspect: aspect,
+      imageAspect: descriptor.width / descriptor.height,
       renderPath: readingPath,
     );
   } finally {
-    codec.dispose();
+    descriptor?.dispose();
+    buffer.dispose();
   }
 }
 
@@ -442,6 +441,7 @@ class ReaderSession extends ChangeNotifier {
     final epoch = ++_epoch;
     cancelPrewarm();
     _pendingTurns.clear();
+    _pendingActions.clear();
     _navigationTask = null;
     loading = true;
     message = null;
@@ -479,20 +479,70 @@ class ReaderSession extends ChangeNotifier {
   }
 
   Future<void> turn(NavigationDirection direction) {
-    if (!_pendingTurns.add(direction)) {
+    if (_pendingActions.length >= ReaderNavigationQueue.maxPresses ||
+        !_pendingTurns.add(direction)) {
       message = '翻页操作过密，已保留先前请求；请稍候再翻。';
       _changed();
       return _navigationTask ?? Future<void>.value();
     }
+    _pendingActions.addLast(direction);
     return _navigationTask ??= _drainTurns(_epoch);
   }
 
+  /// Live scrubbing replaces only consecutive pending requests from the same
+  /// gesture. Independent pedal steps remain ordered between seek requests.
+  Future<void> seek(int pageNumber, {required Object gesture}) {
+    final document = current, position = this.position;
+    if (document == null || position == null || _disposed) {
+      return Future.value();
+    }
+    final target = pageNumber.clamp(1, document.pageCount);
+    final last = _pendingActions.isEmpty ? null : _pendingActions.last;
+    if (last is _PageSeek &&
+        identical(last.gesture, gesture) &&
+        last.document == document.target.key &&
+        last.itemId == position.setListItemId) {
+      last.page = target;
+    } else {
+      if (_pendingActions.length >= ReaderNavigationQueue.maxPresses) {
+        return Future.value();
+      }
+      _pendingActions.addLast(
+        _PageSeek(document.target.key, position.setListItemId, target, gesture),
+      );
+    }
+    return _navigationTask ??= _drainTurns(_epoch);
+  }
+
+  void cancelSeek(Object gesture) {
+    _pendingActions.removeWhere(
+      (action) => action is _PageSeek && identical(action.gesture, gesture),
+    );
+  }
+
+  final _pendingActions = Queue<Object>();
   final _pendingTurns = ReaderNavigationQueue();
   Future<void>? _navigationTask;
   Future<void> _drainTurns(int epoch) async {
+    await Future<void>.value();
     try {
-      while (!_disposed && epoch == _epoch && !_pendingTurns.isEmpty) {
-        await _turn(_pendingTurns.take()!, epoch);
+      while (!_disposed && epoch == _epoch && _pendingActions.isNotEmpty) {
+        final action = _pendingActions.removeFirst();
+        if (action is NavigationDirection) {
+          await _turn(_pendingTurns.take()!, epoch);
+        } else if (action is _PageSeek &&
+            current?.target.key == action.document &&
+            position?.setListItemId == action.itemId) {
+          position = ReadingPosition(
+            entryId: action.document.entryId,
+            revisionId: action.document.revisionId,
+            pageNumber: action.page,
+            setListItemId: action.itemId,
+          );
+          cancelPrewarm();
+          _savePosition();
+          _changed();
+        }
       }
     } finally {
       if (epoch == _epoch) _navigationTask = null;
@@ -627,4 +677,12 @@ class ReaderSession extends ChangeNotifier {
     _cache.clear();
     super.dispose();
   }
+}
+
+class _PageSeek {
+  _PageSeek(this.document, this.itemId, this.page, this.gesture);
+  final DocumentKey document;
+  final String? itemId;
+  final Object gesture;
+  int page;
 }

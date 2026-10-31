@@ -1,3 +1,8 @@
+import Foundation
+import ImageIO
+import UniformTypeIdentifiers
+
+#if canImport(Flutter)
 import Flutter
 import UIKit
 import AVFoundation
@@ -5,6 +10,7 @@ import AVFoundation
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var scannerChannel: FlutterMethodChannel?
+  private var rasterChannel: FlutterMethodChannel?
   private var scanPending = false
   override func application(
     _ application: UIApplication,
@@ -15,6 +21,15 @@ import AVFoundation
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let raster = FlutterMethodChannel(
+      name: "score_reader/raster_decode",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    rasterChannel = raster
+    raster.setMethodCallHandler { call, result in
+      RasterDecodeBridge.shared.handle(call, result: result)
+    }
+
     let channel = FlutterMethodChannel(
       name: "score_reader/pairing_scanner",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
@@ -157,5 +172,121 @@ private final class PairingScannerController: UIViewController, AVCaptureMetadat
   func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
     guard let text = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
     finish(text, nil)
+  }
+}
+
+
+/// ImageIO streaming downsample for sources larger than the Flutter pixel
+/// budget. The source is never rewritten. Only a target-sized, temporary PNG
+/// crosses into Flutter, avoiding a full source bitmap in Flutter's decoder.
+private final class RasterDecodeBridge {
+  static let shared = RasterDecodeBridge()
+  private let queue = DispatchQueue(label: "score_reader.raster", qos: .userInitiated)
+  private let directory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("score-reader-downsample", isDirectory: true)
+
+  func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let arguments = call.arguments as? [String: Any],
+          let path = arguments["path"] as? String else {
+      result(FlutterError(code: "invalid_raster", message: "Invalid image request", details: nil))
+      return
+    }
+    if call.method == "releaseRaster" {
+      queue.async {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        var removed = false
+        if url.deletingLastPathComponent() == self.directory.standardizedFileURL {
+          do { try FileManager.default.removeItem(at: url); removed = true } catch { }
+        }
+        DispatchQueue.main.async { result(removed) }
+      }
+      return
+    }
+    guard call.method == "prepareRaster" else { result(FlutterMethodNotImplemented); return }
+    guard let width = arguments["width"] as? Int,
+          let height = arguments["height"] as? Int,
+          width > 0, height > 0, width <= 8192, height <= 8192,
+          width * height <= 12_000_000 else {
+      result(FlutterError(code: "invalid_raster", message: "Image request exceeds budget", details: nil))
+      return
+    }
+    queue.async {
+      do {
+        let output = try autoreleasepool {
+          try RasterImageIO.prepare(path: path, width: width, height: height, directory: self.directory)
+        }
+        DispatchQueue.main.async { result(output.path) }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "raster_failed", message: "Image downsample failed", details: nil))
+        }
+      }
+    }
+  }
+
+}
+#endif
+
+/// Shared by the iOS bridge and a native macOS synthetic-image smoke.
+enum RasterImageIO {
+  private enum RasterError: Error { case invalidImage, outputFailed }
+  private static let queue = DispatchQueue(label: "score_reader.imageio.core")
+  private static var active = 0, maximumActive = 0, jobs = 0
+  static func metrics() -> (active: Int, maximumActive: Int, jobs: Int) {
+    queue.sync { (active, maximumActive, jobs) }
+  }
+  static func prepare(path: String, width: Int, height: Int, directory: URL) throws -> URL {
+    try queue.sync {
+      active += 1; jobs += 1; maximumActive = max(maximumActive, active)
+      defer { active -= 1 }
+      guard width > 0, height > 0, width <= 8192, height <= 8192,
+            width * height <= 12_000_000 else { throw RasterError.invalidImage }
+      return try downsample(path: path, width: width, height: height, directory: directory)
+    }
+  }
+  private static func downsample(path: String, width: Int, height: Int, directory: URL) throws -> URL {
+    let files = FileManager.default
+    guard URL(fileURLWithPath: path).standardizedFileURL.deletingLastPathComponent()
+            != directory.standardizedFileURL else { throw RasterError.invalidImage }
+    try files.createDirectory(at: directory, withIntermediateDirectories: true)
+    // Dart serializes the complete native+Flutter decode pipeline. At most one
+    // thumbnail is live; remove an interrupted previous session's own files.
+    for old in try files.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+      if old.pathExtension == "png" { try files.removeItem(at: old) }
+    }
+    guard let source = CGImageSourceCreateWithURL(
+      URL(fileURLWithPath: path) as CFURL,
+      [kCGImageSourceShouldCache: false] as CFDictionary
+    ), let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let sourceWidth = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+      let sourceHeight = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+      throw RasterError.invalidImage
+    }
+    let short = min(sourceWidth.doubleValue, sourceHeight.doubleValue)
+    let long = max(sourceWidth.doubleValue, sourceHeight.doubleValue)
+    guard short > 0, long > 0 else { throw RasterError.invalidImage }
+    let ratio = short / long
+    var edge = min(8192, max(width, height))
+    while Double(edge) * ceil(Double(edge) * ratio) > 12_000_000 { edge -= 1 }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: edge,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceShouldAllowFloat: false,
+    ]
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+          image.width <= 8192, image.height <= 8192,
+          image.width * image.height <= 12_000_000 else { throw RasterError.invalidImage }
+    let output = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("png")
+    guard let destination = CGImageDestinationCreateWithURL(output as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+      throw RasterError.outputFailed
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else {
+      try? files.removeItem(at: output)
+      throw RasterError.outputFailed
+    }
+    return output
   }
 }

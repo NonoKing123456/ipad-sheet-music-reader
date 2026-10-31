@@ -27,6 +27,14 @@ class ReplicaCollectionView {
       p.join(objects.rootDirectory, 'selected-resolutions-v2.log');
   bool isReady(CatalogItem item) =>
       _ready.contains('${item.entryId}/${item.revisionId}/${item.hash}');
+
+  /// Current metadata in one pass, including journal resolutions. Unlike a
+  /// repeated itemFor lookup this does not search the full index for every row.
+  Iterable<CatalogItem> get currentItems sync* {
+    for (final original in index?.entries ?? <CatalogItem>[]) {
+      yield _resolved[original.entryId] ?? original;
+    }
+  }
   static Future<ReplicaCollectionView> open(ReplicaLibraryView objects) async {
     final view = ReplicaCollectionView._(objects);
     final lease = await DirectoryLease.acquire(objects.rootDirectory);

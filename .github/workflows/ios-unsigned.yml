@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: 64a6b6eddc38da879ab9249786758b9f149d955268e38c92674dbef4e131a77e
+      REVIEWED_SOURCE_SHA256: b3369bed1015c71e679139dae2e2459b9bf085642fa9ab3655e3a04b27eae90c
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +51,17 @@ jobs:
             https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
           test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_REVISION"
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Run the shared ImageIO core on a synthetic large image
+        run: |
+          set -euo pipefail
+          xcrun swiftc -swift-version 5 -parse-as-library \
+            ios/Runner/AppDelegate.swift tool/raster_decode_smoke.swift \
+            -o "$RUNNER_TEMP/raster-decode-smoke"
+          "$RUNNER_TEMP/raster-decode-smoke" --make-fixture "$RUNNER_TEMP/raster-fixture.PNG" \
+            | tee "$RUNNER_TEMP/raster-fixture-make.txt"
+          "$RUNNER_TEMP/raster-decode-smoke" --decode "$RUNNER_TEMP/raster-fixture.PNG" \
+            | tee "$RUNNER_TEMP/raster-imageio-smoke.txt"
 
       - name: Build an unsigned device application
         run: |
@@ -78,6 +89,8 @@ jobs:
             sw_vers
             xcodebuild -version
             cat "$RUNNER_TEMP/storage-root-smoke.txt"
+            cat "$RUNNER_TEMP/raster-fixture-make.txt"
+            cat "$RUNNER_TEMP/raster-imageio-smoke.txt"
           } > unsigned-output/build-info.txt
           python3 - <<'PY' | tee -a unsigned-output/build-info.txt
           import pathlib

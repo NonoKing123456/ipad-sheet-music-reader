@@ -441,6 +441,15 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   : () => _selectFolder(_parent(folder)),
                               icon: const Icon(Icons.arrow_upward),
                             ),
+                            if (_activeSourceId != null) ...[
+                              _OfflineFolderIcon(
+                                status: sync.folderOfflineStatus(
+                                  sourceId: _activeSourceId!,
+                                  folder: folder,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                            ],
                             Expanded(
                               child: Text(
                                 folder.isEmpty ? '谱库根目录' : folder,
@@ -448,7 +457,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            if (_activeSourceId != null)
+                            if (_activeSourceId != null &&
+                                sync.needsOfflineDownload(
+                                  sourceId: _activeSourceId!,
+                                  folder: folder,
+                                ))
                               TextButton.icon(
                                 onPressed: () =>
                                     unawaited(_download(folder: folder)),
@@ -514,19 +527,29 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   if (index < children.length) {
                                     final child = children[index];
                                     return ListTile(
-                                      leading: const Icon(
-                                        Icons.folder_outlined,
+                                      leading: _OfflineFolderIcon(
+                                        status: sync.folderOfflineStatus(
+                                          sourceId: _activeSourceId!,
+                                          folder: child,
+                                        ),
                                       ),
                                       title: Text(p.posix.basename(child)),
                                       subtitle: Text(child),
-                                      trailing: IconButton(
-                                        tooltip: '下载到iPad',
-                                        icon: const Icon(
-                                          Icons.download_outlined,
-                                        ),
-                                        onPressed: () =>
-                                            unawaited(_download(folder: child)),
-                                      ),
+                                      trailing:
+                                          sync.needsOfflineDownload(
+                                            sourceId: _activeSourceId!,
+                                            folder: child,
+                                          )
+                                          ? IconButton(
+                                              tooltip: '下载到iPad',
+                                              icon: const Icon(
+                                                Icons.download_outlined,
+                                              ),
+                                              onPressed: () => unawaited(
+                                                _download(folder: child),
+                                              ),
+                                            )
+                                          : null,
                                       onTap: () => _selectFolder(child),
                                     );
                                   }
@@ -639,15 +662,23 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            leading: const Icon(Icons.library_music_outlined),
+            leading: _OfflineFolderIcon(
+              source: true,
+              status: widget.controller.folderOfflineStatus(
+                sourceId: source.id,
+              ),
+            ),
             selected: _activeSourceId == source.id && _folder.isEmpty,
             onTap: () => _selectSource(source.id),
-            trailing: IconButton(
-              tooltip: '下载整个谱库',
-              icon: const Icon(Icons.download_outlined),
-              onPressed: () =>
-                  unawaited(_download(sourceId: source.id, folder: '')),
-            ),
+            trailing:
+                widget.controller.needsOfflineDownload(sourceId: source.id)
+                ? IconButton(
+                    tooltip: '下载整个谱库',
+                    icon: const Icon(Icons.download_outlined),
+                    onPressed: () =>
+                        unawaited(_download(sourceId: source.id, folder: '')),
+                  )
+                : null,
           ),
           if (_activeSourceId == source.id)
             for (final folder in folders.where(
@@ -675,7 +706,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           child: ListTile(
             dense: true,
             selected: _folder == folder,
-            leading: const Icon(Icons.folder_outlined),
+            leading: _OfflineFolderIcon(
+              status: widget.controller.folderOfflineStatus(
+                sourceId: _activeSourceId!,
+                folder: folder,
+              ),
+            ),
             title: Text(
               folder.isEmpty ? '全部离线谱库' : p.posix.basename(folder),
               maxLines: 1,
@@ -702,4 +738,52 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       ],
     );
   }
+}
+
+class _OfflineFolderIcon extends StatelessWidget {
+  const _OfflineFolderIcon({required this.status, this.source = false});
+  final OfflineFolderStatus status;
+  final bool source;
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: status.description,
+    excludeFromSemantics: true,
+    child: Semantics(
+      label: status.description,
+      child: ExcludeSemantics(
+        child: SizedBox.square(
+          dimension: 28,
+          child: Stack(
+            children: [
+              Icon(
+                source ? Icons.library_music_outlined : Icons.folder_outlined,
+              ),
+              if (status.total > 0)
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surface,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      status.allCurrent
+                          ? Icons.check_circle
+                          : status.readable == 0
+                          ? Icons.cloud_download
+                          : Icons.contrast,
+                      size: 14,
+                      color: status.allCurrent
+                          ? const Color(0xff3e7350)
+                          : const Color(0xff52615c),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }

@@ -134,6 +134,74 @@ class SyncController extends ChangeNotifier {
         readable.revisionId != current.revisionId;
   }
 
+  LibrarySnapshot? _downloadFolderSnapshot;
+  final _downloadFolders = <(String, String), OfflineFolderStatus>{};
+
+  /// One in-memory ancestor summary per snapshot; every row reads this map.
+  OfflineFolderStatus folderOfflineStatus({
+    required String sourceId,
+    String folder = '',
+  }) {
+    final snapshot = offlineSnapshot;
+    if (!identical(snapshot, _downloadFolderSnapshot)) {
+      _downloadFolderSnapshot = snapshot;
+      _downloadFolders.clear();
+      void include(
+        String source,
+        String path,
+        bool current,
+        bool readable,
+        bool pending,
+      ) {
+        var folder = path.contains('/')
+            ? path.substring(0, path.lastIndexOf('/'))
+            : '';
+        while (true) {
+          final key = (source, folder);
+          final prior = _downloadFolders[key] ?? const OfflineFolderStatus();
+          _downloadFolders[key] = OfflineFolderStatus(
+            total: prior.total + 1,
+            currentReady: prior.currentReady + (current ? 1 : 0),
+            readable: prior.readable + (readable ? 1 : 0),
+            pendingUpdate: prior.pendingUpdate + (pending ? 1 : 0),
+          );
+          if (folder.isEmpty) break;
+          folder = folder.contains('/')
+              ? folder.substring(0, folder.lastIndexOf('/'))
+              : '';
+        }
+      }
+
+      final selected = activeCollection;
+      if (selected != null) {
+        for (final item in selected.currentItems) {
+          if (item.missing) continue;
+          final old = selected.readableItemFor(item.entryId);
+          final readable = old != null && selected.isReady(old);
+          final current =
+              selected.isReady(item) ||
+              (readable && old.revisionId == item.revisionId);
+          include(
+            item.sourceId,
+            item.relativePath,
+            current,
+            readable,
+            readable && old.revisionId != item.revisionId,
+          );
+        }
+      } else if (snapshot != null) {
+        for (final entry in snapshot.availableEntries) {
+          final ready = entry.availability == ContentAvailability.ready;
+          include('legacy', entry.relativePath, ready, ready, false);
+        }
+      }
+    }
+    return _downloadFolders[(sourceId, folder)] ?? const OfflineFolderStatus();
+  }
+
+  bool needsOfflineDownload({required String sourceId, String folder = ''}) =>
+      folderOfflineStatus(sourceId: sourceId, folder: folder).needsDownload;
+
   (int, int) get selectedDownloadTotals {
     final selected =
         collection?.index?.entries.where(
@@ -862,4 +930,25 @@ class SyncController extends ChangeNotifier {
     unawaited(stopServer());
     super.dispose();
   }
+}
+
+class OfflineFolderStatus {
+  const OfflineFolderStatus({
+    this.total = 0,
+    this.currentReady = 0,
+    this.readable = 0,
+    this.pendingUpdate = 0,
+  });
+  final int total, currentReady, readable, pendingUpdate;
+  bool get allCurrent => total > 0 && currentReady == total;
+  bool get needsDownload => currentReady < total;
+  String get description => total == 0
+      ? '空文件夹'
+      : allCurrent
+      ? '全部已下载 · $currentReady / $total 份'
+      : readable == 0
+      ? '全部未下载 · 0 / $total 份'
+      : pendingUpdate > 0
+      ? '部分已下载 · $readable / $total 份已有离线副本，$pendingUpdate 份待更新'
+      : '部分已下载 · $readable / $total 份';
 }

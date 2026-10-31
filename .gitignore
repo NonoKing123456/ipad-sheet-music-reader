@@ -51,6 +51,7 @@
 !/lib/reader/library_reader_screen.dart
 !/lib/reader/raster_plan.dart
 !/lib/reader/reader_input.dart
+!/lib/reader/reader_page_seek_bar.dart
 !/lib/reader/reader_page_window.dart
 !/lib/reader/reader_preview_frame.dart
 !/lib/reader/reader_screen.dart
@@ -84,6 +85,7 @@
 !/pubspec.lock
 !/pubspec.yaml
 !/tool/storage_root_smoke.dart
+!/tool/raster_decode_smoke.swift
 !/lib/library/score_path_label.dart
 !/lib/reader/paper_color_sampler.dart
 !/lib/reader/reader_tool_button.dart

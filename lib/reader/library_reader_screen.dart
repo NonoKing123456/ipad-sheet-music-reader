@@ -6,6 +6,7 @@ import 'package:reader_state/reader_state.dart';
 
 import 'annotation_canvas.dart';
 import 'reader_input.dart';
+import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
 import 'reader_preview_frame.dart';
 import 'reader_page_window.dart';
@@ -46,6 +47,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   late final ReaderSession _session;
   final TransformationController _transform = TransformationController();
   final GlobalKey _viewportKey = GlobalKey();
+  final GlobalKey _seekRegionKey = GlobalKey();
   bool _tablet = false;
   bool _landscape = false;
   bool _writing = false;
@@ -379,6 +381,21 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
+                  IconButton(
+                    tooltip: '缩小',
+                    onPressed: () => _zoom(1 / 1.25),
+                    icon: const Icon(Icons.remove, size: 20),
+                  ),
+                  IconButton(
+                    tooltip: '恢复整页',
+                    onPressed: () => _transform.value = Matrix4.identity(),
+                    icon: const Icon(Icons.fit_screen, size: 20),
+                  ),
+                  IconButton(
+                    tooltip: '放大',
+                    onPressed: () => _zoom(1.25),
+                    icon: const Icon(Icons.add, size: 20),
+                  ),
                   if (_visibleDocument != null && _visibleDocument!.pdf == null)
                     PopupMenuButton<String>(
                       tooltip: '更多',
@@ -495,6 +512,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       setState(() => _touchTransforming = active),
                   transform: _transform,
                   viewportKey: _viewportKey,
+                  touchControlKey: _seekRegionKey,
                   child: ReaderPageWindow(
                     documentKey: current.target.key,
                     pageNumber: _session.page,
@@ -593,6 +611,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             },
           ),
         AnnotationCanvas(
+          mouseControlKey: _seekRegionKey,
           workspace: widget.workspace,
           page: surfacePage,
           enabled: active && !_session.sourceChanged && !_picking,
@@ -796,56 +815,31 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
-  Widget _footer() => Material(
-    color: const Color(0xfffaf9f5),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Wrap(
-        crossAxisAlignment: WrapCrossAlignment.center,
-        alignment: WrapAlignment.spaceBetween,
-        children: [
-          IconButton(
-            tooltip: '上一页 · Page Up',
-            onPressed: _session.current == null
-                ? null
-                : () => _navigate(NavigationDirection.backward),
-            icon: const Icon(Icons.chevron_left),
-          ),
-          Text(
-            '${_visiblePage?.pageNumber ?? 1} / ${_visibleDocument?.pageCount ?? 0}',
-            key: const ValueKey('page-indicator'),
-          ),
-          IconButton(
-            tooltip: '下一页 · Page Down',
-            onPressed: _session.current == null
-                ? null
-                : () => _navigate(NavigationDirection.forward),
-            icon: const Icon(Icons.chevron_right),
-          ),
-          if (widget.workspace.unsavedCount > 0)
-            const Text(
-              '未保存',
-              style: TextStyle(color: Colors.red, fontSize: 12),
-            ),
-          const SizedBox(width: 16),
-          IconButton(
-            tooltip: '缩小',
-            onPressed: () => _zoom(1 / 1.25),
-            icon: const Icon(Icons.remove, size: 20),
-          ),
-          TextButton(
-            onPressed: () => _transform.value = Matrix4.identity(),
-            child: Text('${(_scale * 100).round()}%'),
-          ),
-          IconButton(
-            tooltip: '放大',
-            onPressed: () => _zoom(1.25),
-            icon: const Icon(Icons.add, size: 20),
-          ),
-        ],
-      ),
-    ),
-  );
+  Widget _footer() {
+    if (!_editing || _writing || _visiblePage == null) {
+      return const SizedBox.shrink();
+    }
+    return ReaderPageSeekBar(
+      hitRegionKey: _seekRegionKey,
+      key: ValueKey(_visibleDocument?.target.key),
+      currentPage: _visiblePage!.pageNumber,
+      pageCount: _visibleDocument?.pageCount ?? 1,
+      enabled: _session.current?.target.key == _visibleDocument?.target.key,
+      onCancel: _session.cancelSeek,
+      onSeek: (number, gesture) {
+        if (_writing ||
+            !_editing ||
+            _session.current?.target.key != _visibleDocument?.target.key) {
+          return;
+        }
+        if (_picking) setState(_cancelPick);
+        _direction = number >= _visiblePage!.pageNumber ? 1 : -1;
+        _requestedAt =
+            widget.presentationClock?.call() ?? readerPresentationNow();
+        unawaited(_session.seek(number, gesture: gesture));
+      },
+    );
+  }
 
   void _zoom(double factor) {
     final next = (_scale * factor).clamp(1.0, 4.0);

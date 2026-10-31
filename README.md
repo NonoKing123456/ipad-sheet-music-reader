@@ -1,13 +1,15 @@
 # iPad Sheet Music Reader
 
-Source-only application repository for **0.8.1+14**. Scores, annotations, set lists, credentials and build outputs are excluded.
+Source-only application repository for **0.8.2+15**. Personal scores, ink, set lists, credentials, private probes and build outputs are excluded.
 
-Windows keeps independent score folders in their original hierarchy. iPad updates the directory and downloads selected scores or folders. Existing pairing, cached readable revisions, ink and set-list references remain supported.
+Windows keeps independent score folders in their original hierarchy. iPad downloads selected sources, folders or scores. Folder badges distinguish none, partial and all current versions downloaded; completed folders hide redundant download actions. Existing pairing, readable old revisions, annotations and set-list references remain supported.
 
-Reading at fit stays centered. Zoomed paper supports bounded one- and two-finger panning; closing annotation tools resets fit and cancels stale gestures. Compact directory badges show offline or pending-update status. Newly captured ink uses incremental smoothing with one shared polyline for preview, persistence and local erasure; existing ink is unchanged. Touch never draws ink. The 90 ms page transition and ordered pedals are retained.
+Reading fit stays centered; zoomed paper supports bounded panning. Image decoding is serialized with foreground priority, latest-target coalescing and resource leases. Image metadata no longer decodes a redundant frame. Large iOS images use ImageIO target-size downsampling; small images keep the existing pixel path. Original files are never rewritten.
+
+The transparent page dots seek while dragging, use bounded visual points and preserve ordered pedals, actual presented-page bookmarks and annotation page identity. Actual pen-down hides the dots and reaches the canvas, including the bottom control area. Hidden tools hide the dots. Zoom buttons and fit remain in the top controls; percentages and the solid bottom bar are removed. New-ink smoothing and the 90 ms page transition are retained.
 
 Pair once on the same network using the Windows QR, then use **更新目录与所选内容**. Preserve the bundle ID and local signing identity when updating; do not uninstall or clear data.
 
-The unsigned iPad workflow uses fixed Flutter **3.47.8**, public standard **macos-26** and Xcode **26.6**. It verifies **IOS / arm64** and publishes the unsigned IPA, checksum and build information as a prerelease. Local signing is required for installation. No Apple credentials or personal scores are uploaded. Keep the exact reviewed source allowlist and standard free runner.
+The unsigned workflow uses fixed Flutter **3.47.8**, standard public **macos-26** and Xcode **26.6**. It runs the shared ImageIO production core on a synthetic large PNG in a separate decode process, records RSS and cleanup evidence, then builds and verifies **IOS / arm64**. The new native smoke and iOS path still require a successful cloud run; local Windows mechanisms and focused tests have been independently reviewed. macOS RSS does not establish an iPad memory limit or explain a device Jetsam report.
 
-Workflow-path pushes trigger the build. Owner manual dispatch requires `public_source_confirmed`. The workflow records the reviewed source archive SHA256. Focused automated checks and independent review passed; physical iPad writing and pedal feel still require device feedback.
+The workflow publishes only an unsigned IPA, checksum and build information as a prerelease. Local signing is required. No Apple credentials or private scores are uploaded. Keep the exact reviewed source allowlist and standard free runner. Workflow-path pushes trigger builds; owner manual dispatch requires `public_source_confirmed`.

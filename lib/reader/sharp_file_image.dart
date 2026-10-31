@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -82,6 +84,7 @@ class SharpFileImage extends StatefulWidget {
     this.colorKey,
     this.active = true,
     this.onImageInfo,
+    this.decodeForTesting,
     this.fileVersion,
     this.errorText = '图片暂时无法显示，请返回后重试。',
   });
@@ -94,14 +97,18 @@ class SharpFileImage extends StatefulWidget {
   final bool active;
   final ValueChanged<ImageDisplayInfo>? onImageInfo;
   final String? fileVersion;
+  @visibleForTesting
+  final Future<ui.Image> Function(ui.ImageDescriptor, Size)? decodeForTesting;
   final String errorText;
   @override
   State<SharpFileImage> createState() => _SharpFileImageState();
 }
 
 class _SharpFileImageState extends State<SharpFileImage> {
-  ui.ImmutableBuffer? _buffer;
-  ui.ImageDescriptor? _descriptor;
+  _ImageSource? _source;
+  ui.ImageDescriptor? get _descriptor => _source?.descriptor;
+  Size? _wanted;
+  bool _decoding = false;
   ui.Image? _image;
   Size? _target, _space;
   int _epoch = 0;
@@ -171,10 +178,10 @@ class _SharpFileImageState extends State<SharpFileImage> {
     _epoch++;
     _image?.dispose();
     _image = null;
-    _descriptor?.dispose();
-    _descriptor = null;
-    _buffer?.dispose();
-    _buffer = null;
+    _source?.release();
+    _source = null;
+    _wanted = null;
+    _discardRetiredImageDecodes();
     _target = null;
     _reportedInfo = null;
     _failed = false;
@@ -192,8 +199,7 @@ class _SharpFileImageState extends State<SharpFileImage> {
         buffer.dispose();
         return;
       }
-      _buffer = buffer;
-      _descriptor = descriptor;
+      _source = _ImageSource(buffer, descriptor);
       setState(() {});
     } catch (_) {
       descriptor?.dispose();
@@ -224,6 +230,7 @@ class _SharpFileImageState extends State<SharpFileImage> {
     final descriptor = _descriptor;
     final available = _space;
     if (!mounted ||
+        _failed ||
         descriptor == null ||
         available == null ||
         available.isEmpty) {
@@ -241,41 +248,71 @@ class _SharpFileImageState extends State<SharpFileImage> {
       devicePixelRatio: _dpr,
       zoom: widget.active ? widget.transform.value.getMaxScaleOnAxis() : 1,
     );
-    if (_target != null &&
-        _target!.width >= next.width &&
-        _target!.height >= next.height) {
-      return;
-    }
-    final epoch = ++_epoch;
-    _target = next;
-    ui.Codec? codec;
+    _wanted = next;
+    if (_decoding) return;
+    _decoding = true;
     try {
-      codec = await descriptor.instantiateCodec(
-        targetWidth: next.width.toInt(),
-        targetHeight: next.height.toInt(),
-      );
-      final image = (await codec.getNextFrame()).image;
-      if (!mounted || epoch != _epoch) {
-        image.dispose();
-        return;
-      }
-      setState(() {
-        _image?.dispose();
-        _image = image;
-      });
-      debugPrint(
-        'READER image_decode source=${descriptor.width}x${descriptor.height} pixels=${image.width}x${image.height} dpr=$_dpr zoom=${widget.transform.value.getMaxScaleOnAxis().toStringAsFixed(2)} active=${widget.active}',
-      );
-      widget.onRendered?.call();
-      widget.onError?.call(null);
-    } catch (_) {
-      if (mounted && epoch == _epoch) {
-        _target = null;
-        setState(() => _failed = true);
-        widget.onError?.call(widget.errorText);
+      while (mounted && _source != null && _wanted != null) {
+        final source = _source!;
+        var target = _wanted!;
+        _wanted = null;
+        if (_target != null &&
+            _target!.width >= target.width &&
+            _target!.height >= target.height) {
+          continue;
+        }
+        final epoch = _epoch, path = widget.path;
+        final testingDecoder = widget.decodeForTesting;
+        source.retain();
+        try {
+          final image = await _serialImageDecode(
+            valid: () =>
+                mounted && epoch == _epoch && identical(source, _source),
+            foreground: () => widget.active,
+            operation: () async {
+              if (_wanted != null) {
+                target = _wanted!;
+                _wanted = null;
+              }
+              if (_target != null &&
+                  _target!.width >= target.width &&
+                  _target!.height >= target.height) {
+                return null;
+              }
+              return testingDecoder != null
+                  ? testingDecoder(source.descriptor, target)
+                  : _decodeImage(source.descriptor, path, target);
+            },
+          );
+          if (image == null) continue;
+          if (!mounted || epoch != _epoch || !identical(source, _source)) {
+            image.dispose();
+            continue;
+          }
+          _target = target;
+          setState(() {
+            _image?.dispose();
+            _image = image;
+            _failed = false;
+          });
+          debugPrint(
+            'READER image_decode source=${source.descriptor.width}x${source.descriptor.height} pixels=${image.width}x${image.height} dpr=$_dpr zoom=${widget.transform.value.getMaxScaleOnAxis().toStringAsFixed(2)} active=${widget.active}',
+          );
+          widget.onRendered?.call();
+          widget.onError?.call(null);
+        } catch (_) {
+          if (mounted && epoch == _epoch && identical(source, _source)) {
+            _target = null;
+            setState(() => _failed = true);
+            widget.onError?.call(widget.errorText);
+            _wanted = null;
+          }
+        } finally {
+          source.release();
+        }
       }
     } finally {
-      codec?.dispose();
+      _decoding = false;
     }
   }
 
@@ -344,4 +381,111 @@ class _SharpFileImageState extends State<SharpFileImage> {
       );
     },
   );
+}
+
+/// Encoded source ownership survives path changes/disposal until its last job
+/// finishes. Generation checks alone cannot protect native resources in flight.
+class _ImageSource {
+  _ImageSource(this.buffer, this.descriptor);
+  final ui.ImmutableBuffer buffer;
+  final ui.ImageDescriptor descriptor;
+  int _owners = 1;
+  void retain() => _owners++;
+  void release() {
+    if (--_owners == 0) {
+      descriptor.dispose();
+      buffer.dispose();
+    }
+  }
+}
+
+class _ImageDecodeJob {
+  _ImageDecodeJob(this.valid, this.foreground, this.operation);
+  final bool Function() valid, foreground;
+  final Future<ui.Image?> Function() operation;
+  final result = Completer<ui.Image?>();
+}
+
+final _imageDecodeJobs = <_ImageDecodeJob>[];
+bool _imageDecodeRunning = false;
+Future<ui.Image?> _serialImageDecode({
+  required bool Function() valid,
+  required bool Function() foreground,
+  required Future<ui.Image?> Function() operation,
+}) {
+  final job = _ImageDecodeJob(valid, foreground, operation);
+  _imageDecodeJobs.add(job);
+  if (!_imageDecodeRunning) unawaited(_drainImageDecodes());
+  return job.result.future;
+}
+
+Future<void> _drainImageDecodes() async {
+  _imageDecodeRunning = true;
+  try {
+    while (_imageDecodeJobs.isNotEmpty) {
+      _discardRetiredImageDecodes();
+      if (_imageDecodeJobs.isEmpty) break;
+      final active = _imageDecodeJobs.indexWhere((job) => job.foreground());
+      final job = _imageDecodeJobs.removeAt(active < 0 ? 0 : active);
+      try {
+        job.result.complete(await job.operation());
+      } catch (error, stack) {
+        job.result.completeError(error, stack);
+      }
+    }
+  } finally {
+    _imageDecodeRunning = false;
+  }
+}
+
+void _discardRetiredImageDecodes() {
+  for (var index = _imageDecodeJobs.length - 1; index >= 0; index--) {
+    if (!_imageDecodeJobs[index].valid()) {
+      _imageDecodeJobs.removeAt(index).result.complete(null);
+    }
+  }
+}
+
+const _rasterChannel = MethodChannel('score_reader/raster_decode');
+Future<ui.Image> _decodeImage(
+  ui.ImageDescriptor source,
+  String path,
+  Size target,
+) async {
+  String? prepared;
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? thumbnail;
+  ui.Codec? codec;
+  try {
+    if (defaultTargetPlatform == TargetPlatform.iOS &&
+        source.width * source.height > 12000000) {
+      prepared = await _rasterChannel.invokeMethod<String>('prepareRaster', {
+        'path': path,
+        'width': target.width.toInt(),
+        'height': target.height.toInt(),
+      });
+      if (prepared == null) throw StateError('No prepared raster');
+      buffer = await ui.ImmutableBuffer.fromFilePath(prepared);
+      thumbnail = await ui.ImageDescriptor.encoded(buffer);
+      if (thumbnail.width * thumbnail.height > 12000000 ||
+          math.max(thumbnail.width, thumbnail.height) > 8192) {
+        throw StateError('Prepared raster exceeds the image budget');
+      }
+    }
+    final descriptor = thumbnail ?? source;
+    codec = await descriptor.instantiateCodec(
+      targetWidth: math.min(descriptor.width, target.width.toInt()),
+      targetHeight: math.min(descriptor.height, target.height.toInt()),
+    );
+    return (await codec.getNextFrame()).image;
+  } finally {
+    codec?.dispose();
+    thumbnail?.dispose();
+    buffer?.dispose();
+    if (prepared != null) {
+      await _rasterChannel.invokeMethod<bool>('releaseRaster', {
+        'path': prepared,
+      });
+    }
+  }
 }
