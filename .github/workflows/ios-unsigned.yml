@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: 31da6a698f2ff9443695c7c729c6a28a20e9f2b29f5ca52d716ae6d64b1659bb
+      REVIEWED_SOURCE_SHA256: d677fe87c95bea37983bbb231ab5484ede3b55e438a52d0ddab24c20bfadd08b
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,6 +60,8 @@ jobs:
           flutter --version
           flutter precache --ios
           flutter pub get --enforce-lockfile
+          dart --packages=.dart_tool/package_config.json tool/storage_root_smoke.dart --require-links \
+            | tee "$RUNNER_TEMP/storage-root-smoke.txt"
           flutter build ios --release --no-codesign --no-pub
 
       - name: Verify every nested Mach-O and create the Payload container
@@ -75,6 +77,7 @@ jobs:
             flutter --version
             sw_vers
             xcodebuild -version
+            cat "$RUNNER_TEMP/storage-root-smoke.txt"
           } > unsigned-output/build-info.txt
           python3 - <<'PY' | tee -a unsigned-output/build-info.txt
           import pathlib

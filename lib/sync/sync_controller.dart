@@ -77,8 +77,10 @@ class SyncController extends ChangeNotifier {
 
   /// Tests may restrict the listener to loopback; production binds IPv4 LAN.
   final InternetAddress? bindAddress;
-  Directory get directory =>
-      Directory(p.join(library.dataDirectory.path, 'sync'));
+  Directory? _canonicalDataDirectory;
+  Directory get directory => Directory(
+    p.join((_canonicalDataDirectory ?? library.dataDirectory).path, 'sync'),
+  );
   File get _settingsFile => File(p.join(directory.path, 'settings.json'));
   Map<String, dynamic> _settings = {'version': 1, 'roots': <String, dynamic>{}};
   SyncServer? _server;
@@ -136,9 +138,13 @@ class SyncController extends ChangeNotifier {
 
   Future<void> initialize() async {
     try {
+      _canonicalDataDirectory = await prepareTrustedStateRoot(
+        library.dataDirectory,
+      );
       await directory.create(recursive: true);
-    } catch (_) {
-      initializationError = '无法准备同步资料目录，请检查磁盘空间与写入权限。';
+    } catch (failure) {
+      initializationError =
+          '无法准备同步资料目录 [SYNC-ROOT-${_storageFailureKind(failure)}]。已有文件未被清空，请保留此提示以便排查。';
     }
     if (initializationError == null) {
       try {
@@ -177,15 +183,27 @@ class SyncController extends ChangeNotifier {
       replica = await ReplicaLibraryView.open(
         rootDirectory: p.join(directory.path, 'replica'),
       );
-    } catch (_) {
+    } catch (failure) {
       initializationError =
-          '${initializationError == null ? '' : '${initializationError!}\n'}离线谱库无法恢复，已有文件未被清空。请检查数据目录后重试。';
+          '${initializationError == null ? '' : '${initializationError!}\n'}离线谱库无法恢复 [SYNC-REPLICA-${_storageFailureKind(failure)}]。已有文件未被清空，请保留此提示以便排查。';
     }
     _seenReaderGeneration = workspace.store.snapshot.generation;
     _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _tick());
     initialized = true;
     _changed();
     _maybeAutoStart();
+  }
+
+  // Stable, path-free diagnostics; never expose file paths, state or credentials.
+  String _storageFailureKind(Object failure) {
+    if (failure is FileSystemException) {
+      return failure.message == 'Linked sync/source paths are forbidden.'
+          ? 'LINK'
+          : 'IO';
+    }
+    if (failure is FormatException) return 'FORMAT';
+    if (failure is StateError) return 'STATE';
+    return 'UNKNOWN';
   }
 
   Map<String, dynamic> _decodeSettings(String text) {

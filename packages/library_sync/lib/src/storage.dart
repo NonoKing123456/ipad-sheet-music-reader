@@ -10,6 +10,17 @@ String randomId([int bytes = 32]) => base64Url
 Map<String, dynamic> asMap(Object? value) =>
     Map<String, dynamic>.from(value as Map);
 
+/// Resolve only the trusted application-support root supplied by the host.
+/// OS aliases such as Apple's /var -> /private/var address the same directory.
+/// Never use this for source folders, replicas, objects, or peer subdirectories:
+/// those must still pass [assertSafePath] without following links.
+Future<Directory> prepareTrustedStateRoot(Directory applicationRoot) async {
+  await applicationRoot.create(recursive: true);
+  final canonical = Directory(await applicationRoot.resolveSymbolicLinks());
+  assertSafePath(canonical.path, canonical.path);
+  return canonical;
+}
+
 /// State directories have one active owner; lock is held for the operation or
 /// lifetime, including across separate Dart processes. Never lock source files.
 class DirectoryLease {

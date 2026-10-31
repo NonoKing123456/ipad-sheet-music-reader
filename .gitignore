@@ -81,3 +81,4 @@
 !/packages/reader_state/pubspec.yaml
 !/pubspec.lock
 !/pubspec.yaml
+!/tool/storage_root_smoke.dart
