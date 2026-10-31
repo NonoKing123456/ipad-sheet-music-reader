@@ -102,6 +102,38 @@ class SyncController extends ChangeNotifier {
   int? totalObjects;
   bool committingLibrary = false;
   ReplicaLibraryView? replica;
+  LibrarySnapshot? _targetSnapshot;
+  final Map<String, ScoreTarget> _offlineTargets = {};
+  List<ScoreTarget> _readyTargets = const [];
+  List<ScoreTarget> get offlineTargets {
+    _indexOfflineTargets();
+    return _readyTargets;
+  }
+
+  void _indexOfflineTargets() {
+    final view = replica;
+    final snapshot = view?.snapshot;
+    if (identical(snapshot, _targetSnapshot)) return;
+    _targetSnapshot = snapshot;
+    _offlineTargets.clear();
+    if (view != null && snapshot != null) {
+      for (final entry in snapshot.availableEntries) {
+        if (entry.availability != ContentAvailability.ready) continue;
+        _offlineTargets[entry.id] = ScoreTarget(
+          entryId: entry.id,
+          revisionId: entry.currentRevisionId,
+          filePath: view.presentationPathFor(entry.id),
+          displayPath: entry.relativePath,
+          contentHash: entry.currentRevision.contentHash,
+          verifiedImmutable: true,
+          validateBeforeRead: () =>
+              view.validateForRead(entry.id, entry.currentRevisionId),
+        );
+      }
+    }
+    _readyTargets = List.unmodifiable(_offlineTargets.values);
+  }
+
   SyncPhase phase = SyncPhase.idle;
   String? message;
   String? initializationError;
@@ -621,7 +653,7 @@ class SyncController extends ChangeNotifier {
         workspace.store,
         cancellation: cancellation,
         afterMerge: () async {
-          workspace.refreshFromStore();
+          workspace.refreshFromStore(force: true);
         },
       );
       cancellation.check();
@@ -640,7 +672,7 @@ class SyncController extends ChangeNotifier {
       message =
           '${cancellation.isCancelled ? '同步已取消' : '批注和曲单交换尚未完成'}。完整离线库仍保留；请重试，未确认的交换会继续恢复。';
     } finally {
-      workspace.refreshFromStore();
+      workspace.refreshFromStore(force: true);
       _tick();
       _cancellation = null;
       busy = false;
@@ -697,22 +729,8 @@ class SyncController extends ChangeNotifier {
   }
 
   ScoreTarget? locateOffline(String entryId) {
-    final view = replica;
-    final entry = view?.snapshot.entryById(entryId);
-    if (view == null ||
-        entry == null ||
-        entry.status != EntryStatus.available ||
-        entry.availability != ContentAvailability.ready) {
-      return null;
-    }
-    return ScoreTarget(
-      entryId: entry.id,
-      revisionId: entry.currentRevisionId,
-      filePath: view.absolutePathFor(entry),
-      displayPath: entry.relativePath,
-      contentHash: entry.currentRevision.contentHash,
-      verifiedImmutable: true,
-    );
+    _indexOfflineTargets();
+    return _offlineTargets[entryId];
   }
 
   @override

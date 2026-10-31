@@ -13,6 +13,7 @@ class ReaderInput extends StatefulWidget {
     required this.onNext,
     this.enabled = true,
     this.allowPointerPageTurns = true,
+    this.onCenterTap,
   });
 
   final Widget child;
@@ -20,6 +21,7 @@ class ReaderInput extends StatefulWidget {
   final VoidCallback onNext;
   final bool enabled;
   final bool allowPointerPageTurns;
+  final VoidCallback? onCenterTap;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -71,7 +73,6 @@ class _ReaderInputState extends State<ReaderInput> {
     _greatestTravel = 0;
     _cancelled =
         !widget.enabled ||
-        !widget.allowPointerPageTurns ||
         (event.kind == PointerDeviceKind.mouse &&
             event.buttons != kPrimaryButton);
     _focus.requestFocus();
@@ -97,11 +98,16 @@ class _ReaderInputState extends State<ReaderInput> {
     final delta = event.localPosition - origin;
     _origin = null;
     if (delta.dx.abs() >= 48 && delta.dx.abs() > delta.dy.abs() * 1.4) {
-      delta.dx < 0 ? widget.onNext() : widget.onPrevious();
+      if (widget.allowPointerPageTurns) {
+        delta.dx < 0 ? widget.onNext() : widget.onPrevious();
+      }
     } else if (_greatestTravel < 12 && delta.distance < 12) {
       final fraction = event.localPosition.dx / width;
-      if (fraction < 0.35) widget.onPrevious();
-      if (fraction > 0.65) widget.onNext();
+      if (fraction >= 0.35 && fraction <= 0.65) widget.onCenterTap?.call();
+      if (widget.allowPointerPageTurns) {
+        if (fraction < 0.35) widget.onPrevious();
+        if (fraction > 0.65) widget.onNext();
+      }
     }
   }
 

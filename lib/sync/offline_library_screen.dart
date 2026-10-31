@@ -11,8 +11,13 @@ import 'sync_controller.dart';
 import 'sync_screen.dart';
 
 class OfflineLibraryScreen extends StatefulWidget {
-  const OfflineLibraryScreen({super.key, required this.controller});
+  const OfflineLibraryScreen({
+    super.key,
+    required this.controller,
+    this.isHome = false,
+  });
   final SyncController controller;
+  final bool isHome;
   @override
   State<OfflineLibraryScreen> createState() => _OfflineLibraryScreenState();
 }
@@ -38,14 +43,18 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     });
   }
 
-  List<ScoreTarget> _targets() => [
-    for (final entry
-        in widget.controller.replica?.snapshot.availableEntries ??
-            <LibraryEntry>[])
-      if (widget.controller.locateOffline(entry.id)
-          case final ScoreTarget target)
-        target,
-  ];
+  List<ScoreTarget> _targets() => widget.controller.offlineTargets;
+  Future<void> _sync({bool immediate = false}) => Navigator.push(
+    context,
+    MaterialPageRoute<void>(
+      builder: (_) => SyncScreen(
+        controller: widget.controller,
+        openOffline: () => Navigator.pop(context),
+        scanOnOpen: immediate && !widget.controller.paired,
+        syncOnOpen: immediate && widget.controller.paired,
+      ),
+    ),
+  );
   Future<void> _open(LibraryEntry entry) async {
     if (_opening) return;
     final target = widget.controller.locateOffline(entry.id);
@@ -88,42 +97,51 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   );
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-    animation: widget.controller,
+    animation: Listenable.merge([
+      widget.controller,
+      widget.controller.workspace,
+    ]),
     builder: (context, _) {
       final sync = widget.controller;
       final view = sync.replica;
-      if (view == null || view.manifest == null) {
-        return Scaffold(
-          appBar: AppBar(title: const Text('离线谱库')),
-          body: const Center(child: Text('尚未建立完整离线谱库，请先连接电脑同步。')),
-        );
-      }
-      final folders = view.snapshot.folders;
+      final folders = view?.snapshot.folders ?? const [''];
       final folder = folders.contains(_folder) ? _folder : '';
       final searching = _search.text.trim().isNotEmpty;
-      final listing = view.listFolder(folder);
+      final listing = view?.listFolder(folder);
       final entries = searching
-          ? view.search(
-              _search.text,
-              withinFolder: _withinFolder ? folder : null,
-            )
-          : listing.entries;
-      final children = searching ? <String>[] : listing.folders;
-      final missing = view.snapshot.entries
-          .where((e) => e.status == EntryStatus.missing)
-          .toList();
+          ? (view?.search(
+                  _search.text,
+                  withinFolder: _withinFolder ? folder : null,
+                ) ??
+                <LibraryEntry>[])
+          : (listing?.entries ?? <LibraryEntry>[]);
+      final children = searching
+          ? <String>[]
+          : (listing?.folders ?? <String>[]);
+      final missing =
+          view?.snapshot.entries
+              .where((e) => e.status == EntryStatus.missing)
+              .toList() ??
+          <LibraryEntry>[];
       return LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 850;
           return Scaffold(
             appBar: AppBar(
-              title: const Text('离线谱库'),
-              leading: IconButton(
-                tooltip: '返回谱库',
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.arrow_back),
-              ),
+              title: Text(widget.isHome ? '曲谱库' : '离线谱库'),
+              leading: widget.isHome
+                  ? null
+                  : IconButton(
+                      tooltip: '返回谱库',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.arrow_back),
+                    ),
               actions: [
+                IconButton(
+                  tooltip: '同步与连接',
+                  onPressed: () => unawaited(_sync()),
+                  icon: const Icon(Icons.sync),
+                ),
                 if (!wide)
                   Builder(
                     builder: (context) => IconButton(
@@ -159,6 +177,43 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                 Expanded(
                   child: Column(
                     children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                sync.hasOfflineLibrary
+                                    ? '已保存 ${sync.offlineCount} 份曲谱，断网可读'
+                                    : '先扫描电脑二维码，同步后曲谱会显示在这里',
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            FilledButton.icon(
+                              onPressed: sync.busy
+                                  ? null
+                                  : () => unawaited(_sync(immediate: true)),
+                              icon: Icon(
+                                sync.paired
+                                    ? Icons.sync
+                                    : Icons.qr_code_scanner,
+                              ),
+                              label: Text(
+                                sync.busy
+                                    ? '正在同步…'
+                                    : sync.paired
+                                    ? '立即同步'
+                                    : '扫描电脑二维码',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (sync.initializationError != null)
+                        Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text(sync.initializationError!),
+                        ),
                       Padding(
                         padding: const EdgeInsets.all(16),
                         child: TextField(

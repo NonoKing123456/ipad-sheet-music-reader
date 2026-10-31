@@ -96,7 +96,10 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _library?.scheduleRescan();
-    if (state == AppLifecycleState.paused) _sync?.cancel();
+    if (state == AppLifecycleState.paused) {
+      _sync?.cancel();
+      unawaited(_workspace?.flushPositions());
+    }
   }
 
   @override
@@ -251,16 +254,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           builder: (_) => SetListsScreen(
             workspace: workspace,
             locate: sync?.locateOffline ?? _locate,
-            targets: sync == null
-                ? _targets
-                : () => [
-                    for (final entry
-                        in sync.replica?.snapshot.availableEntries ??
-                            <LibraryEntry>[])
-                      if (sync.locateOffline(entry.id)
-                          case final ScoreTarget target)
-                        target,
-                  ],
+            targets: sync == null ? _targets : () => sync.offlineTargets,
             sourceChanges: sync ?? _library,
           ),
         ),
@@ -330,6 +324,20 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (!_canProvideLibrary) {
+      final sync = _sync;
+      if (sync != null) {
+        return OfflineLibraryScreen(controller: sync, isHome: true);
+      }
+      return Scaffold(
+        appBar: AppBar(title: const Text('曲谱库')),
+        body: Center(
+          child: _initializationError == null
+              ? const CircularProgressIndicator()
+              : Text(_initializationError!),
+        ),
+      );
+    }
     final library = _library;
     return LayoutBuilder(
       builder: (context, constraints) {

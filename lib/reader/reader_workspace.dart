@@ -12,25 +12,74 @@ class PendingStroke {
 
 /// Presentation state only. Durable changes always go through reader_state.
 class ReaderWorkspace extends ChangeNotifier {
-  ReaderWorkspace(this.store);
+  ReaderWorkspace(this.store) : _seenGeneration = store.snapshot.generation;
   final ReaderStateStore store;
   final List<PendingStroke> pending = [];
   String? error;
   int _operations = 0;
+  int _positionOperations = 0;
   bool _disposed = false;
-  bool get saving => _operations > 0;
+  int _seenGeneration;
+  bool _bookmarkError = false;
+  Future<void> _positionWrites = Future.value();
+  Future<void> flushPositions() => _positionWrites;
+  bool get saving => _operations > 0 || _positionOperations > 0;
+  bool get savingAnnotations => _operations > 0;
   int get unsavedCount => pending.where((stroke) => !stroke.saving).length;
 
   void _changed() {
+    _seenGeneration = store.snapshot.generation;
     if (!_disposed) notifyListeners();
   }
 
   /// Peer merges mutate the same store and invalidate its undo/redo history.
-  void refreshFromStore() => _changed();
+  void refreshFromStore({bool force = false}) {
+    if (force || _seenGeneration != store.snapshot.generation) _changed();
+  }
+
+  /// The session already reports a page change. Bookmark persistence must not
+  /// rebuild the library and annotation tree again unless saving fails.
+  Future<void> rememberPosition({
+    required DocumentKey document,
+    required int pageNumber,
+    required int pageCount,
+  }) {
+    final write = _rememberPosition(document, pageNumber, pageCount);
+    _positionWrites = Future.wait([_positionWrites, write]).then((_) {});
+    return write;
+  }
+
+  Future<void> _rememberPosition(
+    DocumentKey document,
+    int pageNumber,
+    int pageCount,
+  ) async {
+    _positionOperations++;
+    try {
+      await store.saveReadingPosition(
+        document: document,
+        pageNumber: pageNumber,
+        pageCount: pageCount,
+      );
+      _seenGeneration = store.snapshot.generation;
+      if (_bookmarkError) {
+        error = null;
+        _bookmarkError = false;
+        _changed();
+      }
+    } catch (_) {
+      error = '阅读位置保存失败，请检查磁盘空间和应用数据目录。已有批注未被清空。';
+      _bookmarkError = true;
+      _changed();
+    } finally {
+      _positionOperations--;
+    }
+  }
 
   Future<T?> edit<T>(Future<T> Function(ReaderStateStore) operation) async {
     _operations++;
     error = null;
+    _bookmarkError = false;
     _changed();
     try {
       return await operation(store);

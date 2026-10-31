@@ -149,6 +149,10 @@ class ReplicaLibraryView {
   int _generation = 0;
   DateTime _savedUtc = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
   final _ready = <String>{};
+  LibrarySnapshot? _presentation;
+  final _entryIndex = <String, LibraryEntry>{};
+  final _manifestIndex = <String, ManifestEntry>{};
+  final _presentationPaths = <String, String>{};
   final _verified = <String, _VerifiedObject>{};
   bool _verificationDirty = false;
   int _localHashOperations = 0, _localHashBytesRead = 0;
@@ -188,6 +192,7 @@ class ReplicaLibraryView {
   }
 
   Future<void> _reloadAndVerify({required bool verifyAll}) async {
+    _presentation = null;
     final json = await readJson(_indexPath);
     _ready.clear();
     _verified.clear();
@@ -240,6 +245,7 @@ class ReplicaLibraryView {
 
   String _verificationKey(ManifestEntry e) => p.basename(objectPath(e));
   void _forget(ManifestEntry e) {
+    if (_ready.remove(_objectPath(e))) _presentation = null;
     if (_verified.remove(_verificationKey(e)) != null)
       _verificationDirty = true;
   }
@@ -256,15 +262,49 @@ class ReplicaLibraryView {
     _verified[key] = _VerifiedObject(
         e.hash!, stat.size, stat.modified.microsecondsSinceEpoch, stat.mode);
     _verificationDirty = true;
+    if (_manifest?.entries.any((existing) => existing.entryId == e.entryId &&
+        existing.revisionId == e.revisionId && existing.hash == e.hash) == true &&
+        _ready.add(_objectPath(e))) {
+      _presentation = null;
+    }
   }
 
   String objectPath(ManifestEntry e) {
+    final path = _objectPath(e);
+    assertSafePath(rootDirectory, path);
+    return path;
+  }
+
+  // Pure metadata calculation. I/O boundaries still use objectPath's guard.
+  String _objectPath(ManifestEntry e) {
     final identity = sha256
         .convert(utf8.encode(jsonEncode([e.entryId, e.revisionId, e.hash])))
         .toString();
     final path = p.join(rootDirectory, 'objects', '$identity.${e.format}');
-    assertSafePath(rootDirectory, path);
     return path;
+  }
+
+  LibraryEntry? entryById(String id) {
+    snapshot;
+    return _entryIndex[id];
+  }
+
+  /// Metadata only; call validateForRead before opening this path.
+  String presentationPathFor(String entryId) {
+    snapshot;
+    return _presentationPaths[entryId] ??
+        (throw StateError('Unknown replica object.'));
+  }
+
+  Future<void> validateForRead(String entryId, String revisionId) async {
+    snapshot;
+    final entry = _manifestIndex[entryId];
+    if (entry == null ||
+        entry.missing ||
+        entry.revisionId != revisionId ||
+        !await hasVerifiedObject(entry)) {
+      throw StateError('Object is unavailable locally.');
+    }
   }
 
   Future<bool> hasVerifiedObject(ManifestEntry e,
@@ -377,37 +417,50 @@ class ReplicaLibraryView {
     _manifest = next;
     _generation++;
     _savedUtc = now;
+    _presentation = null;
     _ready
       ..clear()
       ..addAll(ready);
   }
 
-  LibrarySnapshot get snapshot => LibrarySnapshot(
-      rootPath: rootDirectory,
-      generation: _generation,
-      savedUtc: _savedUtc,
-      folders: _manifest?.folders ?? const [''],
-      entries: _manifest?.entries
-              .map((e) => LibraryEntry(
-                  id: e.entryId,
-                  relativePath: e.relativePath,
-                  status:
-                      e.missing ? EntryStatus.missing : EntryStatus.available,
-                  availability: !e.missing && _ready.contains(objectPath(e))
-                      ? ContentAvailability.ready
-                      : ContentAvailability.unreadable,
-                  revisions: [
-                    ContentRevision(
-                        id: e.revisionId,
-                        contentHash: e.hash,
-                        size: e.length,
-                        modifiedUtc: _savedUtc,
-                        observedUtc: _savedUtc)
-                  ],
-                  currentRevisionId: e.revisionId,
-                  lastSeenUtc: _savedUtc))
-              .toList() ??
-          []);
+  LibrarySnapshot get snapshot {
+    if (_presentation case final cached?) return cached;
+    _entryIndex.clear();
+    _manifestIndex.clear();
+    _presentationPaths.clear();
+    final entries = <LibraryEntry>[];
+    for (final e in _manifest?.entries ?? <ManifestEntry>[]) {
+      final path = _objectPath(e);
+      final entry = LibraryEntry(
+        id: e.entryId,
+        relativePath: e.relativePath,
+        status: e.missing ? EntryStatus.missing : EntryStatus.available,
+        availability: !e.missing && _ready.contains(path)
+            ? ContentAvailability.ready
+            : ContentAvailability.unreadable,
+        revisions: [
+          ContentRevision(
+              id: e.revisionId,
+              contentHash: e.hash,
+              size: e.length,
+              modifiedUtc: _savedUtc,
+              observedUtc: _savedUtc)
+        ],
+        currentRevisionId: e.revisionId,
+        lastSeenUtc: _savedUtc,
+      );
+      entries.add(entry);
+      _entryIndex[e.entryId] = entry;
+      _manifestIndex[e.entryId] = e;
+      _presentationPaths[e.entryId] = path;
+    }
+    return _presentation = LibrarySnapshot(
+        rootPath: rootDirectory,
+        generation: _generation,
+        savedUtc: _savedUtc,
+        folders: _manifest?.folders ?? const [''],
+        entries: entries);
+  }
 
   List<LibraryEntry> search(String query, {String? withinFolder}) {
     final scope = withinFolder ?? '';

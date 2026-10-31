@@ -6,6 +6,7 @@ import 'package:reader_state/reader_state.dart';
 
 import 'annotation_canvas.dart';
 import 'reader_input.dart';
+import 'reader_stage.dart';
 import 'reader_preview_frame.dart';
 import 'reader_page_window.dart';
 import 'reader_session.dart';
@@ -74,7 +75,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _transformChanged() {
-    if (mounted) setState(() => _scale = _transform.value.getMaxScaleOnAxis());
+    final scale = _transform.value.getMaxScaleOnAxis();
+    if (mounted && (_scale - scale).abs() > .01) setState(() => _scale = scale);
   }
 
   void _changed() {
@@ -132,7 +134,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _back() async {
-    if (await _confirmLeaving() && mounted) Navigator.pop(context);
+    if (!await _confirmLeaving()) return;
+    await widget.workspace.flushPositions();
+    if (mounted) Navigator.pop(context);
   }
 
   StrokeStyle get _style => StrokeStyle(
@@ -149,70 +153,29 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final title =
         current?.target.displayPath ?? widget.initialTarget.displayPath;
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          tooltip: '返回谱库',
-          onPressed: _back,
-          icon: const Icon(Icons.arrow_back),
-        ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              p.posix.basename(title.replaceAll('\\', '/')),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-            ),
-            Text(
-              widget.setListId == null
-                  ? title
-                  : (workspace.store.snapshot
-                            .setListById(widget.setListId!)
-                            ?.name ??
-                        '曲单'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11),
-            ),
-          ],
-        ),
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Material(
-              color: const Color(0xfffaf9f5),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 4,
+      body: ReaderStage(
+        drawing: _annotating,
+        onViewportChanged: () => _transform.value = Matrix4.identity(),
+        top: Material(
+          color: const Color(0xfffaf9f5),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AppBar(
+                leading: IconButton(
+                  tooltip: '返回谱库',
+                  onPressed: _back,
+                  icon: const Icon(Icons.arrow_back),
                 ),
-                child: Wrap(
-                  spacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment(
-                          value: false,
-                          label: Text('阅读'),
-                          icon: Icon(Icons.chrome_reader_mode_outlined),
-                        ),
-                        ButtonSegment(
-                          value: true,
-                          label: Text('批注'),
-                          icon: Icon(Icons.edit_outlined),
-                        ),
-                      ],
-                      selected: {_annotating},
-                      onSelectionChanged: page == null
-                          ? null
-                          : (selection) =>
-                                setState(() => _annotating = selection.single),
-                    ),
+                title: Text(
+                  p.posix.basename(title.replaceAll('\\', '/')),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                actions: [
+                  if (canPreviewReader)
                     IconButton(
-                      tooltip: _tablet ? '退出平板预览' : '平板布局预览',
+                      tooltip: _tablet ? '退出开发预览' : '开发预览（模拟平板）',
                       isSelected: _tablet,
                       icon: const Icon(Icons.tablet_mac_outlined),
                       onPressed: () => setState(() {
@@ -220,144 +183,144 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                         _transform.value = Matrix4.identity();
                       }),
                     ),
-                    if (_tablet)
-                      IconButton(
-                        tooltip: '切换横竖屏',
-                        icon: const Icon(Icons.screen_rotation_outlined),
-                        onPressed: () => setState(() {
-                          _landscape = !_landscape;
-                          _transform.value = Matrix4.identity();
-                        }),
-                      ),
-                  ],
+                  if (canPreviewReader && _tablet)
+                    IconButton(
+                      tooltip: '开发预览：切换横竖屏',
+                      icon: const Icon(Icons.screen_rotation_outlined),
+                      onPressed: () => setState(() {
+                        _landscape = !_landscape;
+                        _transform.value = Matrix4.identity();
+                      }),
+                    ),
+                ],
+              ),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: false,
+                    label: Text('阅读'),
+                    icon: Icon(Icons.chrome_reader_mode_outlined),
+                  ),
+                  ButtonSegment(
+                    value: true,
+                    label: Text('批注'),
+                    icon: Icon(Icons.edit_outlined),
+                  ),
+                ],
+                selected: {_annotating},
+                onSelectionChanged: page == null
+                    ? null
+                    : (selection) =>
+                          setState(() => _annotating = selection.single),
+              ),
+              if (_annotating && page != null) _tools(page),
+            ],
+          ),
+        ),
+        bottom: _footer(),
+        notices: [
+          if (workspace.store.storageWarnings.isNotEmpty)
+            _notice('批注和曲单已从备份恢复，请检查最近修改。'),
+          if (workspace.error != null) _notice(workspace.error!),
+          if (workspace.unsavedCount > 0)
+            Material(
+              color: const Color(0xffffedcf),
+              child: ListTile(
+                dense: true,
+                title: Text('${workspace.unsavedCount} 笔未保存'),
+                trailing: TextButton(
+                  onPressed: () => unawaited(workspace.retryStrokes()),
+                  child: const Text('重试保存'),
                 ),
               ),
             ),
-            if (_annotating && page != null) _tools(page),
-            if (workspace.store.storageWarnings.isNotEmpty)
-              _notice('批注和曲单已从备份恢复，最近一次修改可能未恢复。请检查内容。'),
-            if (workspace.error != null) _notice(workspace.error!),
-            if (workspace.unsavedCount > 0)
-              Material(
-                color: const Color(0xffffedcf),
-                child: ListTile(
-                  dense: true,
-                  title: Text('${workspace.unsavedCount} 笔未保存'),
-                  trailing: TextButton(
-                    onPressed: () => unawaited(workspace.retryStrokes()),
-                    child: const Text('重试保存'),
-                  ),
-                ),
-              ),
-            if (_session.message != null) _notice(_session.message!),
-            if (_session.sourceChanged)
-              _notice('源曲谱已更新或移除。当前显示旧版本快照，批注已暂停；请返回谱库重新打开。旧批注仍保留在旧版本。'),
-            if (_session.loading) const LinearProgressIndicator(minHeight: 2),
-            Expanded(
-              child: ReaderPreviewFrame(
-                enabled: _tablet,
-                landscape: _landscape,
-                child: current == null || page == null
-                    ? Center(
-                        child: _session.loading
-                            ? const CircularProgressIndicator()
-                            : FilledButton(
-                                onPressed: () => unawaited(
-                                  _session.open(
-                                    widget.initialTarget,
-                                    itemId: widget.itemId,
-                                  ),
-                                ),
-                                child: const Text('重新打开'),
-                              ),
-                      )
-                    : ReaderInput(
-                        onPrevious: () => unawaited(
-                          _session.turn(NavigationDirection.backward),
+          if (_session.message != null) _notice(_session.message!),
+          if (_session.sourceChanged)
+            _notice('源曲谱已更新或移除，当前为旧版本。请返回谱库打开新版；旧批注仍保留。'),
+          if (_session.loading) const LinearProgressIndicator(minHeight: 2),
+        ],
+        contentBuilder: (toggleTools) => ReaderPreviewFrame(
+          enabled: canPreviewReader && _tablet,
+          landscape: _landscape,
+          child: current == null || page == null
+              ? Center(
+                  child: _session.loading
+                      ? const CircularProgressIndicator()
+                      : FilledButton(
+                          onPressed: () => unawaited(
+                            _session.open(
+                              widget.initialTarget,
+                              itemId: widget.itemId,
+                            ),
+                          ),
+                          child: const Text('重新打开'),
                         ),
-                        onNext: () => unawaited(
-                          _session.turn(NavigationDirection.forward),
-                        ),
-                        allowPointerPageTurns: !_annotating && _scale <= 1.01,
-                        child: Padding(
-                          padding: const EdgeInsets.all(14),
-                          child: InteractiveViewer(
-                            key: _viewportKey,
-                            transformationController: _transform,
-                            minScale: 1,
-                            maxScale: 4,
-                            panEnabled: !_annotating,
-                            scaleEnabled: !_annotating,
-                            child: Center(
-                              child: AspectRatio(
-                                aspectRatio: current.aspectFor(_session.page),
-                                child: DecoratedBox(
-                                  decoration: const BoxDecoration(
-                                    color: Colors.white,
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: Color(0x22000000),
-                                        blurRadius: 10,
-                                      ),
-                                    ],
-                                  ),
-                                  child: ClipRect(
-                                    child: Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        if (current.pdf != null)
-                                          ReaderPageWindow(
-                                            key: ValueKey(current.target.key),
-                                            pageNumber: _session.page,
-                                            pageCount: current.pageCount,
-                                            aspectFor: current.aspectFor,
-                                            pageBuilder: (number) =>
-                                                SharpPdfPage(
-                                                  key: ValueKey(number),
-                                                  page: current
-                                                      .pdf!
-                                                      .pages[number - 1],
-                                                  active:
-                                                      number == _session.page,
-                                                  transform: _transform,
-                                                  viewportKey: _viewportKey,
-                                                  onRendered: () => _onRendered(
-                                                    current,
-                                                    number,
-                                                  ),
-                                                ),
-                                          )
-                                        else
-                                          SharpFileImage(
-                                            key: ValueKey(current.target.key),
-                                            path:
-                                                current.renderPath ??
-                                                current.target.filePath,
-                                            transform: _transform,
-                                          ),
-                                        AnnotationCanvas(
-                                          key: ValueKey(page),
-                                          workspace: workspace,
-                                          page: page,
-                                          enabled:
-                                              _annotating &&
-                                              !_session.sourceChanged,
-                                          style: _style,
-                                          eraser: _eraser,
-                                        ),
-                                      ],
+                )
+              : ReaderInput(
+                  onPrevious: () =>
+                      unawaited(_session.turn(NavigationDirection.backward)),
+                  onNext: () =>
+                      unawaited(_session.turn(NavigationDirection.forward)),
+                  onCenterTap: _annotating ? null : toggleTools,
+                  allowPointerPageTurns: !_annotating && _scale <= 1.01,
+                  child: InteractiveViewer(
+                    key: _viewportKey,
+                    transformationController: _transform,
+                    minScale: 1,
+                    maxScale: 4,
+                    panEnabled: !_annotating,
+                    scaleEnabled: !_annotating,
+                    child: Center(
+                      child: AspectRatio(
+                        key: const ValueKey('reader-paper'),
+                        aspectRatio: current.aspectFor(_session.page),
+                        child: ColoredBox(
+                          color: Colors.white,
+                          child: ClipRect(
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                if (current.pdf != null)
+                                  ReaderPageWindow(
+                                    key: ValueKey(current.target.key),
+                                    pageNumber: _session.page,
+                                    pageCount: current.pageCount,
+                                    aspectFor: current.aspectFor,
+                                    pageBuilder: (number) => SharpPdfPage(
+                                      key: ValueKey(number),
+                                      page: current.pdf!.pages[number - 1],
+                                      active: number == _session.page,
+                                      transform: _transform,
+                                      viewportKey: _viewportKey,
+                                      onRendered: () =>
+                                          _onRendered(current, number),
                                     ),
+                                  )
+                                else
+                                  SharpFileImage(
+                                    key: ValueKey(current.target.key),
+                                    path:
+                                        current.renderPath ??
+                                        current.target.filePath,
+                                    transform: _transform,
                                   ),
+                                AnnotationCanvas(
+                                  key: ValueKey(page),
+                                  workspace: workspace,
+                                  page: page,
+                                  enabled:
+                                      _annotating && !_session.sourceChanged,
+                                  style: _style,
+                                  eraser: _eraser,
                                 ),
-                              ),
+                              ],
                             ),
                           ),
                         ),
                       ),
-              ),
-            ),
-            _footer(),
-          ],
+                    ),
+                  ),
+                ),
         ),
       ),
     );
@@ -523,7 +486,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           Text(
             widget.workspace.unsavedCount > 0
                 ? '未保存'
-                : widget.workspace.saving
+                : widget.workspace.savingAnnotations
                 ? '正在保存…'
                 : '已保存',
             style: TextStyle(

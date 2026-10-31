@@ -54,6 +54,7 @@
 !/lib/reader/reader_preview_frame.dart
 !/lib/reader/reader_screen.dart
 !/lib/reader/reader_session.dart
+!/lib/reader/reader_stage.dart
 !/lib/reader/reader_workspace.dart
 !/lib/reader/set_lists_screen.dart
 !/lib/reader/sharp_file_image.dart

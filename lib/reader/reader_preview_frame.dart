@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'reader_stage.dart';
 
 /// A desktop layout preview; orientation changes the viewport, not page data.
 class ReaderPreviewFrame extends StatelessWidget {
@@ -15,7 +16,7 @@ class ReaderPreviewFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!enabled) return child;
+    if (!enabled || !canPreviewReader) return child;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(14),

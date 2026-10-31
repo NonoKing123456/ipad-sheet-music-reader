@@ -20,6 +20,7 @@ class ScoreTarget {
     required this.displayPath,
     this.contentHash,
     this.verifiedImmutable = false,
+    this.validateBeforeRead,
   });
   final String entryId;
   final String revisionId;
@@ -29,6 +30,7 @@ class ScoreTarget {
 
   /// Reserved for verified sync-replica objects; ordinary sources must be false.
   final bool verifiedImmutable;
+  final Future<void> Function()? validateBeforeRead;
   DocumentKey get key => DocumentKey(entryId: entryId, revisionId: revisionId);
 }
 
@@ -176,6 +178,7 @@ Future<LoadedScore> loadScore(
   ScoreTarget target, {
   required String cacheDirectory,
 }) async {
+  await target.validateBeforeRead?.call();
   final readingPath = target.verifiedImmutable
       ? target.filePath
       : await prepareReadingCopy(target, cacheDirectory);
@@ -244,14 +247,23 @@ class ReaderSession extends ChangeNotifier {
   ReadingPosition? position;
   int get page => position?.pageNumber ?? 1;
   PageKey? get pageKey => position?.pageKey;
-  bool get sourceChanged {
+  bool _sourceChanged = false;
+  bool get sourceChanged => _sourceChanged;
+  bool _updateSourceStatus() {
     final current = this.current;
     if (current == null) return false;
     final latest = locate(current.target.entryId);
-    return latest == null || latest.revisionId != current.target.revisionId;
+    final changed =
+        latest == null || latest.revisionId != current.target.revisionId;
+    final different = changed != _sourceChanged;
+    _sourceChanged = changed;
+    return different;
   }
 
-  void refreshSource() => _changed();
+  void refreshSource() {
+    if (_updateSourceStatus()) _changed();
+  }
+
   List<SetListItem> get queue => setListId == null
       ? []
       : (workspace.store.snapshot.setListById(setListId!)?.activeItems ?? []);
@@ -262,7 +274,10 @@ class ReaderSession extends ChangeNotifier {
 
   Future<LoadedScore?> _get(ScoreTarget target, int epoch) async {
     final cached = _cache[target.key];
-    if (cached != null) return cached;
+    if (cached != null) {
+      await target.validateBeforeRead?.call();
+      return cached;
+    }
     final loaded = await _loader(target);
     if (_disposed || epoch != _epoch) {
       await loaded.dispose();
@@ -293,6 +308,7 @@ class ReaderSession extends ChangeNotifier {
         loaded.pageCount,
       );
       current = loaded;
+      _updateSourceStatus();
       position = ReadingPosition(
         entryId: target.entryId,
         revisionId: target.revisionId,
@@ -392,6 +408,7 @@ class ReaderSession extends ChangeNotifier {
       final target = locate(result.position.entryId);
       if (target == null || !_cache.containsKey(target.key)) return;
       current = _cache[target.key];
+      _updateSourceStatus();
       position = result.position;
       message = null;
       _savePosition();
@@ -412,12 +429,10 @@ class ReaderSession extends ChangeNotifier {
     final position = this.position!;
     final count = current!.pageCount;
     unawaited(
-      workspace.edit(
-        (store) => store.saveReadingPosition(
-          document: position.pageKey.document,
-          pageNumber: position.pageNumber,
-          pageCount: count,
-        ),
+      workspace.rememberPosition(
+        document: position.pageKey.document,
+        pageNumber: position.pageNumber,
+        pageCount: count,
       ),
     );
   }

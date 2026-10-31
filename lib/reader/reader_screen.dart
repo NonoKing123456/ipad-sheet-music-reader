@@ -6,6 +6,7 @@ import 'package:path/path.dart' as path;
 import 'package:pdfrx/pdfrx.dart';
 
 import 'reader_input.dart';
+import 'reader_stage.dart';
 import 'reader_preview_frame.dart';
 import 'reader_page_window.dart';
 import 'sharp_pdf_page.dart';
@@ -210,14 +211,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _header(),
-            Expanded(child: _tabletFrame()),
-            _footer(),
-          ],
-        ),
+      body: ReaderStage(
+        onViewportChanged: () => _transform.value = Matrix4.identity(),
+        top: _header(),
+        bottom: _footer(),
+        contentBuilder: (toggleTools) => _tabletFrame(toggleTools),
       ),
     );
   }
@@ -278,15 +276,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
             alignment: WrapAlignment.end,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              IconButton(
-                tooltip: _tablet ? '退出平板预览' : '平板布局预览',
-                isSelected: _tablet,
-                icon: const Icon(Icons.tablet_mac_outlined),
-                onPressed: () => setState(() => _tablet = !_tablet),
-              ),
-              if (_tablet)
+              if (canPreviewReader)
                 IconButton(
-                  tooltip: '切换横竖屏',
+                  tooltip: _tablet ? '退出开发预览' : '开发预览（模拟平板）',
+                  isSelected: _tablet,
+                  icon: const Icon(Icons.tablet_mac_outlined),
+                  onPressed: () => setState(() => _tablet = !_tablet),
+                ),
+              if (canPreviewReader && _tablet)
+                IconButton(
+                  tooltip: '开发预览：切换横竖屏',
                   icon: const Icon(Icons.screen_rotation_outlined),
                   onPressed: () => setState(() => _landscape = !_landscape),
                 ),
@@ -303,13 +302,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Widget _tabletFrame() => ReaderPreviewFrame(
-    enabled: _tablet,
+  Widget _tabletFrame(VoidCallback toggleTools) => ReaderPreviewFrame(
+    enabled: canPreviewReader && _tablet,
     landscape: _landscape,
-    child: _body(),
+    child: _body(toggleTools),
   );
 
-  Widget _body() {
+  Widget _body(VoidCallback toggleTools) {
     if (_filePath == null) return _welcome();
     if (_loading) {
       return const Center(
@@ -353,16 +352,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return ReaderInput(
       onPrevious: () => _turn(-1),
       onNext: () => _turn(1),
+      onCenterTap: toggleTools,
       allowPointerPageTurns: _scale <= 1.01,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: InteractiveViewer(
-          key: _viewportKey,
-          transformationController: _transform,
-          minScale: 1,
-          maxScale: 4,
-          child: _document == null ? _image() : _pdf(),
-        ),
+      child: InteractiveViewer(
+        key: _viewportKey,
+        transformationController: _transform,
+        minScale: 1,
+        maxScale: 4,
+        child: _document == null ? _image() : _pdf(),
       ),
     );
   }
