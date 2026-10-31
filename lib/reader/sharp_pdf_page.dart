@@ -49,6 +49,7 @@ class SharpPdfPage extends StatefulWidget {
     required this.transform,
     required this.viewportKey,
     this.onRendered,
+    this.onError,
     this.rasterizer = renderSharpPdfPage,
   });
   final PdfPage page;
@@ -56,6 +57,7 @@ class SharpPdfPage extends StatefulWidget {
   final TransformationController transform;
   final GlobalKey viewportKey;
   final VoidCallback? onRendered;
+  final ValueChanged<String?>? onError;
   final PageRasterizer rasterizer;
   @override
   State<SharpPdfPage> createState() => _SharpPdfPageState();
@@ -71,6 +73,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
   Size? _paper;
   double _dpr = 1;
   bool _scheduled = false;
+  bool _baseFailed = false;
   String? _error;
   @override
   void initState() {
@@ -85,15 +88,15 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       oldWidget.transform.removeListener(_transformed);
       widget.transform.addListener(_transformed);
     }
-    if (oldWidget.page != widget.page || oldWidget.active != widget.active) {
+    if (oldWidget.page != widget.page) {
       _baseEpoch++;
       _baseToken?.cancel();
       _basePlan = null;
       _clearDetail();
-      if (oldWidget.page != widget.page || !widget.active) {
-        _base?.dispose();
-        _base = null;
-      }
+      _base?.dispose();
+      _base = null;
+    } else if (oldWidget.active && !widget.active) {
+      _clearDetail();
     }
   }
 
@@ -113,6 +116,10 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
     _detailEpoch++;
     _detailToken?.cancel();
     _requestedDetail = null;
+    if (_baseFailed) {
+      _basePlan = null;
+      _baseFailed = false;
+    }
     _timer?.cancel();
     _timer = Timer(const Duration(milliseconds: 65), _schedule);
   }
@@ -153,7 +160,12 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
     ui.Image? image;
     try {
       image = await widget.rasterizer(widget.page, plan, token, !widget.active);
-      if (image == null) return;
+      if (image == null) {
+        if (token.isCanceled || epoch != (detail ? _detailEpoch : _baseEpoch)) {
+          return;
+        }
+        throw StateError('Renderer returned no frame.');
+      }
       if (!mounted ||
           token.isCanceled ||
           epoch != (detail ? _detailEpoch : _baseEpoch)) {
@@ -168,6 +180,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
         } else {
           _base?.dispose();
           _base = image;
+          _baseFailed = false;
         }
         _error = null;
       });
@@ -179,15 +192,21 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
             : 'neighbour'} page=${widget.page.pageNumber} pixels=${plan.width}x${plan.height} zoom=${widget.transform.value.getMaxScaleOnAxis().toStringAsFixed(2)}',
       );
       widget.onRendered?.call();
+      widget.onError?.call(null);
     } catch (failure) {
       if (mounted &&
           epoch == (detail ? _detailEpoch : _baseEpoch) &&
           !token.isCanceled) {
-        setState(() => _error = '此页暂时无法渲染，请返回后重试。');
         if (detail) {
-          _requestedDetail = null;
+          // A sharp patch is optional. Keep the base/previous patch readable;
+          // the next pan or zoom clears this request and retries it.
+          _requestedDetail = plan;
         } else {
-          _basePlan = null;
+          _baseFailed = true;
+          if (_base == null) {
+            setState(() => _error = '此页暂时无法渲染，请重试。');
+            widget.onError?.call(_error);
+          }
         }
         debugPrint('READER raster_failed page=${widget.page.pageNumber}');
       }
@@ -203,7 +222,9 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       zoom: 1,
       neighbour: !widget.active,
     );
-    if (_basePlan == null || !_basePlan!.samePixels(base)) {
+    if (_basePlan == null ||
+        _basePlan!.width < base.width ||
+        _basePlan!.height < base.height) {
       unawaited(_render(base, detail: false));
     }
     final zoom = widget.transform.value.getMaxScaleOnAxis();

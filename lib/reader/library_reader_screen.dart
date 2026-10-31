@@ -42,7 +42,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   final GlobalKey _viewportKey = GlobalKey();
   bool _tablet = false;
   bool _landscape = false;
-  bool _annotating = false;
+  bool _writing = false;
+  bool _widthMenuOpen = false;
+  bool _touchTransforming = false;
+  final _deferredTurns = ReaderNavigationQueue();
+  String? _navigationWarning;
+  int _direction = 1;
+  PageKey? _visiblePage;
+  LoadedScore? _visibleDocument;
+  double _eraserRadius = .018;
   bool _eraser = false;
   bool _highlight = false;
   double _width = .004;
@@ -61,6 +69,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       locate: widget.locate,
       setListId: widget.setListId,
       loader: widget.loader,
+      deferPositionPersistence: true,
     )..addListener(_changed);
     widget.workspace.addListener(_changed);
     widget.sourceChanges?.addListener(_session.refreshSource);
@@ -112,7 +121,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<bool> _confirmLeaving() async {
-    if (widget.workspace.pending.isEmpty) return true;
+    if (widget.workspace.pending.isEmpty &&
+        widget.workspace.pendingPaths.isEmpty) {
+      return true;
+    }
     return await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
@@ -151,10 +163,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final page = _session.pageKey;
     final workspace = widget.workspace;
     final title =
-        current?.target.displayPath ?? widget.initialTarget.displayPath;
+        _visibleDocument?.target.displayPath ??
+        current?.target.displayPath ??
+        widget.initialTarget.displayPath;
     return Scaffold(
       body: ReaderStage(
-        drawing: _annotating,
+        allowOverlayPageKeys: _widthMenuOpen,
+        onPrevious: () => _navigate(NavigationDirection.backward),
+        onNext: () => _navigate(NavigationDirection.forward),
         onViewportChanged: () => _transform.value = Matrix4.identity(),
         top: Material(
           color: const Color(0xfffaf9f5),
@@ -194,26 +210,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     ),
                 ],
               ),
-              SegmentedButton<bool>(
-                segments: const [
-                  ButtonSegment(
-                    value: false,
-                    label: Text('阅读'),
-                    icon: Icon(Icons.chrome_reader_mode_outlined),
-                  ),
-                  ButtonSegment(
-                    value: true,
-                    label: Text('批注'),
-                    icon: Icon(Icons.edit_outlined),
-                  ),
-                ],
-                selected: {_annotating},
-                onSelectionChanged: page == null
-                    ? null
-                    : (selection) =>
-                          setState(() => _annotating = selection.single),
-              ),
-              if (_annotating && page != null) _tools(page),
+              if (page != null) _tools(_visiblePage ?? page),
             ],
           ),
         ),
@@ -235,6 +232,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               ),
             ),
           if (_session.message != null) _notice(_session.message!),
+          if (_navigationWarning != null) _notice(_navigationWarning!),
           if (_session.sourceChanged)
             _notice('源曲谱已更新或移除，当前为旧版本。请返回谱库打开新版；旧批注仍保留。'),
           if (_session.loading) const LinearProgressIndicator(minHeight: 2),
@@ -257,68 +255,79 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                         ),
                 )
               : ReaderInput(
-                  onPrevious: () =>
-                      unawaited(_session.turn(NavigationDirection.backward)),
-                  onNext: () =>
-                      unawaited(_session.turn(NavigationDirection.forward)),
-                  onCenterTap: _annotating ? null : toggleTools,
-                  allowPointerPageTurns: !_annotating && _scale <= 1.01,
-                  child: InteractiveViewer(
-                    key: _viewportKey,
-                    transformationController: _transform,
-                    minScale: 1,
-                    maxScale: 4,
-                    panEnabled: !_annotating,
-                    scaleEnabled: !_annotating,
-                    child: Center(
-                      child: AspectRatio(
-                        key: const ValueKey('reader-paper'),
-                        aspectRatio: current.aspectFor(_session.page),
-                        child: ColoredBox(
-                          color: Colors.white,
-                          child: ClipRect(
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                if (current.pdf != null)
-                                  ReaderPageWindow(
-                                    key: ValueKey(current.target.key),
-                                    pageNumber: _session.page,
-                                    pageCount: current.pageCount,
-                                    aspectFor: current.aspectFor,
-                                    pageBuilder: (number) => SharpPdfPage(
-                                      key: ValueKey(number),
-                                      page: current.pdf!.pages[number - 1],
-                                      active: number == _session.page,
-                                      transform: _transform,
-                                      viewportKey: _viewportKey,
-                                      onRendered: () =>
-                                          _onRendered(current, number),
-                                    ),
-                                  )
-                                else
-                                  SharpFileImage(
-                                    key: ValueKey(current.target.key),
-                                    path:
-                                        current.renderPath ??
-                                        current.target.filePath,
-                                    transform: _transform,
-                                  ),
-                                AnnotationCanvas(
-                                  key: ValueKey(page),
-                                  workspace: workspace,
-                                  page: page,
-                                  enabled:
-                                      _annotating && !_session.sourceChanged,
-                                  style: _style,
-                                  eraser: _eraser,
-                                ),
-                              ],
+                  onPrevious: () => _navigate(NavigationDirection.backward),
+                  onNext: () => _navigate(NavigationDirection.forward),
+                  onCenterTap: toggleTools,
+                  allowPointerPageTurns: _scale <= 1.01,
+                  mouseInk: true,
+                  onTransformGestureChanged: (active) =>
+                      setState(() => _touchTransforming = active),
+                  transform: _transform,
+                  viewportKey: _viewportKey,
+                  child: ReaderPageWindow(
+                    documentKey: current.target.key,
+                    pageNumber: _session.page,
+                    pageCount: current.pageCount,
+                    aspectFor: current.aspectFor,
+                    direction: _direction,
+                    retainDocument: current.retain,
+                    releaseDocument: current.release,
+                    holdPresentation: _writing,
+                    onPresented: (document, number) {
+                      final visible = PageKey(
+                        entryId: current.target.entryId,
+                        revisionId: current.target.revisionId,
+                        pageNumber: number,
+                      );
+                      if (document != current.target.key) return;
+                      setState(() {
+                        _visiblePage = visible;
+                        _visibleDocument = current;
+                      });
+                      _session.rememberPresented(visible, current.pageCount);
+                    },
+                    readyPageBuilder: (number, active, ready, failed) {
+                      final surfacePage = PageKey(
+                        entryId: current.target.entryId,
+                        revisionId: current.target.revisionId,
+                        pageNumber: number,
+                      );
+                      return Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          if (current.pdf != null)
+                            SharpPdfPage(
+                              page: current.pdf!.pages[number - 1],
+                              active: active,
+                              transform: _transform,
+                              viewportKey: _viewportKey,
+                              onRendered: () {
+                                ready();
+                                _onRendered(current, number);
+                              },
+                              onError: failed,
+                            )
+                          else
+                            SharpFileImage(
+                              path:
+                                  current.renderPath ?? current.target.filePath,
+                              transform: _transform,
+                              onRendered: ready,
+                              onError: failed,
                             ),
+                          AnnotationCanvas(
+                            workspace: workspace,
+                            page: surfacePage,
+                            enabled: active && !_session.sourceChanged,
+                            style: _style,
+                            eraser: _eraser,
+                            eraserRadiusFraction: _eraserRadius,
+                            suspended: _touchTransforming,
+                            onWritingChanged: _writingChanged,
                           ),
-                        ),
-                      ),
-                    ),
+                        ],
+                      );
+                    },
                   ),
                 ),
         ),
@@ -357,105 +366,238 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     child: Text(message, style: const TextStyle(fontSize: 12)),
   );
 
-  Widget _tools(PageKey page) => Material(
-    color: const Color(0xfffaf9f5),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Wrap(
-        spacing: 6,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: [
-          ChoiceChip(
-            label: const Text('画笔'),
-            avatar: const Icon(Icons.edit, size: 17),
-            selected: !_eraser && !_highlight,
-            onSelected: (_) => setState(() {
-              _eraser = false;
-              _highlight = false;
-            }),
-          ),
-          ChoiceChip(
-            label: const Text('荧光笔'),
-            avatar: const Icon(Icons.highlight, size: 17),
-            selected: !_eraser && _highlight,
-            onSelected: (_) => setState(() {
-              _eraser = false;
-              _highlight = true;
-            }),
-          ),
-          ChoiceChip(
-            label: const Text('橡皮'),
-            avatar: const Icon(Icons.auto_fix_normal, size: 17),
-            selected: _eraser,
-            onSelected: (_) => setState(() => _eraser = true),
-          ),
-          for (final (name, color) in [
-            ('红色', 0xffc12b32),
-            ('黑色', 0xff222222),
-            ('蓝色', 0xff1c57ac),
-            ('黄色', 0xffffc107),
-          ])
-            Tooltip(
-              message: name,
-              child: InkWell(
-                onTap: () => setState(() => _color = color),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  margin: const EdgeInsets.all(3),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color(color),
-                    border: Border.all(
-                      color: _color == color
-                          ? Colors.white
-                          : Colors.transparent,
-                      width: 3,
+  Widget _tools(PageKey page) => Align(
+    alignment: Alignment.center,
+    child: Card(
+      margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      color: const Color(0xfffaf9f5),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Wrap(
+          spacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          alignment: WrapAlignment.center,
+          children: [
+            ChoiceChip(
+              label: const Text('画笔'),
+              avatar: const Icon(Icons.edit, size: 17),
+              selected: !_eraser && !_highlight,
+              onSelected: (_) => setState(() {
+                _eraser = false;
+                _highlight = false;
+              }),
+            ),
+            ChoiceChip(
+              label: const Text('荧光笔'),
+              avatar: const Icon(Icons.highlight, size: 17),
+              selected: !_eraser && _highlight,
+              onSelected: (_) => setState(() {
+                _eraser = false;
+                _highlight = true;
+              }),
+            ),
+            ChoiceChip(
+              label: const Text('橡皮'),
+              avatar: const Icon(Icons.auto_fix_normal, size: 17),
+              selected: _eraser,
+              onSelected: (_) => setState(() => _eraser = true),
+            ),
+            for (final (name, color) in [
+              ('红色', 0xffc12b32),
+              ('黑色', 0xff222222),
+              ('蓝色', 0xff1c57ac),
+              ('黄色', 0xffffc107),
+            ])
+              Tooltip(
+                message: name,
+                child: InkWell(
+                  onTap: () => setState(() => _color = color),
+                  child: SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Center(
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        margin: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Color(color),
+                          border: Border.all(
+                            color: _color == color
+                                ? Colors.white
+                                : Colors.transparent,
+                            width: 3,
+                          ),
+                          boxShadow: _color == color
+                              ? const [
+                                  BoxShadow(
+                                    color: Colors.black38,
+                                    blurRadius: 2,
+                                  ),
+                                ]
+                              : null,
+                        ),
+                      ),
                     ),
-                    boxShadow: _color == color
-                        ? const [
-                            BoxShadow(color: Colors.black38, blurRadius: 2),
-                          ]
-                        : null,
                   ),
                 ),
               ),
+            _widthControl(),
+            IconButton(
+              tooltip: '撤销',
+              onPressed: widget.workspace.store.canUndo(page)
+                  ? () => unawaited(
+                      widget.workspace.edit((store) => store.undo(page)),
+                    )
+                  : null,
+              icon: const Icon(Icons.undo),
             ),
-          DropdownButton<double>(
-            value: _width,
-            items: const [
-              DropdownMenuItem(value: .002, child: Text('细')),
-              DropdownMenuItem(value: .004, child: Text('中')),
-              DropdownMenuItem(value: .008, child: Text('粗')),
-            ],
-            onChanged: (value) => setState(() => _width = value!),
-          ),
-          IconButton(
-            tooltip: '撤销',
-            onPressed: widget.workspace.store.canUndo(page)
-                ? () => unawaited(
-                    widget.workspace.edit((store) => store.undo(page)),
-                  )
-                : null,
-            icon: const Icon(Icons.undo),
-          ),
-          IconButton(
-            tooltip: '重做',
-            onPressed: widget.workspace.store.canRedo(page)
-                ? () => unawaited(
-                    widget.workspace.edit((store) => store.redo(page)),
-                  )
-                : null,
-            icon: const Icon(Icons.redo),
-          ),
-          const Text(
-            '在纸张上写画；缩放请用底栏',
-            style: TextStyle(fontSize: 11, color: Color(0xff65736b)),
-          ),
-        ],
+            IconButton(
+              tooltip: '重做',
+              onPressed: widget.workspace.store.canRedo(page)
+                  ? () => unawaited(
+                      widget.workspace.edit((store) => store.redo(page)),
+                    )
+                  : null,
+              icon: const Icon(Icons.redo),
+            ),
+          ],
+        ),
       ),
     ),
   );
+
+  Widget _widthControl() => Builder(
+    builder: (buttonContext) => IconButton(
+      tooltip: _eraser ? '橡皮半径' : '笔宽',
+      icon: SizedBox(
+        width: 28,
+        height: 28,
+        child: Center(
+          child: _eraser
+              ? Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xff334f66),
+                      width: 1.5,
+                    ),
+                  ),
+                )
+              : Container(
+                  width: 26,
+                  height: (_width * 810).clamp(1.0, 12.0),
+                  decoration: BoxDecoration(
+                    color: Color(_color),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+        ),
+      ),
+      onPressed: () {
+        final box = buttonContext.findRenderObject()! as RenderBox;
+        final overlay =
+            Overlay.of(context).context.findRenderObject()! as RenderBox;
+        final rect =
+            box.localToGlobal(Offset.zero, ancestor: overlay) & box.size;
+        setState(() => _widthMenuOpen = true);
+        unawaited(
+          showMenu<void>(
+            context: context,
+            color: const Color(0xfffaf9f5),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            position: RelativeRect.fromRect(rect, Offset.zero & overlay.size),
+            items: [
+              PopupMenuItem<void>(
+                enabled: false,
+                padding: const EdgeInsets.all(12),
+                child: StatefulBuilder(
+                  builder: (context, refresh) {
+                    final value = _eraser ? _eraserRadius : _width;
+                    return SizedBox(
+                      width: 220,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _eraser
+                                ? '橡皮半径 ${(value * 810).round()}'
+                                : '笔宽 ${(value * 810).toStringAsFixed(1)}',
+                            style: const TextStyle(color: Color(0xff222222)),
+                          ),
+                          Slider(
+                            value: value,
+                            min: _eraser ? .006 : .001,
+                            max: _eraser ? .05 : .012,
+                            onChanged: (v) {
+                              setState(() {
+                                if (_eraser) {
+                                  _eraserRadius = v;
+                                } else {
+                                  _width = v;
+                                }
+                              });
+                              refresh(() {});
+                            },
+                          ),
+                          Container(
+                            height: _eraser
+                                ? value * 810 * 2
+                                : (value * 810).clamp(1.0, 12.0),
+                            width: _eraser ? value * 810 * 2 : 160,
+                            decoration: BoxDecoration(
+                              color: _eraser
+                                  ? const Color(0x22334f66)
+                                  : Color(_color),
+                              borderRadius: BorderRadius.circular(40),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ).whenComplete(() {
+            if (mounted) setState(() => _widthMenuOpen = false);
+          }),
+        );
+      },
+    ),
+  );
+
+  void _navigate(NavigationDirection direction) {
+    if (_widthMenuOpen) {
+      Navigator.of(context).pop();
+      _widthMenuOpen = false;
+    }
+    final step = direction == NavigationDirection.forward ? 1 : -1;
+    _direction = step;
+    if (_writing) {
+      if (!_deferredTurns.add(direction)) {
+        setState(() => _navigationWarning = '翻页操作过密，已保留先前请求；请稍候再翻。');
+      }
+      return;
+    }
+    unawaited(_session.turn(direction));
+  }
+
+  void _writingChanged(bool writing) {
+    if (!mounted) return;
+    // Pointer-up commits its captured page before releasing deferred navigation.
+    setState(() => _writing = writing);
+    if (!writing) {
+      while (!_deferredTurns.isEmpty) {
+        _navigate(_deferredTurns.take()!);
+      }
+    }
+  }
 
   Widget _footer() => Material(
     color: const Color(0xfffaf9f5),
@@ -469,33 +611,25 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             tooltip: '上一页 · Page Up',
             onPressed: _session.current == null
                 ? null
-                : () => unawaited(_session.turn(NavigationDirection.backward)),
+                : () => _navigate(NavigationDirection.backward),
             icon: const Icon(Icons.chevron_left),
           ),
           Text(
-            '${_session.page} / ${_session.current?.pageCount ?? 0}',
+            '${_visiblePage?.pageNumber ?? 1} / ${_visibleDocument?.pageCount ?? 0}',
             key: const ValueKey('page-indicator'),
           ),
           IconButton(
             tooltip: '下一页 · Page Down',
             onPressed: _session.current == null
                 ? null
-                : () => unawaited(_session.turn(NavigationDirection.forward)),
+                : () => _navigate(NavigationDirection.forward),
             icon: const Icon(Icons.chevron_right),
           ),
-          Text(
-            widget.workspace.unsavedCount > 0
-                ? '未保存'
-                : widget.workspace.savingAnnotations
-                ? '正在保存…'
-                : '已保存',
-            style: TextStyle(
-              fontSize: 12,
-              color: widget.workspace.unsavedCount > 0
-                  ? Colors.red
-                  : const Color(0xff65736b),
+          if (widget.workspace.unsavedCount > 0)
+            const Text(
+              '未保存',
+              style: TextStyle(color: Colors.red, fontSize: 12),
             ),
-          ),
           const SizedBox(width: 16),
           IconButton(
             tooltip: '缩小',

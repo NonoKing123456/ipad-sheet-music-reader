@@ -15,8 +15,8 @@ class ReaderStateStore {
   static final _activeFiles = <String>{};
   ReaderSnapshot _snapshot = ReaderSnapshot.empty();
   Future<void> _tail = Future.value();
-  final _undo = <PageKey, List<_StrokeEdit>>{};
-  final _redo = <PageKey, List<_StrokeEdit>>{};
+  final _undo = <PageKey, List<List<_StrokeEdit>>>{};
+  final _redo = <PageKey, List<List<_StrokeEdit>>>{};
   final _storageWarnings = <String>[];
 
   ReaderSnapshot get snapshot => _snapshot;
@@ -83,7 +83,7 @@ class ReaderStateStore {
       await _commit(_snapshot.next(pages: pages));
       _undo
           .putIfAbsent(page, () => [])
-          .add(_StrokeEdit(stroke.id, true, false));
+          .add([_StrokeEdit(stroke.id, true, false)]);
       _redo.remove(page);
       return stroke;
     });
@@ -98,7 +98,7 @@ class ReaderStateStore {
         await _changeDeletion(page, strokeId, true);
         _undo
             .putIfAbsent(page, () => [])
-            .add(_StrokeEdit(strokeId, false, true));
+            .add([_StrokeEdit(strokeId, false, true)]);
         _redo.remove(page);
         return true;
       });
@@ -107,7 +107,7 @@ class ReaderStateStore {
         final stack = _undo[page];
         if (stack == null || stack.isEmpty) return false;
         final edit = stack.last;
-        await _changeDeletion(page, edit.strokeId, edit.beforeDeleted);
+        await _changeDeletions(page, edit, undo: true);
         stack.removeLast();
         _redo.putIfAbsent(page, () => []).add(edit);
         return true;
@@ -117,20 +117,66 @@ class ReaderStateStore {
         final stack = _redo[page];
         if (stack == null || stack.isEmpty) return false;
         final edit = stack.last;
-        await _changeDeletion(page, edit.strokeId, edit.afterDeleted);
+        await _changeDeletions(page, edit, undo: false);
         stack.removeLast();
         _undo.putIfAbsent(page, () => []).add(edit);
         return true;
       });
 
-  Future<void> _changeDeletion(
-      PageKey page, String strokeId, bool deleted) async {
+  Future<void> _changeDeletion(PageKey page, String strokeId, bool deleted) =>
+      _changeDeletions(page, [_StrokeEdit(strokeId, deleted, deleted)],
+          undo: false);
+
+  /// A local path erasure is one durable operation, represented entirely by
+  /// existing schema-2 strokes and tombstones for old clients and peer merges.
+  Future<bool> replaceStrokePaths(
+          PageKey page, Map<String, List<List<NormalizedPoint>>> replacements,
+          {StrokePathRebuilder? rebuild}) =>
+      _enqueue(() async {
+        final requested =
+            rebuild?.call(_snapshot.strokesFor(page)) ?? replacements;
+        final strokes = List<AnnotationStroke>.of(_snapshot.pages[page] ?? []);
+        final edits = <_StrokeEdit>[];
+        final now = DateTime.now().toUtc();
+        for (final entry in requested.entries) {
+          final index =
+              strokes.indexWhere((s) => s.id == entry.key && !s.isDeleted);
+          if (index < 0) continue;
+          final original = strokes[index];
+          strokes[index] = original.withDeletion(true, now);
+          edits.add(_StrokeEdit(original.id, false, true));
+          for (final points in entry.value.where((p) => p.isNotEmpty)) {
+            final fragment = AnnotationStroke(
+                id: _newId(),
+                style: original.style,
+                points: points,
+                createdUtc: original.createdUtc,
+                updatedUtc: now,
+                version: 1);
+            strokes.add(fragment);
+            edits.add(_StrokeEdit(fragment.id, true, false));
+          }
+        }
+        if (edits.isEmpty) return false;
+        final pages = Map<PageKey, List<AnnotationStroke>>.of(_snapshot.pages);
+        pages[page] = strokes;
+        await _commit(_snapshot.next(pages: pages));
+        _undo.putIfAbsent(page, () => []).add(edits);
+        _redo.remove(page);
+        return true;
+      });
+
+  Future<void> _changeDeletions(PageKey page, List<_StrokeEdit> edits,
+      {required bool undo}) async {
     final strokes = List<AnnotationStroke>.of(_snapshot.pages[page] ?? []);
-    final index = strokes.indexWhere((stroke) => stroke.id == strokeId);
-    if (index < 0)
-      throw StateError('Stroke history no longer matches state; reload.');
-    strokes[index] =
-        strokes[index].withDeletion(deleted, DateTime.now().toUtc());
+    final now = DateTime.now().toUtc();
+    for (final edit in edits) {
+      final index = strokes.indexWhere((stroke) => stroke.id == edit.strokeId);
+      if (index < 0)
+        throw StateError('Stroke history no longer matches state; reload.');
+      strokes[index] = strokes[index]
+          .withDeletion(undo ? edit.beforeDeleted : edit.afterDeleted, now);
+    }
     final pages = Map<PageKey, List<AnnotationStroke>>.of(_snapshot.pages);
     pages[page] = strokes;
     await _commit(_snapshot.next(pages: pages));

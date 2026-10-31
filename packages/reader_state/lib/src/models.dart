@@ -1,3 +1,6 @@
+typedef StrokePathRebuilder = Map<String, List<List<NormalizedPoint>>> Function(
+    List<AnnotationStroke> strokes);
+
 enum AnnotationTool { pen, highlighter }
 
 void requireNonEmptyId(String value, String name) {

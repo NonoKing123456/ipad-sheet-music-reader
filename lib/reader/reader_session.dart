@@ -47,6 +47,14 @@ class LoadedScore {
   final PdfDocument? pdf;
   final double imageAspect;
   final String? renderPath;
+  int _leases = 0;
+  bool _disposeRequested = false;
+  void retain() => _leases++;
+  void release() {
+    _leases--;
+    if (_leases == 0 && _disposeRequested) unawaited(pdf?.dispose());
+  }
+
   DocumentMetadata get metadata => DocumentMetadata.ready(
     entryId: target.entryId,
     revisionId: target.revisionId,
@@ -56,7 +64,8 @@ class LoadedScore {
       ? imageAspect
       : pdf!.pages[page - 1].width / pdf!.pages[page - 1].height;
   Future<void> dispose() async {
-    await pdf?.dispose();
+    _disposeRequested = true;
+    if (_leases == 0) await pdf?.dispose();
   }
 }
 
@@ -216,6 +225,51 @@ Future<LoadedScore> loadScore(
   }
 }
 
+/// Ordered, bounded runs retain boundary presses: Next/Next/Previous is never
+/// reduced arithmetically. Each accepted independent press is consumed once.
+class ReaderNavigationQueue {
+  static const maxRuns = 128;
+  static const maxPresses = 1024;
+  final List<_NavigationRun> _runs = [];
+  int _presses = 0;
+  bool get isEmpty => _runs.isEmpty;
+  int get length => _presses;
+  int get runCount => _runs.length;
+  bool add(NavigationDirection direction) {
+    final extendsLast = _runs.isNotEmpty && _runs.last.direction == direction;
+    if (_presses >= maxPresses || (!extendsLast && _runs.length >= maxRuns)) {
+      return false;
+    }
+    if (extendsLast) {
+      _runs.last.count++;
+    } else {
+      _runs.add(_NavigationRun(direction));
+    }
+    _presses++;
+    return true;
+  }
+
+  NavigationDirection? take() {
+    if (_runs.isEmpty) return null;
+    final run = _runs.first;
+    final direction = run.direction;
+    if (--run.count == 0) _runs.removeAt(0);
+    _presses--;
+    return direction;
+  }
+
+  void clear() {
+    _runs.clear();
+    _presses = 0;
+  }
+}
+
+class _NavigationRun {
+  _NavigationRun(this.direction);
+  final NavigationDirection direction;
+  int count = 1;
+}
+
 /// Serializes complete input presses and replays metadataRequired once loaded.
 /// Selecting another score cancels old asynchronous requests before they commit.
 class ReaderSession extends ChangeNotifier {
@@ -223,6 +277,7 @@ class ReaderSession extends ChangeNotifier {
     required this.workspace,
     required this.locate,
     this.setListId,
+    this.deferPositionPersistence = false,
     ScoreLoader? loader,
   }) : _loader =
            loader ??
@@ -236,9 +291,9 @@ class ReaderSession extends ChangeNotifier {
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
   final String? setListId;
+  final bool deferPositionPersistence;
   final ScoreLoader _loader;
   final Map<DocumentKey, LoadedScore> _cache = {};
-  Future<void> _tail = Future.value();
   bool _disposed = false;
   int _epoch = 0;
   bool loading = false;
@@ -294,6 +349,8 @@ class ReaderSession extends ChangeNotifier {
     bool restore = true,
   }) async {
     final epoch = ++_epoch;
+    _pendingTurns.clear();
+    _navigationTask = null;
     loading = true;
     message = null;
     _changed();
@@ -330,12 +387,24 @@ class ReaderSession extends ChangeNotifier {
   }
 
   Future<void> turn(NavigationDirection direction) {
-    final epoch = _epoch;
-    final next = _tail.then((_) => _turn(direction, epoch));
-    _tail = next.catchError((Object error, StackTrace stack) {
-      debugPrint('READER navigation_failed: $error\n$stack');
-    });
-    return next;
+    if (!_pendingTurns.add(direction)) {
+      message = '翻页操作过密，已保留先前请求；请稍候再翻。';
+      _changed();
+      return _navigationTask ?? Future<void>.value();
+    }
+    return _navigationTask ??= _drainTurns(_epoch);
+  }
+
+  final _pendingTurns = ReaderNavigationQueue();
+  Future<void>? _navigationTask;
+  Future<void> _drainTurns(int epoch) async {
+    try {
+      while (!_disposed && epoch == _epoch && !_pendingTurns.isEmpty) {
+        await _turn(_pendingTurns.take()!, epoch);
+      }
+    } finally {
+      if (epoch == _epoch) _navigationTask = null;
+    }
   }
 
   Map<String, DocumentMetadata> _metadata() {
@@ -426,6 +495,7 @@ class ReaderSession extends ChangeNotifier {
   }
 
   void _savePosition() {
+    if (deferPositionPersistence) return;
     final position = this.position!;
     final count = current!.pageCount;
     unawaited(
@@ -433,6 +503,16 @@ class ReaderSession extends ChangeNotifier {
         document: position.pageKey.document,
         pageNumber: position.pageNumber,
         pageCount: count,
+      ),
+    );
+  }
+
+  void rememberPresented(PageKey page, int pageCount) {
+    unawaited(
+      workspace.rememberPosition(
+        document: page.document,
+        pageNumber: page.pageNumber,
+        pageCount: pageCount,
       ),
     );
   }

@@ -10,11 +10,20 @@ class PendingStroke {
   bool saving = false;
 }
 
+class PendingPathEdit {
+  PendingPathEdit(this.page, this.paths, this.rebuild);
+  final PageKey page;
+  final StrokePathRebuilder? rebuild;
+  final Map<String, List<List<NormalizedPoint>>> paths;
+  bool saving = false;
+}
+
 /// Presentation state only. Durable changes always go through reader_state.
 class ReaderWorkspace extends ChangeNotifier {
   ReaderWorkspace(this.store) : _seenGeneration = store.snapshot.generation;
   final ReaderStateStore store;
   final List<PendingStroke> pending = [];
+  final List<PendingPathEdit> pendingPaths = [];
   String? error;
   int _operations = 0;
   int _positionOperations = 0;
@@ -25,7 +34,9 @@ class ReaderWorkspace extends ChangeNotifier {
   Future<void> flushPositions() => _positionWrites;
   bool get saving => _operations > 0 || _positionOperations > 0;
   bool get savingAnnotations => _operations > 0;
-  int get unsavedCount => pending.where((stroke) => !stroke.saving).length;
+  int get unsavedCount =>
+      pending.where((stroke) => !stroke.saving).length +
+      pendingPaths.where((edit) => !edit.saving).length;
 
   void _changed() {
     _seenGeneration = store.snapshot.generation;
@@ -122,6 +133,34 @@ class ReaderWorkspace extends ChangeNotifier {
     for (final stroke in List<PendingStroke>.of(pending)) {
       await _saveStroke(stroke);
     }
+    for (final edit in List<PendingPathEdit>.of(pendingPaths)) {
+      await _savePaths(edit);
+    }
+  }
+
+  Future<void> replacePaths(
+    PageKey page,
+    Map<String, List<List<NormalizedPoint>>> paths, {
+    StrokePathRebuilder? rebuild,
+  }) async {
+    final edit = PendingPathEdit(page, paths, rebuild);
+    pendingPaths.add(edit);
+    await _savePaths(edit);
+  }
+
+  Future<void> _savePaths(PendingPathEdit pathEdit) async {
+    if (pathEdit.saving) return;
+    pathEdit.saving = true;
+    final saved = await edit(
+      (store) => store.replaceStrokePaths(
+        pathEdit.page,
+        pathEdit.paths,
+        rebuild: pathEdit.rebuild,
+      ),
+    );
+    pathEdit.saving = false;
+    if (saved != null) pendingPaths.remove(pathEdit);
+    _changed();
   }
 
   List<PendingStroke> pendingFor(PageKey page) =>

@@ -39,6 +39,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _tablet = false;
   bool _landscape = false;
   int _page = 1;
+  int _visiblePage = 1;
   int _openGeneration = 0;
   double _scale = 1;
   final Stopwatch _openWatch = Stopwatch();
@@ -100,6 +101,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _error = null;
       _loading = true;
       _page = 1;
+      _visiblePage = 1;
       _renderedPages.clear();
       _pageWatches.clear();
       _transform.value = Matrix4.identity();
@@ -212,6 +214,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: ReaderStage(
+        onPrevious: () => _turn(-1),
+        onNext: () => _turn(1),
         onViewportChanged: () => _transform.value = Matrix4.identity(),
         top: _header(),
         bottom: _footer(),
@@ -354,13 +358,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       onNext: () => _turn(1),
       onCenterTap: toggleTools,
       allowPointerPageTurns: _scale <= 1.01,
-      child: InteractiveViewer(
-        key: _viewportKey,
-        transformationController: _transform,
-        minScale: 1,
-        maxScale: 4,
-        child: _document == null ? _image() : _pdf(),
-      ),
+      transform: _transform,
+      viewportKey: _viewportKey,
+      child: _document == null ? _image() : _pdf(),
     );
   }
 
@@ -373,15 +373,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
       pageCount: _pageCount,
       aspectFor: (number) =>
           document.pages[number - 1].width / document.pages[number - 1].height,
-      pageBuilder: (number) => SharpPdfPage(
+      onPresented: (_, number) => setState(() => _visiblePage = number),
+      readyPageBuilder: (number, active, ready, failed) => SharpPdfPage(
         key: ValueKey(number),
         page: document.pages[number - 1],
-        active: number == _page,
+        active: active,
         transform: _transform,
         viewportKey: _viewportKey,
         onRendered: () {
+          ready();
           if (mounted && generation == _openGeneration) _onRendered(number);
         },
+        onError: failed,
       ),
     );
   }
@@ -485,7 +488,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             icon: const Icon(Icons.chevron_left),
           ),
           Text(
-            _ready ? '$_page / $_pageCount' : '本地阅读',
+            _ready ? '$_visiblePage / $_pageCount' : '本地阅读',
             key: const ValueKey('page-indicator'),
             style: const TextStyle(
               fontFeatures: [FontFeature.tabularFigures()],

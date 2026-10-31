@@ -13,11 +13,13 @@ class SharpFileImage extends StatefulWidget {
     required this.path,
     required this.transform,
     this.onRendered,
+    this.onError,
     this.errorText = '图片暂时无法显示，请返回后重试。',
   });
   final String path;
   final TransformationController transform;
   final VoidCallback? onRendered;
+  final ValueChanged<String?>? onError;
   final String errorText;
   @override
   State<SharpFileImage> createState() => _SharpFileImageState();
@@ -82,7 +84,10 @@ class _SharpFileImageState extends State<SharpFileImage> {
     } catch (_) {
       descriptor?.dispose();
       buffer?.dispose();
-      if (mounted && epoch == _epoch) setState(() => _failed = true);
+      if (mounted && epoch == _epoch) {
+        setState(() => _failed = true);
+        widget.onError?.call(widget.errorText);
+      }
     }
   }
 
@@ -145,10 +150,12 @@ class _SharpFileImageState extends State<SharpFileImage> {
       });
       debugPrint('READER image_decode pixels=${image.width}x${image.height}');
       widget.onRendered?.call();
+      widget.onError?.call(null);
     } catch (_) {
       if (mounted && epoch == _epoch) {
         _target = null;
         setState(() => _failed = true);
+        widget.onError?.call(widget.errorText);
       }
     } finally {
       codec?.dispose();

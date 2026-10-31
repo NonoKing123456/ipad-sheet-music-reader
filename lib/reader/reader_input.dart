@@ -14,6 +14,10 @@ class ReaderInput extends StatefulWidget {
     this.enabled = true,
     this.allowPointerPageTurns = true,
     this.onCenterTap,
+    this.transform,
+    this.viewportKey,
+    this.mouseInk = false,
+    this.onTransformGestureChanged,
   });
 
   final Widget child;
@@ -22,6 +26,10 @@ class ReaderInput extends StatefulWidget {
   final bool enabled;
   final bool allowPointerPageTurns;
   final VoidCallback? onCenterTap;
+  final TransformationController? transform;
+  final GlobalKey? viewportKey;
+  final bool mouseInk;
+  final ValueChanged<bool>? onTransformGestureChanged;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -30,6 +38,31 @@ class ReaderInput extends StatefulWidget {
 class _ReaderInputState extends State<ReaderInput> {
   final FocusNode _focus = FocusNode(debugLabel: 'reader-page-controls');
   final Set<int> _pointers = {};
+  final Set<int> _inkPointers = {};
+  final Map<int, Offset> _touches = {};
+  double _pinchDistance = 1, _startScale = 1;
+  Offset _sceneAnchor = Offset.zero, _lastTouch = Offset.zero;
+  Size _size = Size.zero;
+  bool _pinching = false;
+
+  void _anchorPinch() {
+    if (_touches.length != 2 || widget.transform == null) return;
+    final a = _touches.values.first, b = _touches.values.last;
+    _pinchDistance = (a - b).distance.clamp(1.0, double.infinity);
+    _startScale = widget.transform!.value.getMaxScaleOnAxis();
+    _sceneAnchor = widget.transform!.toScene((a + b) / 2);
+    _pinching = true;
+  }
+
+  void _matrix(double scale, Offset translation) {
+    final controller = widget.transform;
+    if (controller == null) return;
+    final x = translation.dx.clamp(_size.width * (1 - scale), 0.0);
+    final y = translation.dy.clamp(_size.height * (1 - scale), 0.0);
+    controller.value = Matrix4.diagonal3Values(scale, scale, 1)
+      ..setTranslationRaw(x, y, 0);
+  }
+
   Offset? _origin;
   bool _cancelled = false;
   double _greatestTravel = 0;
@@ -64,7 +97,20 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _down(PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus ||
+        (widget.mouseInk && event.kind == PointerDeviceKind.mouse)) {
+      _inkPointers.add(event.pointer);
+      if (_pointers.isNotEmpty) _cancelled = true;
+      return;
+    }
     _pointers.add(event.pointer);
+    if (event.kind == PointerDeviceKind.touch) {
+      _touches[event.pointer] = event.localPosition;
+      _lastTouch = event.localPosition;
+      _anchorPinch();
+      if (_touches.length == 2) widget.onTransformGestureChanged?.call(true);
+    }
     if (_pointers.length > 1) {
       _cancelled = true;
       return;
@@ -73,12 +119,40 @@ class _ReaderInputState extends State<ReaderInput> {
     _greatestTravel = 0;
     _cancelled =
         !widget.enabled ||
+        _inkPointers.isNotEmpty ||
         (event.kind == PointerDeviceKind.mouse &&
             event.buttons != kPrimaryButton);
     _focus.requestFocus();
   }
 
   void _move(PointerMoveEvent event) {
+    if (!_pointers.contains(event.pointer)) return;
+    if (_touches.containsKey(event.pointer)) {
+      _touches[event.pointer] = event.localPosition;
+      final controller = widget.transform;
+      if (controller != null && _touches.length == 2) {
+        final a = _touches.values.first, b = _touches.values.last;
+        final scale = (_startScale * (a - b).distance / _pinchDistance).clamp(
+          1.0,
+          4.0,
+        );
+        _matrix(scale, (a + b) / 2 - _sceneAnchor * scale);
+      } else if (controller != null &&
+          !_pinching &&
+          _inkPointers.isEmpty &&
+          _touches.length == 1 &&
+          controller.value.getMaxScaleOnAxis() > 1.01) {
+        final m = controller.value;
+        _matrix(
+          m.getMaxScaleOnAxis(),
+          Offset(m.storage[12], m.storage[13]) +
+              event.localPosition -
+              _lastTouch,
+        );
+        _cancelled = true;
+      }
+      _lastTouch = event.localPosition;
+    }
     if (_origin != null) {
       final travel = (event.localPosition - _origin!).distance;
       if (travel > _greatestTravel) _greatestTravel = travel;
@@ -86,8 +160,15 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _up(PointerUpEvent event, double width) {
+    if (_inkPointers.remove(event.pointer)) return;
+    if (!_pointers.contains(event.pointer)) return;
     final origin = _origin;
     _pointers.remove(event.pointer);
+    if (_touches.length == 2 && _touches.containsKey(event.pointer)) {
+      widget.onTransformGestureChanged?.call(false);
+    }
+    _touches.remove(event.pointer);
+    if (_touches.isEmpty) _pinching = false;
     if (_cancelled ||
         origin == null ||
         _pointers.isNotEmpty ||
@@ -118,18 +199,41 @@ class _ReaderInputState extends State<ReaderInput> {
       autofocus: true,
       onKeyEvent: _onKey,
       child: LayoutBuilder(
-        builder: (context, constraints) => Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: _down,
-          onPointerMove: _move,
-          onPointerUp: (event) => _up(event, constraints.maxWidth),
-          onPointerCancel: (event) {
-            _pointers.remove(event.pointer);
-            _cancelled = true;
-            if (_pointers.isEmpty) _origin = null;
-          },
-          child: widget.child,
-        ),
+        builder: (context, constraints) {
+          _size = constraints.biggest;
+          final content = widget.transform == null
+              ? widget.child
+              : ClipRect(
+                  key: widget.viewportKey,
+                  child: AnimatedBuilder(
+                    animation: widget.transform!,
+                    child: widget.child,
+                    builder: (_, child) => Transform(
+                      alignment: Alignment.topLeft,
+                      transform: widget.transform!.value,
+                      child: child,
+                    ),
+                  ),
+                );
+          return Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: _down,
+            onPointerMove: _move,
+            onPointerUp: (event) => _up(event, constraints.maxWidth),
+            onPointerCancel: (event) {
+              _inkPointers.remove(event.pointer);
+              _pointers.remove(event.pointer);
+              if (_touches.length == 2 && _touches.containsKey(event.pointer)) {
+                widget.onTransformGestureChanged?.call(false);
+              }
+              _touches.remove(event.pointer);
+              if (_touches.isEmpty) _pinching = false;
+              _cancelled = true;
+              if (_pointers.isEmpty) _origin = null;
+            },
+            child: content,
+          );
+        },
       ),
     );
   }
