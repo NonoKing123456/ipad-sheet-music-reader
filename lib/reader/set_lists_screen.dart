@@ -1,3 +1,5 @@
+import '../library/score_path_label.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -274,7 +276,10 @@ class _SetListDetail extends StatelessWidget {
                               overflow: TextOverflow.ellipsis,
                             ),
                             subtitle: Text(
-                              target?.displayPath ?? '保留原曲谱关联，恢复文件后可以继续使用。',
+                              target == null
+                                  ? '保留原曲谱关联，恢复文件后可以继续使用。'
+                                  : target.parentFolderLabel ??
+                                        scoreParentFolder(target.displayPath),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -396,7 +401,8 @@ class _AddScoresState extends State<_AddScores> {
                         ),
                       ),
                       subtitle: Text(
-                        target.displayPath,
+                        target.parentFolderLabel ??
+                            scoreParentFolder(target.displayPath),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),

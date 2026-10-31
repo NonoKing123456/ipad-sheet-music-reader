@@ -19,6 +19,7 @@ class ScoreTarget {
     required this.filePath,
     required this.displayPath,
     this.contentHash,
+    this.parentFolderLabel,
     this.verifiedImmutable = false,
     this.validateBeforeRead,
   });
@@ -27,6 +28,7 @@ class ScoreTarget {
   final String filePath;
   final String displayPath;
   final String? contentHash;
+  final String? parentFolderLabel;
 
   /// Reserved for verified sync-replica objects; ordinary sources must be false.
   final bool verifiedImmutable;
@@ -295,6 +297,9 @@ class ReaderSession extends ChangeNotifier {
   final ScoreLoader _loader;
   final Map<DocumentKey, LoadedScore> _cache = {};
   bool _disposed = false;
+  Future<LoadedScore?>? _warmFuture;
+  DocumentKey? _warmKey, _warmWanted;
+  int _warmEpoch = 0;
   int _epoch = 0;
   bool loading = false;
   String? message;
@@ -304,6 +309,7 @@ class ReaderSession extends ChangeNotifier {
   PageKey? get pageKey => position?.pageKey;
   bool _sourceChanged = false;
   bool get sourceChanged => _sourceChanged;
+  int get cachedDocumentCount => _cache.length;
   bool _updateSourceStatus() {
     final current = this.current;
     if (current == null) return false;
@@ -333,6 +339,16 @@ class ReaderSession extends ChangeNotifier {
       await target.validateBeforeRead?.call();
       return cached;
     }
+    final warming = _warmFuture;
+    if (warming != null && _warmKey == target.key && _warmEpoch == epoch) {
+      _warmWanted = target.key;
+      final loaded = await warming;
+      if (loaded != null) {
+        await target.validateBeforeRead?.call();
+        return loaded;
+      }
+    }
+    if (_disposed || epoch != _epoch) return null;
     final loaded = await _loader(target);
     if (_disposed || epoch != _epoch) {
       await loaded.dispose();
@@ -342,6 +358,81 @@ class ReaderSession extends ChangeNotifier {
     return loaded;
   }
 
+  void cancelPrewarm() {
+    _warmWanted = null;
+  }
+
+  ScoreTarget? get nextPrewarmTarget {
+    if (_disposed ||
+        current == null ||
+        position == null ||
+        page != current!.pageCount) {
+      return null;
+    }
+    final items = queue,
+        index = queue.indexWhere((item) => item.id == position!.setListItemId);
+    if (index < 0 || index + 1 >= items.length) return null;
+    final target = locate(items[index + 1].entryId);
+    return target;
+  }
+
+  Future<LoadedScore?> prewarmNext() async {
+    final target = nextPrewarmTarget;
+    if (target == null) return null;
+    _warmWanted = target.key;
+    final cached = _cache[target.key];
+    if (cached != null) {
+      final epoch = _epoch;
+      try {
+        await target.validateBeforeRead?.call();
+        return !_disposed && epoch == _epoch && _warmWanted == target.key
+            ? cached
+            : null;
+      } catch (_) {
+        debugPrint('READER next_prewarm_unavailable');
+        return null;
+      }
+    }
+    final pending = _warmFuture;
+    if (pending != null) {
+      final originPosition = position;
+      if (_warmKey == target.key && _warmEpoch == _epoch) return pending;
+      await pending;
+      if (_disposed ||
+          !identical(position, originPosition) ||
+          _warmWanted != target.key) {
+        return null;
+      }
+      return prewarmNext();
+    }
+    final epoch = _epoch;
+    _warmEpoch = epoch;
+    _warmKey = target.key;
+    late final Future<LoadedScore?> job;
+    job = () async {
+      try {
+        final loaded = await _loader(target);
+        if (_disposed || epoch != _epoch || _warmWanted != target.key) {
+          await loaded.dispose();
+          return null;
+        }
+        _cache[target.key] = loaded;
+        _trimCache();
+        return loaded;
+      } catch (_) {
+        debugPrint('READER next_prewarm_unavailable');
+        return null;
+      } finally {
+        if (identical(_warmFuture, job)) {
+          _warmFuture = null;
+          _warmKey = null;
+        }
+      }
+    }();
+    _warmFuture = job;
+    return job;
+  }
+
   Future<void> open(
     ScoreTarget target, {
     String? itemId,
@@ -349,6 +440,7 @@ class ReaderSession extends ChangeNotifier {
     bool restore = true,
   }) async {
     final epoch = ++_epoch;
+    cancelPrewarm();
     _pendingTurns.clear();
     _navigationTask = null;
     loading = true;
@@ -479,13 +571,12 @@ class ReaderSession extends ChangeNotifier {
       current = _cache[target.key];
       _updateSourceStatus();
       position = result.position;
+      cancelPrewarm();
       message = null;
       _savePosition();
       _trimCache();
-    } else {
+    } else if (result.status != NavigationStatus.boundary) {
       message = switch (result.status) {
-        NavigationStatus.boundary =>
-          direction == NavigationDirection.forward ? '已经到最后一页' : '已经到第一页',
         NavigationStatus.missingTarget => '曲单中的目标曲谱暂时缺失，已停留在当前页。',
         NavigationStatus.staleRevision => '这份曲谱已被替换。请返回谱库打开新版；旧批注仍保留在旧版本。',
         _ => '曲单已变化，请返回曲单重新打开。',
@@ -528,6 +619,7 @@ class ReaderSession extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    cancelPrewarm();
     _epoch++;
     for (final loaded in _cache.values) {
       unawaited(loaded.dispose());

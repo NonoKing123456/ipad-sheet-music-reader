@@ -116,6 +116,9 @@ Size planImageDecode({
       ),
     ),
   );
+  // At the native ceiling, floating-point multiplication followed by floor
+  // must not turn an original 870x760 image into an unnecessary 869x759 resample.
+  if (density >= desired * (1 - 1e-10)) return source;
   return Size(
     math.max(1, (paper.width * density).floor()).toDouble(),
     math.max(1, (paper.height * density).floor()).toDouble(),

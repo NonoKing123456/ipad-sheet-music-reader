@@ -22,6 +22,11 @@ class ReaderStage extends StatefulWidget {
     this.onPrevious,
     this.onNext,
     this.allowOverlayPageKeys = false,
+    this.onObstructionChanged,
+    this.onToolsVisibilityChanged,
+    this.hasReadablePage = false,
+    this.statusLabel = '阅读状态',
+    this.loading = false,
   });
   final Widget Function(VoidCallback toggleTools) contentBuilder;
   final Widget top, bottom;
@@ -30,6 +35,10 @@ class ReaderStage extends StatefulWidget {
   final VoidCallback? onViewportChanged;
   final VoidCallback? onPrevious, onNext;
   final bool allowOverlayPageKeys;
+  final ValueChanged<EdgeInsets>? onObstructionChanged;
+  final ValueChanged<bool>? onToolsVisibilityChanged;
+  final bool hasReadablePage, loading;
+  final String statusLabel;
   @override
   State<ReaderStage> createState() => _ReaderStageState();
 }
@@ -38,12 +47,16 @@ class _ReaderStageState extends State<ReaderStage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late bool _tools = !isMobileReader;
   Size? _viewport;
+  final _topKey = GlobalKey(), _bottomKey = GlobalKey();
+  EdgeInsets? _reportedObstruction;
+  bool _measurementScheduled = false;
   late final AnimationController _animation;
   late final Animation<double> _curve;
   bool _reduceMotion = false;
   void _toggle() => _show(!_tools);
   void _show(bool show) {
     setState(() => _tools = show);
+    widget.onToolsVisibilityChanged?.call(show);
     if (_reduceMotion) {
       _animation.value = show ? 1 : 0;
     } else {
@@ -137,10 +150,31 @@ class _ReaderStageState extends State<ReaderStage>
     super.dispose();
   }
 
+  void _measureObstruction() {
+    if (widget.onObstructionChanged == null || _measurementScheduled) return;
+    _measurementScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _measurementScheduled = false;
+      if (!mounted) return;
+      final top = _topKey.currentContext?.findRenderObject() as RenderBox?;
+      final bottom =
+          _bottomKey.currentContext?.findRenderObject() as RenderBox?;
+      final value = EdgeInsets.only(
+        top: top?.size.height ?? 0,
+        bottom: bottom?.size.height ?? 0,
+      );
+      if (value != _reportedObstruction) {
+        _reportedObstruction = value;
+        widget.onObstructionChanged?.call(value);
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final size = constraints.biggest;
+      _measureObstruction();
       if (_viewport != null && _viewport != size) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) widget.onViewportChanged?.call();
@@ -157,21 +191,45 @@ class _ReaderStageState extends State<ReaderStage>
             right: 0,
             top: 0,
             child: SafeArea(
+              key: _topKey,
               bottom: false,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _animatedTools(widget.top, const Offset(0, -1)),
-                  ...widget.notices,
+                  if (!widget.hasReadablePage) ...widget.notices,
                 ],
               ),
             ),
           ),
+          if (widget.hasReadablePage && widget.notices.isNotEmpty)
+            Positioned(
+              top: _tools ? (_reportedObstruction?.top ?? 120) + 8 : 8,
+              right: 8,
+              child: SafeArea(
+                child: ReaderStatusButton(
+                  label: widget.statusLabel,
+                  details: widget.notices,
+                ),
+              ),
+            ),
+          if (widget.loading)
+            const Positioned(
+              right: 18,
+              bottom: 18,
+              child: IgnorePointer(
+                child: SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
             child: SafeArea(
+              key: _bottomKey,
               top: false,
               child: _animatedTools(
                 Column(
@@ -214,5 +272,95 @@ class _ReaderStageState extends State<ReaderStage>
         ),
       ),
     ),
+  );
+}
+
+/// A persistent, small entry keeps recoverable problems discoverable without
+/// covering readable music. Details close without clearing the underlying state.
+class ReaderStatusButton extends StatefulWidget {
+  const ReaderStatusButton({
+    super.key,
+    required this.label,
+    required this.details,
+  });
+  final String label;
+  final List<Widget> details;
+
+  @override
+  State<ReaderStatusButton> createState() => _ReaderStatusButtonState();
+}
+
+class _ReaderStatusButtonState extends State<ReaderStatusButton> {
+  late final _details = ValueNotifier((
+    label: widget.label,
+    widgets: widget.details,
+  ));
+  bool _open = false;
+
+  @override
+  void didUpdateWidget(covariant ReaderStatusButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    scheduleMicrotask(() {
+      if (mounted) {
+        _details.value = (label: widget.label, widgets: widget.details);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    if (_open) {
+      scheduleMicrotask(() {
+        if (_open) {
+          _details.value = (label: '状态已更新', widgets: const <Widget>[]);
+        }
+      });
+    } else {
+      _details.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => IconButton.filledTonal(
+    tooltip: widget.label,
+    icon: const Icon(Icons.info_outline),
+    onPressed: () async {
+      if (_open) return;
+      _open = true;
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        builder: (_) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: ValueListenableBuilder(
+              valueListenable: _details,
+              builder: (context, value, _) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    title: Text(value.label),
+                    trailing: IconButton(
+                      tooltip: '关闭状态详情',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ),
+                  ...value.widgets,
+                  if (value.widgets.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('已处理，可继续阅读。'),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      _open = false;
+      if (!mounted) _details.dispose();
+    },
   );
 }

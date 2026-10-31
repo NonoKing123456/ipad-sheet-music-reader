@@ -1,6 +1,43 @@
+import 'dart:math' as math;
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+
+/// Clamp against actual paper edges and the unobstructed writing area. This
+/// keeps the page reachable at 1x without changing its fit size or losing it.
+Offset clampReaderPan({
+  required Size viewport,
+  required double scale,
+  required Offset translation,
+  double? pageAspect,
+  EdgeInsets? obstruction,
+}) {
+  if (obstruction == null) {
+    return Offset(
+      translation.dx.clamp(viewport.width * (1 - scale), 0.0),
+      translation.dy.clamp(viewport.height * (1 - scale), 0.0),
+    );
+  }
+  final fitted = pageAspect == null
+      ? viewport
+      : applyBoxFit(BoxFit.contain, Size(pageAspect, 1), viewport).destination;
+  final paper = Alignment.center.inscribe(fitted, Offset.zero & viewport);
+  final left = math.min(obstruction.left, viewport.width * .45),
+      right = math.min(obstruction.right, viewport.width * .45);
+  final top = math.min(obstruction.top, viewport.height * .45),
+      bottom = math.min(obstruction.bottom, viewport.height * .45);
+  final mx = math.min(24.0, (viewport.width - left - right) / 4),
+      my = math.min(24.0, (viewport.height - top - bottom) / 4);
+  final ax = left + mx - paper.left * scale,
+      bx = viewport.width - right - mx - paper.right * scale;
+  final ay = top + my - paper.top * scale,
+      by = viewport.height - bottom - my - paper.bottom * scale;
+  return Offset(
+    translation.dx.clamp(math.min(ax, bx), math.max(ax, bx)),
+    translation.dy.clamp(math.min(ay, by), math.max(ay, by)),
+  );
+}
 
 /// Shared reading input. Page turning is classified once at pointer-up, so a
 /// swipe can never also become a tap. This layer does not distinguish a pedal
@@ -18,6 +55,8 @@ class ReaderInput extends StatefulWidget {
     this.viewportKey,
     this.mouseInk = false,
     this.onTransformGestureChanged,
+    this.panInsets,
+    this.pageAspect,
   });
 
   final Widget child;
@@ -30,6 +69,8 @@ class ReaderInput extends StatefulWidget {
   final GlobalKey? viewportKey;
   final bool mouseInk;
   final ValueChanged<bool>? onTransformGestureChanged;
+  final EdgeInsets? panInsets;
+  final double? pageAspect;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -57,10 +98,38 @@ class _ReaderInputState extends State<ReaderInput> {
   void _matrix(double scale, Offset translation) {
     final controller = widget.transform;
     if (controller == null) return;
-    final x = translation.dx.clamp(_size.width * (1 - scale), 0.0);
-    final y = translation.dy.clamp(_size.height * (1 - scale), 0.0);
+    EdgeInsets? obstruction = widget.panInsets;
+    if (obstruction != null) {
+      final box =
+          (widget.viewportKey?.currentContext?.findRenderObject() ??
+                  context.findRenderObject())
+              as RenderBox?;
+      if (box != null && box.hasSize) {
+        final origin = box.localToGlobal(Offset.zero),
+            screen = MediaQuery.sizeOf(context);
+        obstruction = EdgeInsets.fromLTRB(
+          math.max(0, obstruction.left - origin.dx),
+          math.max(0, obstruction.top - origin.dy),
+          math.max(
+            0,
+            origin.dx + _size.width - (screen.width - obstruction.right),
+          ),
+          math.max(
+            0,
+            origin.dy + _size.height - (screen.height - obstruction.bottom),
+          ),
+        );
+      }
+    }
+    final bounded = clampReaderPan(
+      viewport: _size,
+      scale: scale,
+      translation: translation,
+      pageAspect: widget.pageAspect,
+      obstruction: obstruction,
+    );
     controller.value = Matrix4.diagonal3Values(scale, scale, 1)
-      ..setTranslationRaw(x, y, 0);
+      ..setTranslationRaw(bounded.dx, bounded.dy, 0);
   }
 
   Offset? _origin;

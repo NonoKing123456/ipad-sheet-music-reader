@@ -1,3 +1,5 @@
+import '../library/score_path_label.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -331,7 +333,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       ),
                                     ),
                                     subtitle: Text(
-                                      entry.relativePath,
+                                      scoreParentFolder(entry.relativePath),
                                       maxLines: 2,
                                       overflow: TextOverflow.ellipsis,
                                     ),

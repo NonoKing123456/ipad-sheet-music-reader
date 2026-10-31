@@ -39,9 +39,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _tablet = false;
   bool _landscape = false;
   int _page = 1;
+  Duration? _requestedAt;
   int _visiblePage = 1;
   int _openGeneration = 0;
   double _scale = 1;
+  ImageDisplayInfo? _imageInfo;
+  EdgeInsets _panInsets = EdgeInsets.zero;
   final Stopwatch _openWatch = Stopwatch();
   final Map<int, Stopwatch> _pageWatches = {};
   final Set<int> _renderedPages = {};
@@ -102,6 +105,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _loading = true;
       _page = 1;
       _visiblePage = 1;
+      _imageInfo = null;
       _renderedPages.clear();
       _pageWatches.clear();
       _transform.value = Matrix4.identity();
@@ -161,9 +165,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (!_ready) return;
     final next = _page + direction;
     if (next < 1 || next > _pageCount) {
-      _showMessage(direction < 0 ? '已经是第一页' : '已经是最后一页');
       return;
     }
+    _requestedAt = readerPresentationNow();
     _pageWatches[next] = Stopwatch()..start();
     setState(() {
       _page = next;
@@ -214,6 +218,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: ReaderStage(
+        onObstructionChanged: (insets) => setState(() => _panInsets = insets),
         onPrevious: () => _turn(-1),
         onNext: () => _turn(1),
         onViewportChanged: () => _transform.value = Matrix4.identity(),
@@ -274,6 +279,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ],
                 ),
               ),
+              if (_ready && _document == null)
+                PopupMenuButton<String>(
+                  tooltip: '更多',
+                  onSelected: (_) => showImageDisplayInfo(context, _imageInfo),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'info', child: Text('图片信息')),
+                  ],
+                ),
             ],
           ),
           Wrap(
@@ -360,6 +373,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
       allowPointerPageTurns: _scale <= 1.01,
       transform: _transform,
       viewportKey: _viewportKey,
+      panInsets: _panInsets,
+      pageAspect: _document == null
+          ? null
+          : _document!.pages[_visiblePage - 1].width /
+                _document!.pages[_visiblePage - 1].height,
       child: _document == null ? _image() : _pdf(),
     );
   }
@@ -370,6 +388,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return ReaderPageWindow(
       key: ValueKey(generation),
       pageNumber: _page,
+      requestedAt: _requestedAt,
       pageCount: _pageCount,
       aspectFor: (number) =>
           document.pages[number - 1].width / document.pages[number - 1].height,
@@ -396,6 +415,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       transform: _transform,
       onRendered: () {
         if (mounted && generation == _openGeneration) _onRendered(1);
+      },
+      onImageInfo: (info) {
+        if (mounted && generation == _openGeneration) _imageInfo = info;
       },
     );
   }

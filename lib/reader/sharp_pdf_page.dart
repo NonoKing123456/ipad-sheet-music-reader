@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'raster_plan.dart';
+import 'paper_color_sampler.dart';
 
 Future<ui.Image?> renderSharpPdfPage(
   PdfPage page,
@@ -50,6 +51,8 @@ class SharpPdfPage extends StatefulWidget {
     required this.viewportKey,
     this.onRendered,
     this.onError,
+    this.colorSampler,
+    this.colorKey,
     this.rasterizer = renderSharpPdfPage,
   });
   final PdfPage page;
@@ -58,6 +61,8 @@ class SharpPdfPage extends StatefulWidget {
   final GlobalKey viewportKey;
   final VoidCallback? onRendered;
   final ValueChanged<String?>? onError;
+  final PaperColorSampler? colorSampler;
+  final Object? colorKey;
   final PageRasterizer rasterizer;
   @override
   State<SharpPdfPage> createState() => _SharpPdfPageState();
@@ -78,12 +83,47 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
   @override
   void initState() {
     super.initState();
+    _bindSampler();
     widget.transform.addListener(_transformed);
+  }
+
+  void _bindSampler() {
+    if (widget.colorKey != null) {
+      widget.colorSampler?.attach(widget.colorKey!, this, _sampleColor);
+    }
+  }
+
+  Future<Color?> _sampleColor(Offset normalized) async {
+    final base = _base, paper = _paper;
+    if (base == null || paper == null || paper.isEmpty) return null;
+    final point = Offset(
+      normalized.dx * paper.width,
+      normalized.dy * paper.height,
+    );
+    final detail = _detail, plan = _detailPlan;
+    if (detail != null && plan != null && plan.logicalRect.contains(point)) {
+      final rect = plan.logicalRect;
+      return samplePaperImage(
+        detail,
+        Offset(
+          (point.dx - rect.left) / rect.width,
+          (point.dy - rect.top) / rect.height,
+        ),
+      );
+    }
+    return samplePaperImage(base, normalized);
   }
 
   @override
   void didUpdateWidget(covariant SharpPdfPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.colorSampler != widget.colorSampler ||
+        oldWidget.colorKey != widget.colorKey) {
+      if (oldWidget.colorKey != null) {
+        oldWidget.colorSampler?.detach(oldWidget.colorKey!, this);
+      }
+      _bindSampler();
+    }
     if (oldWidget.transform != widget.transform) {
       oldWidget.transform.removeListener(_transformed);
       widget.transform.addListener(_transformed);
@@ -136,6 +176,9 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
 
   @override
   void dispose() {
+    if (widget.colorKey != null) {
+      widget.colorSampler?.detach(widget.colorKey!, this);
+    }
     widget.transform.removeListener(_transformed);
     _timer?.cancel();
     _baseEpoch++;

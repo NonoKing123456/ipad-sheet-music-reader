@@ -13,6 +13,8 @@ import 'reader_session.dart';
 import 'reader_workspace.dart';
 import 'sharp_pdf_page.dart';
 import 'sharp_file_image.dart';
+import 'paper_color_sampler.dart';
+import 'reader_tool_button.dart';
 
 class LibraryReaderScreen extends StatefulWidget {
   const LibraryReaderScreen({
@@ -24,6 +26,8 @@ class LibraryReaderScreen extends StatefulWidget {
     this.itemId,
     this.sourceChanges,
     this.loader,
+    this.colorSampler,
+    this.presentationClock,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -32,6 +36,8 @@ class LibraryReaderScreen extends StatefulWidget {
   final String? itemId;
   final Listenable? sourceChanges;
   final ScoreLoader? loader;
+  final PaperColorSampler? colorSampler;
+  final Duration Function()? presentationClock;
   @override
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
@@ -43,17 +49,29 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   bool _tablet = false;
   bool _landscape = false;
   bool _writing = false;
-  bool _widthMenuOpen = false;
+  late final PaperColorSampler _colorSampler =
+      widget.colorSampler ?? PaperColorSampler();
+  bool _picking = false, _sampling = false;
+  int _pickEpoch = 0;
+  String? _pickMessage;
+  EdgeInsets _panInsets = EdgeInsets.zero;
+  ReaderTool _tool = ReaderTool.pen;
+  final _sizes = <ReaderTool, double>{
+    ReaderTool.pen: 3.2,
+    ReaderTool.highlighter: 16,
+    ReaderTool.eraser: 14.6,
+  };
   bool _touchTransforming = false;
   final _deferredTurns = ReaderNavigationQueue();
   String? _navigationWarning;
   int _direction = 1;
+  Duration? _requestedAt;
   PageKey? _visiblePage;
   LoadedScore? _visibleDocument;
-  double _eraserRadius = .018;
-  bool _eraser = false;
-  bool _highlight = false;
-  double _width = .004;
+  final _imageInfos = <PageKey, ImageDisplayInfo>{};
+  LoadedScore? _prewarmScore;
+  int _prewarmEpoch = 0;
+  (PageKey, DocumentKey)? _prewarmAnchor;
   int _color = 0xffc12b32;
   double _scale = 1;
   PageKey? _shownPage;
@@ -91,6 +109,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   void _changed() {
     if (!mounted) return;
     if (_shownPage != _session.pageKey) {
+      _cancelPick();
+      _prewarmEpoch++;
+      _prewarmScore = null;
+      _prewarmAnchor = null;
+      _session.cancelPrewarm();
       _shownPage = _session.pageKey;
       final page = _shownPage;
       if (page != null) {
@@ -108,10 +131,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _transform.value = Matrix4.identity();
     }
     setState(() {});
+    if (_session.pageKey == _visiblePage &&
+        _session.page == _session.current?.pageCount) {
+      unawaited(_prewarmNext());
+    }
   }
 
   @override
   void dispose() {
+    _pickEpoch++;
+    _colorSampler.dispose();
     widget.workspace.removeListener(_changed);
     widget.sourceChanges?.removeListener(_session.refreshSource);
     _session.removeListener(_changed);
@@ -152,10 +181,74 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   StrokeStyle get _style => StrokeStyle(
-    tool: _highlight ? AnnotationTool.highlighter : AnnotationTool.pen,
-    argb: _highlight ? ((_color & 0xffffff) | 0x55000000) : _color,
-    widthFraction: _highlight ? _width * 5 : _width,
+    tool: _tool == ReaderTool.highlighter
+        ? AnnotationTool.highlighter
+        : AnnotationTool.pen,
+    argb: _tool == ReaderTool.highlighter
+        ? ((_color & 0xffffff) | 0x55000000)
+        : _color,
+    widthFraction:
+        _sizes[_tool == ReaderTool.highlighter
+            ? ReaderTool.highlighter
+            : ReaderTool.pen]! /
+        810,
   );
+
+  void _cancelPick() {
+    _pickEpoch++;
+    _picking = false;
+    _pickMessage = null;
+  }
+
+  void _selectTool(ReaderTool tool) => setState(() {
+    _cancelPick();
+    _tool = tool;
+  });
+  void _togglePicking() {
+    if (_writing) return;
+    setState(() {
+      if (_picking) {
+        _cancelPick();
+      } else {
+        _pickEpoch++;
+        _picking = true;
+        _pickMessage = null;
+      }
+    });
+  }
+
+  Future<void> _pickColor(PageKey page, Offset normalized) async {
+    if (!_picking || _sampling || page != _visiblePage) return;
+    final epoch = ++_pickEpoch;
+    setState(() {
+      _sampling = true;
+      _pickMessage = null;
+    });
+    try {
+      final color = await _colorSampler.sample(page, normalized);
+      if (!mounted ||
+          epoch != _pickEpoch ||
+          !_picking ||
+          page != _visiblePage) {
+        return;
+      }
+      if (color == null) {
+        setState(() => _pickMessage = '未能读取该处底色，请点在纸张内或重试。');
+      } else {
+        setState(() {
+          _color = color.toARGB32() | 0xff000000;
+          _tool = ReaderTool.pen;
+          _picking = false;
+        });
+      }
+    } catch (_) {
+      if (mounted && epoch == _pickEpoch) {
+        setState(() => _pickMessage = '底色读取失败，请重试。');
+      }
+    } finally {
+      if (mounted) setState(() => _sampling = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -168,7 +261,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         widget.initialTarget.displayPath;
     return Scaffold(
       body: ReaderStage(
-        allowOverlayPageKeys: _widthMenuOpen,
+        hasReadablePage: _visiblePage != null,
+        statusLabel: workspace.unsavedCount > 0
+            ? '${workspace.unsavedCount} 笔未保存'
+            : '阅读状态',
+        onToolsVisibilityChanged: (visible) {
+          if (!visible && _picking) setState(_cancelPick);
+        },
+        onObstructionChanged: (insets) => setState(() => _panInsets = insets),
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
         onViewportChanged: () => _transform.value = Matrix4.identity(),
@@ -189,6 +289,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
+                  if (_visibleDocument != null && _visibleDocument!.pdf == null)
+                    PopupMenuButton<String>(
+                      tooltip: '更多',
+                      onSelected: (_) => unawaited(
+                        showImageDisplayInfo(
+                          context,
+                          _imageInfos[_visiblePage],
+                        ),
+                      ),
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'info', child: Text('图片信息')),
+                      ],
+                    ),
                   if (canPreviewReader)
                     IconButton(
                       tooltip: _tablet ? '退出开发预览' : '开发预览（模拟平板）',
@@ -231,12 +344,28 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 ),
               ),
             ),
-          if (_session.message != null) _notice(_session.message!),
+          if (_session.message != null)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _notice(_session.message!),
+                if (_visiblePage != null)
+                  TextButton(
+                    onPressed: () => _navigate(
+                      _direction > 0
+                          ? NavigationDirection.forward
+                          : NavigationDirection.backward,
+                    ),
+                    child: const Text('重试翻页'),
+                  ),
+              ],
+            ),
           if (_navigationWarning != null) _notice(_navigationWarning!),
+          if (_pickMessage != null) _notice(_pickMessage!),
           if (_session.sourceChanged)
             _notice('源曲谱已更新或移除，当前为旧版本。请返回谱库打开新版；旧批注仍保留。'),
-          if (_session.loading) const LinearProgressIndicator(minHeight: 2),
         ],
+        loading: _session.loading && _visiblePage != null,
         contentBuilder: (toggleTools) => ReaderPreviewFrame(
           enabled: canPreviewReader && _tablet,
           landscape: _landscape,
@@ -257,8 +386,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               : ReaderInput(
                   onPrevious: () => _navigate(NavigationDirection.backward),
                   onNext: () => _navigate(NavigationDirection.forward),
-                  onCenterTap: toggleTools,
-                  allowPointerPageTurns: _scale <= 1.01,
+                  onCenterTap: _picking ? null : toggleTools,
+                  allowPointerPageTurns: !_picking && _scale <= 1.01,
+                  panInsets: _panInsets,
+                  pageAspect:
+                      _visibleDocument?.aspectFor(
+                        _visiblePage?.pageNumber ?? 1,
+                      ) ??
+                      current.aspectFor(_session.page),
                   mouseInk: true,
                   onTransformGestureChanged: (active) =>
                       setState(() => _touchTransforming = active),
@@ -270,6 +405,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     pageCount: current.pageCount,
                     aspectFor: current.aspectFor,
                     direction: _direction,
+                    requestedAt: _requestedAt,
+                    presentationClock: widget.presentationClock,
                     retainDocument: current.retain,
                     releaseDocument: current.release,
                     holdPresentation: _writing,
@@ -281,58 +418,123 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       );
                       if (document != current.target.key) return;
                       setState(() {
+                        if (_visiblePage != visible) _cancelPick();
                         _visiblePage = visible;
                         _visibleDocument = current;
                       });
                       _session.rememberPresented(visible, current.pageCount);
+                      if (number == current.pageCount) {
+                        unawaited(_prewarmNext());
+                      }
                     },
-                    readyPageBuilder: (number, active, ready, failed) {
-                      final surfacePage = PageKey(
-                        entryId: current.target.entryId,
-                        revisionId: current.target.revisionId,
-                        pageNumber: number,
-                      );
-                      return Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          if (current.pdf != null)
-                            SharpPdfPage(
-                              page: current.pdf!.pages[number - 1],
-                              active: active,
-                              transform: _transform,
-                              viewportKey: _viewportKey,
-                              onRendered: () {
-                                ready();
-                                _onRendered(current, number);
-                              },
-                              onError: failed,
-                            )
-                          else
-                            SharpFileImage(
-                              path:
-                                  current.renderPath ?? current.target.filePath,
-                              transform: _transform,
-                              onRendered: ready,
-                              onError: failed,
-                            ),
-                          AnnotationCanvas(
-                            workspace: workspace,
-                            page: surfacePage,
-                            enabled: active && !_session.sourceChanged,
-                            style: _style,
-                            eraser: _eraser,
-                            eraserRadiusFraction: _eraserRadius,
-                            suspended: _touchTransforming,
-                            onWritingChanged: _writingChanged,
+                    prewarm: _prewarmScore == null
+                        ? null
+                        : ReaderPrewarmPage(
+                            documentKey: _prewarmScore!.target.key,
+                            aspect: _prewarmScore!.aspectFor(1),
+                            retainDocument: _prewarmScore!.retain,
+                            releaseDocument: _prewarmScore!.release,
+                            pageBuilder: _prewarmBuilder(_prewarmScore!),
                           ),
-                        ],
-                      );
-                    },
+                    readyPageBuilder: (number, active, ready, failed) =>
+                        _surface(current, number, active, ready, failed),
                   ),
                 ),
         ),
       ),
     );
+  }
+
+  Widget _surface(
+    LoadedScore document,
+    int number,
+    bool active,
+    VoidCallback ready,
+    ValueChanged<String?> failed,
+  ) {
+    final surfacePage = PageKey(
+      entryId: document.target.entryId,
+      revisionId: document.target.revisionId,
+      pageNumber: number,
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (document.pdf != null)
+          SharpPdfPage(
+            page: document.pdf!.pages[number - 1],
+            active: active,
+            transform: _transform,
+            viewportKey: _viewportKey,
+            onRendered: () {
+              ready();
+              _onRendered(document, number);
+            },
+            onError: failed,
+            colorSampler: _colorSampler,
+            colorKey: surfacePage,
+          )
+        else
+          SharpFileImage(
+            active: active,
+            fileVersion: document.target.contentHash,
+            path: document.renderPath ?? document.target.filePath,
+            transform: _transform,
+            onRendered: ready,
+            onError: failed,
+            colorSampler: _colorSampler,
+            colorKey: surfacePage,
+            onImageInfo: (info) {
+              if (!mounted) return;
+              _imageInfos[surfacePage] = info;
+              while (_imageInfos.length > 6) {
+                _imageInfos.remove(
+                  _imageInfos.keys.firstWhere(
+                    (key) => key != _visiblePage && key != surfacePage,
+                  ),
+                );
+              }
+            },
+          ),
+        AnnotationCanvas(
+          workspace: widget.workspace,
+          page: surfacePage,
+          enabled: active && !_session.sourceChanged && !_picking,
+          style: _style,
+          eraser: _tool == ReaderTool.eraser,
+          eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
+          suspended: _touchTransforming,
+          onWritingChanged: _writingChanged,
+        ),
+        if (_picking && surfacePage == _visiblePage)
+          PaperColorPickLayer(
+            onPick: (point) => unawaited(_pickColor(surfacePage, point)),
+          ),
+      ],
+    );
+  }
+
+  ReadyPageBuilder _prewarmBuilder(LoadedScore document) =>
+      (number, active, ready, failed) =>
+          _surface(document, number, active, ready, failed);
+
+  Future<void> _prewarmNext() async {
+    if (_session.pageKey != _visiblePage ||
+        _session.page != _visibleDocument?.pageCount) {
+      return;
+    }
+    final next = _session.nextPrewarmTarget;
+    final anchor = next == null ? null : (_visiblePage!, next.key);
+    if (_prewarmAnchor == anchor) return;
+    _prewarmAnchor = anchor;
+    _prewarmScore = null;
+    _session.cancelPrewarm();
+    final epoch = ++_prewarmEpoch;
+    if (anchor == null) return;
+    final loaded = await _session.prewarmNext();
+    if (mounted && epoch == _prewarmEpoch && loaded != null) {
+      setState(() => _prewarmScore = loaded);
+    }
   }
 
   void _onRendered(LoadedScore document, int number) {
@@ -378,29 +580,31 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           crossAxisAlignment: WrapCrossAlignment.center,
           alignment: WrapAlignment.center,
           children: [
-            ChoiceChip(
-              label: const Text('画笔'),
-              avatar: const Icon(Icons.edit, size: 17),
-              selected: !_eraser && !_highlight,
-              onSelected: (_) => setState(() {
-                _eraser = false;
-                _highlight = false;
-              }),
-            ),
-            ChoiceChip(
-              label: const Text('荧光笔'),
-              avatar: const Icon(Icons.highlight, size: 17),
-              selected: !_eraser && _highlight,
-              onSelected: (_) => setState(() {
-                _eraser = false;
-                _highlight = true;
-              }),
-            ),
-            ChoiceChip(
-              label: const Text('橡皮'),
-              avatar: const Icon(Icons.auto_fix_normal, size: 17),
-              selected: _eraser,
-              onSelected: (_) => setState(() => _eraser = true),
+            for (final tool in ReaderTool.values)
+              ReaderToolButton(
+                key: ValueKey(tool),
+                tool: tool,
+                selected: !_picking && _tool == tool,
+                value: _sizes[tool]!,
+                onSelect: () => _selectTool(tool),
+                onChanged: (value) => setState(() => _sizes[tool] = value),
+              ),
+            IconButton(
+              tooltip: _picking ? '取消吸色' : '吸取谱面底色',
+              isSelected: _picking,
+              onPressed:
+                  _visiblePage == null ||
+                      _visiblePage != _session.pageKey ||
+                      _writing
+                  ? null
+                  : _togglePicking,
+              icon: _sampling
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.colorize),
             ),
             for (final (name, color) in [
               ('红色', 0xffc12b32),
@@ -411,7 +615,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               Tooltip(
                 message: name,
                 child: InkWell(
-                  onTap: () => setState(() => _color = color),
+                  onTap: () => setState(() {
+                    _cancelPick();
+                    _color = color;
+                  }),
                   child: SizedBox(
                     width: 44,
                     height: 44,
@@ -443,7 +650,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   ),
                 ),
               ),
-            _widthControl(),
             IconButton(
               tooltip: '撤销',
               onPressed: widget.workspace.store.canUndo(page)
@@ -468,115 +674,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     ),
   );
 
-  Widget _widthControl() => Builder(
-    builder: (buttonContext) => IconButton(
-      tooltip: _eraser ? '橡皮半径' : '笔宽',
-      icon: SizedBox(
-        width: 28,
-        height: 28,
-        child: Center(
-          child: _eraser
-              ? Container(
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: const Color(0xff334f66),
-                      width: 1.5,
-                    ),
-                  ),
-                )
-              : Container(
-                  width: 26,
-                  height: (_width * 810).clamp(1.0, 12.0),
-                  decoration: BoxDecoration(
-                    color: Color(_color),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-        ),
-      ),
-      onPressed: () {
-        final box = buttonContext.findRenderObject()! as RenderBox;
-        final overlay =
-            Overlay.of(context).context.findRenderObject()! as RenderBox;
-        final rect =
-            box.localToGlobal(Offset.zero, ancestor: overlay) & box.size;
-        setState(() => _widthMenuOpen = true);
-        unawaited(
-          showMenu<void>(
-            context: context,
-            color: const Color(0xfffaf9f5),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            position: RelativeRect.fromRect(rect, Offset.zero & overlay.size),
-            items: [
-              PopupMenuItem<void>(
-                enabled: false,
-                padding: const EdgeInsets.all(12),
-                child: StatefulBuilder(
-                  builder: (context, refresh) {
-                    final value = _eraser ? _eraserRadius : _width;
-                    return SizedBox(
-                      width: 220,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            _eraser
-                                ? '橡皮半径 ${(value * 810).round()}'
-                                : '笔宽 ${(value * 810).toStringAsFixed(1)}',
-                            style: const TextStyle(color: Color(0xff222222)),
-                          ),
-                          Slider(
-                            value: value,
-                            min: _eraser ? .006 : .001,
-                            max: _eraser ? .05 : .012,
-                            onChanged: (v) {
-                              setState(() {
-                                if (_eraser) {
-                                  _eraserRadius = v;
-                                } else {
-                                  _width = v;
-                                }
-                              });
-                              refresh(() {});
-                            },
-                          ),
-                          Container(
-                            height: _eraser
-                                ? value * 810 * 2
-                                : (value * 810).clamp(1.0, 12.0),
-                            width: _eraser ? value * 810 * 2 : 160,
-                            decoration: BoxDecoration(
-                              color: _eraser
-                                  ? const Color(0x22334f66)
-                                  : Color(_color),
-                              borderRadius: BorderRadius.circular(40),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ).whenComplete(() {
-            if (mounted) setState(() => _widthMenuOpen = false);
-          }),
-        );
-      },
-    ),
-  );
-
   void _navigate(NavigationDirection direction) {
-    if (_widthMenuOpen) {
-      Navigator.of(context).pop();
-      _widthMenuOpen = false;
-    }
+    if (_picking) setState(_cancelPick);
     final step = direction == NavigationDirection.forward ? 1 : -1;
     _direction = step;
     if (_writing) {
@@ -585,6 +684,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       }
       return;
     }
+    _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
     unawaited(_session.turn(direction));
   }
 

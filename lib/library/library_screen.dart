@@ -1,3 +1,5 @@
+import 'score_path_label.dart';
+
 import 'dart:async';
 import 'dart:io';
 
@@ -201,6 +203,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           revisionId: entry.currentRevisionId,
           filePath: library.absolutePathFor(entry),
           displayPath: library.absolutePathFor(entry),
+          parentFolderLabel: scoreParentFolder(entry.relativePath),
           contentHash: entry.currentRevision.contentHash,
         );
       }
@@ -806,9 +809,9 @@ class _LibraryScreenState extends State<LibraryScreen>
             overflow: TextOverflow.ellipsis,
           ),
           subtitle: Tooltip(
-            message: library.absolutePathFor(entry),
+            message: scoreParentFolder(entry.relativePath),
             child: Text(
-              library.absolutePathFor(entry),
+              scoreParentFolder(entry.relativePath),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),

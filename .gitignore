@@ -83,3 +83,6 @@
 !/pubspec.lock
 !/pubspec.yaml
 !/tool/storage_root_smoke.dart
+!/lib/library/score_path_label.dart
+!/lib/reader/paper_color_sampler.dart
+!/lib/reader/reader_tool_button.dart
