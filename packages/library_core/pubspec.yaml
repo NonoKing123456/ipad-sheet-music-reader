@@ -1,0 +1,14 @@
+name: library_core
+description: Read-only filesystem catalogue and stable score identity for the music reader.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  crypto: ^3.0.6
+  path: ^1.9.1
+
+dev_dependencies:
+  test: ^1.25.15

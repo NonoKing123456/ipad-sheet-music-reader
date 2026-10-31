@@ -1,0 +1,14 @@
+name: reader_state
+description: Shared annotation, set list and reading navigation state.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  crypto: ^3.0.6
+  path: ^1.9.1
+
+dev_dependencies:
+  test: ^1.25.15

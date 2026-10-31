@@ -1,0 +1,155 @@
+name: iOS unsigned device build
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/ios-unsigned.yml']
+  workflow_dispatch:
+    inputs:
+      public_source_confirmed:
+        description: Owner confirms this public repository contains only approved source
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-unsigned-device
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ github.repository == 'NonoKing123456/ipad-sheet-music-reader' && github.repository_owner == 'NonoKing123456' && github.event.repository.private == false && (github.event_name == 'push' || (github.actor == github.repository_owner && inputs.public_source_confirmed == true)) }}
+    runs-on: macos-26
+    timeout-minutes: 25
+    permissions:
+      contents: write # Only needed to publish the unsigned prerelease assets.
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      FLUTTER_VERSION: 3.47.8
+      FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
+      REVIEWED_SOURCE_SHA256: d8fbd50d8f068f85c453dc2ed14b2b643df7feb9056613a218473ece9be2832b
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install the fixed official Flutter SDK
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test -d "$DEVELOPER_DIR"
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.6'
+          git clone --depth 1 --branch "$FLUTTER_VERSION" \
+            https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Build an unsigned device application
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          flutter --version
+          flutter precache --ios
+          flutter pub get --enforce-lockfile
+          flutter build ios --release --no-codesign --no-pub
+
+      - name: Verify every nested Mach-O and create the Payload container
+        run: |
+          set -euo pipefail
+          APP=build/ios/iphoneos/Runner.app
+          test -d "$APP"
+          mkdir -p unsigned-output
+          {
+            git rev-parse HEAD
+            printf 'Reviewed source archive SHA256: %s\n' "$REVIEWED_SOURCE_SHA256"
+            shasum -a 256 pubspec.lock
+            flutter --version
+            sw_vers
+            xcodebuild -version
+          } > unsigned-output/build-info.txt
+          python3 - <<'PY' | tee -a unsigned-output/build-info.txt
+          import pathlib
+          import plistlib
+          import re
+          import subprocess
+
+          app = pathlib.Path("build/ios/iphoneos/Runner.app").resolve(strict=True)
+          with (app / "Info.plist").open("rb") as stream:
+              info = plistlib.load(stream)
+          if info.get("CFBundleSupportedPlatforms") != ["iPhoneOS"]:
+              raise SystemExit("Not an iPhoneOS app")
+          magic = {bytes.fromhex(x) for x in (
+              "feedface", "cefaedfe", "feedfacf", "cffaedfe",
+              "cafebabe", "bebafeca", "cafebabf", "bfbafeca")}
+          verified = set()
+          for path in sorted(app.rglob("*")):
+              # Also inspect framework symlink targets, but never outside the app.
+              path.resolve().relative_to(app)
+              if not path.is_file():
+                  continue
+              with path.open("rb") as stream:
+                  header = stream.read(4)
+              if header not in magic:
+                  continue
+              relative = path.relative_to(app).as_posix()
+              archs = subprocess.check_output(["lipo", "-archs", str(path)], text=True).split()
+              if archs != ["arm64"]:
+                  raise SystemExit(f"Unexpected Mach-O architectures: {relative}: {archs}")
+              report = subprocess.check_output(["xcrun", "vtool", "-show-build", str(path)], text=True)
+              platforms = re.findall(r"^\s*platform\s+(\S+)\s*$", report, re.MULTILINE)
+              if not platforms or any(platform != "IOS" for platform in platforms):
+                  raise SystemExit(f"Missing/non-device Mach-O platform: {relative}: {platforms}")
+              verified.add(relative)
+              print(f"{relative}: arm64 IOS", flush=True)
+          if not {"Runner", "Frameworks/App.framework/App"}.issubset(verified):
+              raise SystemExit("Required app Mach-O binaries were not verified")
+          print(f"Verified {len(verified)} nested Mach-O file paths", flush=True)
+          PY
+          mkdir -p "$RUNNER_TEMP/unsigned-package/Payload"
+          ditto "$APP" "$RUNNER_TEMP/unsigned-package/Payload/Runner.app"
+          ditto -c -k --keepParent "$RUNNER_TEMP/unsigned-package/Payload" \
+            unsigned-output/score-reader-unsigned.ipa
+          python3 - <<'PY'
+          import pathlib
+          import zipfile
+          with zipfile.ZipFile("unsigned-output/score-reader-unsigned.ipa") as archive:
+              names = archive.namelist()
+              if "Payload/Runner.app/Runner" not in names:
+                  raise SystemExit("Missing Payload app executable")
+              for name in names:
+                  parts = pathlib.PurePosixPath(name).parts
+                  if not parts or parts[0] != "Payload" or ".." in parts or "\\" in name:
+                      raise SystemExit("Unexpected IPA entry")
+          PY
+          cd unsigned-output
+          shasum -a 256 score-reader-unsigned.ipa > score-reader-unsigned.ipa.sha256
+
+      - name: Publish unsigned prerelease assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          for name in ("score-reader-unsigned.ipa", "score-reader-unsigned.ipa.sha256", "build-info.txt"):
+              size = (pathlib.Path("unsigned-output") / name).stat().st_size
+              if not 0 < size < 2 * 1024**3:
+                  raise SystemExit(f"Missing, empty, or oversized release asset: {name}")
+          PY
+          TAG="unsigned-ipad-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$TAG" \
+            unsigned-output/score-reader-unsigned.ipa \
+            unsigned-output/score-reader-unsigned.ipa.sha256 \
+            unsigned-output/build-info.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "Unsigned iPad build $TAG" \
+            --notes 'Unsigned native iPad/iPhone device container for later local signing only. Not directly installable. No signing, installation, or real-device validation has passed. Contains reviewed application code and build metadata only; no scores, user state, or credentials.'

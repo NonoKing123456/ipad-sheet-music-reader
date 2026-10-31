@@ -1,0 +1,32 @@
+name: score_reader
+description: Local sheet music library and reader for Windows and iPad.
+publish_to: none
+version: 0.4.1+6
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  file_selector: ^1.1.0
+  crypto: ^3.0.7
+  library_core:
+    path: packages/library_core
+  library_sync:
+    path: packages/library_sync
+  reader_state:
+    path: packages/reader_state
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  pdfrx: ^2.10.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

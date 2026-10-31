@@ -1,0 +1,15 @@
+name: library_sync
+description: Private native-app LAN transfer and durable reader-state merge.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+dependencies:
+  crypto: ^3.0.6
+  path: ^1.9.1
+  library_core:
+    path: ../library_core
+  reader_state:
+    path: ../reader_state
+dev_dependencies:
+  test: ^1.25.15

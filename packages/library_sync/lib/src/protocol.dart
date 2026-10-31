@@ -1,0 +1,599 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
+import 'package:reader_state/reader_state.dart';
+import 'manifest.dart';
+import 'replica.dart';
+import 'storage.dart';
+
+class SyncProtocolException implements Exception {
+  const SyncProtocolException(this.message, [this.status, this.code]);
+  final String message;
+  final int? status;
+
+  /// Recognized protocol code only; arbitrary peer diagnostics are discarded.
+  final String? code;
+  @override
+  String toString() =>
+      'SyncProtocolException: $message${status == null ? '' : ' ($status)'}';
+}
+
+class _DifferentLibrary implements Exception {}
+
+LibrarySyncFailure _libraryFailure(Object error) {
+  if (error is SyncCancelled) return LibrarySyncFailure.cancelled;
+  if (error is _DifferentLibrary) return LibrarySyncFailure.differentLibrary;
+  if (error is LibraryContentIntegrityException)
+    return LibrarySyncFailure.integrity;
+  if (error is SocketException ||
+      error is TimeoutException ||
+      error is HttpException) return LibrarySyncFailure.connection;
+  if (error is FileSystemException) return LibrarySyncFailure.localStorage;
+  if (error is SyncProtocolException) {
+    if (error.status == 401 || error.status == 403)
+      return LibrarySyncFailure.authentication;
+    if (error.status == 503 && error.code == 'source_not_ready')
+      return LibrarySyncFailure.sourceNotReady;
+  }
+  return LibrarySyncFailure.unknown;
+}
+
+String _libraryFailureMessage(LibrarySyncFailure failure) => switch (failure) {
+      LibrarySyncFailure.differentLibrary =>
+        'Replica belongs to another library. Use a new directory.',
+      LibrarySyncFailure.sourceNotReady =>
+        'Source library is not ready; make all scores readable and retry.',
+      LibrarySyncFailure.connection =>
+        'Connection interrupted or timed out; retry to resume verified objects.',
+      LibrarySyncFailure.authentication =>
+        'Authentication failed; pair this device again.',
+      LibrarySyncFailure.integrity =>
+        'Content verification failed; retry to download complete objects.',
+      LibrarySyncFailure.localStorage =>
+        'Local storage is unavailable; check space and access, then retry.',
+      LibrarySyncFailure.cancelled => 'Sync cancelled.',
+      LibrarySyncFailure.unknown =>
+        'Library transfer incomplete; retry to resume verified objects.'
+    };
+
+Future<Map<String, dynamic>> _readBody(
+    Stream<List<int>> stream, Duration timeout, int limit) async {
+  final bytes = <int>[];
+  await for (final chunk in stream.timeout(timeout)) {
+    if (bytes.length + chunk.length > limit)
+      throw const FormatException('Request too large.');
+    bytes.addAll(chunk);
+  }
+  return asMap(jsonDecode(utf8.decode(bytes)));
+}
+
+bool _constantEqual(String a, String b) {
+  final x = utf8.encode(a), y = utf8.encode(b);
+  var difference = x.length ^ y.length;
+  for (var i = 0; i < max(x.length, y.length); i++) {
+    difference |= (i < x.length ? x[i] : 0) ^ (i < y.length ? y[i] : 0);
+  }
+  return difference == 0;
+}
+
+class SyncServer {
+  SyncServer._(this.source, this.readerStore, this.stateDirectory, this._lease,
+      this._state, this.ioTimeout, this.maxJsonBytes);
+  final LibrarySource source;
+  final ReaderStateStore readerStore;
+  final String stateDirectory;
+  final Duration ioTimeout;
+  final int maxJsonBytes;
+  final DirectoryLease _lease;
+  Map<String, dynamic> _state;
+  late HttpServer _server;
+  Future<void> _tail = Future.value();
+  String? _pairCode;
+  DateTime? _pairExpires;
+  int _attempts = 0;
+  Uri get uri =>
+      Uri(scheme: 'http', host: _server.address.address, port: _server.port);
+  int get port => _server.port;
+  String get _statePath => p.join(stateDirectory, 'peers.json');
+
+  static Future<SyncServer> start(
+      {required LibrarySource source,
+      required ReaderStateStore readerStore,
+      required String stateDirectory,
+      InternetAddress? address,
+      int port = 0,
+      Duration ioTimeout = const Duration(seconds: 30),
+      int maxJsonBytes = 16 * 1024 * 1024}) async {
+    final dir = p.normalize(p.absolute(stateDirectory));
+    if (source is CatalogLibrarySource &&
+        (p.equals(source.catalog.rootPath, dir) ||
+            p.isWithin(source.catalog.rootPath, dir))) {
+      throw ArgumentError(
+          'Server state must be outside the read-only source library.');
+    }
+    final lease = await DirectoryLease.acquire(dir);
+    try {
+      final state = await readJson(p.join(dir, 'peers.json')) ??
+          {'schema': 1, 'peers': <String, dynamic>{}};
+      if (state['schema'] != 1)
+        throw const FormatException('Unsupported peer schema.');
+      final server = SyncServer._(
+          source, readerStore, dir, lease, state, ioTimeout, maxJsonBytes);
+      server._server =
+          await HttpServer.bind(address ?? InternetAddress.loopbackIPv4, port);
+      server._server.idleTimeout = ioTimeout;
+      server._server.listen((request) {
+        // One durable protocol transaction at a time; local reader edits still
+        // use the reader store's own queue and can run while bytes transfer.
+        final next = server._tail.then((_) => server._handle(request));
+        server._tail =
+            next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+      });
+      return server;
+    } catch (_) {
+      await lease.close();
+      rethrow;
+    }
+  }
+
+  /// UI displays this short-lived code. Successful use consumes it immediately.
+  String createPairingCode({Duration validity = const Duration(minutes: 2)}) {
+    _pairCode = List.generate(8, (_) => Random.secure().nextInt(10)).join();
+    _pairExpires = DateTime.now().toUtc().add(validity);
+    _attempts = 0;
+    return _pairCode!;
+  }
+
+  Future<void> close() async {
+    _pairCode = null;
+    await _server.close(force: true);
+    await _tail;
+    await _lease.close();
+  }
+
+  Future<void> _persist(Map<String, dynamic> state) async {
+    await writeJson(_statePath, state);
+    _state = state;
+  }
+
+  Map<String, dynamic> _copyState() => asMap(jsonDecode(jsonEncode(_state)));
+  String _authenticate(HttpRequest request) {
+    final authorization =
+        request.headers.value(HttpHeaders.authorizationHeader) ?? '';
+    if (!authorization.startsWith('Bearer '))
+      throw const SyncProtocolException('Authentication required.', 401);
+    final token = authorization.substring(7);
+    final peers = asMap(_state['peers']);
+    for (final e in peers.entries) {
+      if (_constantEqual(asMap(e.value)['token'] as String, token))
+        return e.key;
+    }
+    throw const SyncProtocolException('Authentication required.', 401);
+  }
+
+  Future<void> _reply(HttpResponse response, Map<String, Object?> json,
+      {int status = 200}) async {
+    response.statusCode = status;
+    response.headers.contentType = ContentType.json;
+    response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+    response.write(jsonEncode(json));
+    await response.close();
+  }
+
+  Future<void> _handle(HttpRequest request) async {
+    try {
+      final path = request.uri.path;
+      if (path == '/pair' && request.method == 'POST') {
+        final body = await _readBody(request, ioTimeout, 1024);
+        _attempts++;
+        if (_pairCode == null ||
+            _attempts > 5 ||
+            !DateTime.now().toUtc().isBefore(_pairExpires!) ||
+            !_constantEqual(body['code'] as String? ?? '', _pairCode!)) {
+          if (_attempts >= 5) _pairCode = null;
+          throw const SyncProtocolException(
+              'Pairing code invalid or expired.', 403);
+        }
+        _pairCode = null;
+        final peerId = randomId(16), token = randomId();
+        final state = _copyState(), peers = asMap(_state['peers']);
+        peers[peerId] = {
+          'token': token,
+          'baselineId': 'initial',
+          'baseline': ReaderSnapshot.empty().toJson(),
+          'pending': null,
+          'lastConfirmed': null
+        };
+        state['peers'] = peers;
+        await _persist(state);
+        await _reply(request.response, {'peerId': peerId, 'token': token});
+        return;
+      }
+      final peerId = _authenticate(request);
+      if (request.method == 'GET' && path == '/manifest') {
+        await _reply(request.response, (await source.manifest()).toJson());
+      } else if (request.method == 'GET' && path == '/object') {
+        final id = request.uri.queryParameters['entryId'] ?? '';
+        final revision = request.uri.queryParameters['revisionId'] ?? '';
+        final manifest = await source.manifest();
+        final e = manifest.entry(id, revision);
+        if (e == null || e.missing)
+          throw const SyncProtocolException('Object not available.', 404);
+        final stream = await source.openObject(id, revision);
+        request.response.headers.contentType = ContentType.binary;
+        request.response.contentLength = e.length;
+        await request.response.addStream(stream.timeout(ioTimeout));
+        await request.response.close();
+      } else if (request.method == 'POST' && path == '/state') {
+        await _exchange(request, peerId);
+      } else if (request.method == 'POST' && path == '/ack') {
+        await _acknowledge(request, peerId);
+      } else {
+        throw const SyncProtocolException('Unknown protocol route.', 404);
+      }
+    } catch (error) {
+      // Do not echo headers, URLs, file paths or tokens to peer or logs.
+      try {
+        await _reply(
+            request.response,
+            {
+              'error': error is LibrarySourceNotReady
+                  ? 'Source library is not ready for sync.'
+                  : 'Sync operation failed.',
+              if (error is LibrarySourceNotReady) 'code': 'source_not_ready'
+            },
+            status: error is LibrarySourceNotReady
+                ? 503
+                : error is SyncProtocolException
+                    ? error.status ?? 400
+                    : 400);
+      } catch (_) {
+        await request.response.close().catchError((Object _) {});
+      }
+    }
+  }
+
+  Future<void> _exchange(HttpRequest request, String peerId) async {
+    final body = await _readBody(request, ioTimeout, maxJsonBytes);
+    final requestId = body['requestId'] as String;
+    if (requestId.isEmpty || requestId.length > 128)
+      throw const FormatException('Invalid request ID.');
+    final fingerprint =
+        sha256.convert(utf8.encode(canonicalReaderJson(body))).toString();
+    final state = _copyState(), peers = asMap(state['peers']);
+    final peer = asMap(peers[peerId]);
+    for (final raw in [peer['pending'], peer['lastConfirmed']]) {
+      if (raw == null) continue;
+      final pending = asMap(raw);
+      if (pending['requestId'] == requestId) {
+        if (pending['fingerprint'] != fingerprint)
+          throw const SyncProtocolException(
+              'Request ID content mismatch.', 409);
+        await _reply(request.response, asMap(pending['response']));
+        return;
+      }
+    }
+    if (peer['pending'] != null)
+      throw const SyncProtocolException(
+          'Confirm previous pending request first.', 409);
+    if (body['baselineId'] != peer['baselineId'])
+      throw const SyncProtocolException('Common baseline mismatch.', 409);
+    final base = ReaderSnapshot.fromJson(asMap(peer['baseline']));
+    final remote = ReaderSnapshot.fromJson(asMap(body['snapshot']));
+    final receiptPrefix = 'server/${sha256.convert(utf8.encode(jsonEncode([
+          peerId,
+          requestId
+        ])))}';
+    final receipt = '$receiptPrefix/$fingerprint';
+    if (readerStore.snapshot.mergeReceipts
+        .any((id) => id.startsWith('$receiptPrefix/') && id != receipt)) {
+      throw const SyncProtocolException('Request ID content mismatch.', 409);
+    }
+    final merged = await readerStore.mergeFromPeer(
+        base: base, remote: remote, peerId: peerId, operationId: receipt);
+    final response = <String, Object?>{
+      'requestId': requestId,
+      'baselineId': randomId(16),
+      'snapshot': merged.snapshot.toJson()
+    };
+    peer['pending'] = {
+      'requestId': requestId,
+      'fingerprint': fingerprint,
+      'response': response
+    };
+    peers[peerId] = peer;
+    state['peers'] = peers;
+    await _persist(state);
+    await _reply(request.response, response);
+  }
+
+  Future<void> _acknowledge(HttpRequest request, String peerId) async {
+    final body = await _readBody(request, ioTimeout, 1024);
+    final state = _copyState(), peers = asMap(state['peers']);
+    final peer = asMap(peers[peerId]);
+    final pendingRaw = peer['pending'] ?? peer['lastConfirmed'];
+    if (pendingRaw == null)
+      throw const SyncProtocolException('No pending baseline.', 409);
+    final pending = asMap(pendingRaw), response = asMap(pending['response']);
+    if (body['requestId'] != pending['requestId'] ||
+        body['baselineId'] != response['baselineId']) {
+      throw const SyncProtocolException('Pending baseline mismatch.', 409);
+    }
+    peer['baselineId'] = response['baselineId'];
+    peer['baseline'] = response['snapshot'];
+    peer['lastConfirmed'] = pending;
+    peer['pending'] = null;
+    peers[peerId] = peer;
+    state['peers'] = peers;
+    await _persist(state);
+    await _reply(request.response, {'confirmed': true});
+  }
+}
+
+class SyncClient {
+  SyncClient._(this.baseUri, this.peerId, this._token, this.stateDirectory,
+      this.ioTimeout, this.maxJsonBytes);
+  final Uri baseUri;
+  final String peerId;
+  final String _token;
+  final String stateDirectory;
+  final Duration ioTimeout;
+  final int maxJsonBytes;
+  String get _statePath => p.join(stateDirectory, 'client.json');
+
+  /// Credentials and per-peer baselines stay in the app-private directory.
+  static Future<SyncClient> pair(
+      {required Uri baseUri,
+      required String code,
+      required String stateDirectory,
+      Duration ioTimeout = const Duration(seconds: 30),
+      int maxJsonBytes = 16 * 1024 * 1024}) async {
+    _validateUri(baseUri);
+    final lease = await DirectoryLease.acquire(stateDirectory);
+    try {
+      if (await readJson(p.join(stateDirectory, 'client.json')) != null) {
+        throw StateError('Client directory already paired. Open it instead.');
+      }
+      final http = HttpClient()..connectionTimeout = ioTimeout;
+      try {
+        final request =
+            await http.postUrl(baseUri.resolve('/pair')).timeout(ioTimeout);
+        request.followRedirects = false;
+        request.headers.contentType = ContentType.json;
+        request.write(jsonEncode({'code': code}));
+        final response = await request.close().timeout(ioTimeout);
+        final body = await _readBody(response, ioTimeout, 1024);
+        if (response.statusCode != 200)
+          throw SyncProtocolException('Pairing failed.', response.statusCode);
+        final client = SyncClient._(
+            baseUri,
+            body['peerId'] as String,
+            body['token'] as String,
+            p.normalize(p.absolute(stateDirectory)),
+            ioTimeout,
+            maxJsonBytes);
+        await writeJson(client._statePath, {
+          'schema': 1,
+          'baseUri': baseUri.toString(),
+          'peerId': client.peerId,
+          'token': client._token,
+          'baselineId': 'initial',
+          'baseline': ReaderSnapshot.empty().toJson(),
+          'pending': null
+        });
+        return client;
+      } finally {
+        http.close(force: true);
+      }
+    } finally {
+      await lease.close();
+    }
+  }
+
+  static Future<SyncClient> open(
+      {required String stateDirectory,
+      Duration ioTimeout = const Duration(seconds: 30),
+      int maxJsonBytes = 16 * 1024 * 1024}) async {
+    final json = await readJson(p.join(stateDirectory, 'client.json'));
+    if (json == null || json['schema'] != 1)
+      throw const FormatException('Missing or unsupported client state.');
+    final uri = Uri.parse(json['baseUri'] as String);
+    _validateUri(uri);
+    return SyncClient._(uri, json['peerId'] as String, json['token'] as String,
+        p.normalize(p.absolute(stateDirectory)), ioTimeout, maxJsonBytes);
+  }
+
+  static void _validateUri(Uri uri) {
+    if (uri.scheme != 'http' ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        (uri.path.isNotEmpty && uri.path != '/')) {
+      throw const FormatException('Use a plain private HTTP server origin.');
+    }
+  }
+
+  Future<HttpClientResponse> _request(
+      HttpClient http, String method, String path,
+      {Map<String, Object?>? body,
+      Map<String, String>? query,
+      bool readLibraryFailure = false}) async {
+    final uri = baseUri.resolve(path).replace(queryParameters: query);
+    final request = await http.openUrl(method, uri).timeout(ioTimeout);
+    request.followRedirects = false;
+    request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+    if (body != null) {
+      final bytes = utf8.encode(jsonEncode(body));
+      if (bytes.length > maxJsonBytes)
+        throw const SyncProtocolException(
+            'Reader state exceeds configured limit.');
+      request.headers.contentType = ContentType.json;
+      request.add(bytes);
+    }
+    final response = await request.close().timeout(ioTimeout);
+    if (response.statusCode != 200) {
+      String? code;
+      if (readLibraryFailure && response.statusCode == 503) {
+        try {
+          final error = await _readBody(response, ioTimeout, maxJsonBytes);
+          if (error['code'] == 'source_not_ready') code = 'source_not_ready';
+        } on FormatException {
+          // Malformed/unknown error bodies do not grant a typed source failure.
+        } on TypeError {
+          // A JSON value other than an object is also an unknown peer failure.
+        }
+      } else {
+        await response.drain<void>().timeout(ioTimeout);
+      }
+      throw SyncProtocolException(
+          'Peer rejected sync request.', response.statusCode, code);
+    }
+    return response;
+  }
+
+  Future<Map<String, dynamic>> _json(HttpClient http, String path,
+          {Map<String, Object?>? body,
+          bool readLibraryFailure = false}) async =>
+      _readBody(
+          await _request(http, body == null ? 'GET' : 'POST', path,
+              body: body, readLibraryFailure: readLibraryFailure),
+          ioTimeout,
+          maxJsonBytes);
+
+  Future<LibrarySyncResult> syncLibrary(ReplicaLibraryView replica,
+      {SyncCancellation? cancellation,
+      FutureOr<void> Function(LibrarySyncProgress progress)?
+          onProgress}) async {
+    void report(LibrarySyncPhase phase, int processed, int total) {
+      if (onProgress == null) return;
+      // Invoke in emission order, consume synchronous/asynchronous observer
+      // errors, and never wait for an observer to complete or release a lease.
+      unawaited(Future<void>.sync(
+              () => onProgress(LibrarySyncProgress(phase, processed, total)))
+          .then<void>((_) {}, onError: (Object _, StackTrace __) {}));
+    }
+
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    void cancel() => http.close(force: true);
+    cancellation?.addListener(cancel);
+    DirectoryLease? lease;
+    var downloaded = 0;
+    try {
+      cancellation?.check();
+      lease = await DirectoryLease.acquire(replica.rootDirectory);
+      final manifest = SyncManifest.fromJson(
+          await _json(http, '/manifest', readLibraryFailure: true));
+      if (replica.manifest != null &&
+          replica.manifest!.libraryId != manifest.libraryId) {
+        throw _DifferentLibrary();
+      }
+      final targets = manifest.entries.where((e) => !e.missing).toList();
+      var processed = 0;
+      report(LibrarySyncPhase.transferring, processed, targets.length);
+      for (final e in targets) {
+        cancellation?.check();
+        if (!await replica.hasVerifiedObject(e)) {
+          final response = await _request(http, 'GET', '/object',
+              query: {'entryId': e.entryId, 'revisionId': e.revisionId},
+              readLibraryFailure: true);
+          await replica.receiveObject(e, response.timeout(ioTimeout),
+              cancellation: cancellation);
+          downloaded++;
+        }
+        processed++;
+        report(LibrarySyncPhase.transferring, processed, targets.length);
+      }
+      cancellation?.check();
+      report(LibrarySyncPhase.committing, processed, targets.length);
+      await replica.commitManifest(manifest, cancellation: cancellation);
+      report(LibrarySyncPhase.complete, processed, targets.length);
+      return LibrarySyncResult(LibrarySyncStatus.complete, downloaded);
+    } catch (error) {
+      final failure = cancellation?.isCancelled == true
+          ? LibrarySyncFailure.cancelled
+          : _libraryFailure(error);
+      return LibrarySyncResult(
+          failure == LibrarySyncFailure.cancelled
+              ? LibrarySyncStatus.cancelled
+              : LibrarySyncStatus.partial,
+          downloaded,
+          _libraryFailureMessage(failure),
+          failure);
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+      await lease?.close();
+    }
+  }
+
+  /// Hook is intended for deterministic interruption/concurrent-edit tests;
+  /// application UI can use it to update progress after a response arrives.
+  Future<ReaderMergeResult> syncReaderState(ReaderStateStore store,
+      {SyncCancellation? cancellation,
+      Future<void> Function()? afterResponse,
+      Future<void> Function()? afterMerge}) async {
+    final lease = await DirectoryLease.acquire(stateDirectory);
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    void cancel() => http.close(force: true);
+    cancellation?.addListener(cancel);
+    try {
+      cancellation?.check();
+      final state = (await readJson(_statePath))!;
+      var pending = state['pending'] == null ? null : asMap(state['pending']);
+      if (pending == null) {
+        pending = {
+          'requestId': randomId(16),
+          'baselineId': state['baselineId'],
+          'snapshot': store.snapshot.toJson(),
+          'response': null
+        };
+        state['pending'] = pending;
+        await writeJson(_statePath, state);
+      }
+      Map<String, dynamic> response;
+      if (pending['response'] == null) {
+        response = await _json(http, '/state', body: {
+          'requestId': pending['requestId'],
+          'baselineId': pending['baselineId'],
+          'snapshot': pending['snapshot']
+        });
+        if (response['requestId'] != pending['requestId'])
+          throw const SyncProtocolException('Response request mismatch.');
+        // Validate before persisting a response which will be replayed offline.
+        ReaderSnapshot.fromJson(asMap(response['snapshot']));
+        pending['response'] = response;
+        state['pending'] = pending;
+        await writeJson(_statePath, state);
+      } else {
+        response = asMap(pending['response']);
+      }
+      await afterResponse?.call();
+      cancellation?.check();
+      final received = ReaderSnapshot.fromJson(asMap(response['snapshot']));
+      final result = await store.mergeFromPeer(
+          base: ReaderSnapshot.fromJson(asMap(pending['snapshot'])),
+          remote: received,
+          peerId: peerId,
+          operationId: 'client/$peerId/${pending['requestId']}');
+      await afterMerge?.call();
+      cancellation?.check();
+      await _json(http, '/ack', body: {
+        'requestId': pending['requestId'],
+        'baselineId': response['baselineId']
+      });
+      state['baselineId'] = response['baselineId'];
+      state['baseline'] = response['snapshot'];
+      state['pending'] = null;
+      await writeJson(_statePath, state);
+      return result;
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+      await lease.close();
+    }
+  }
+}
