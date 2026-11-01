@@ -47,6 +47,7 @@ class SharpPdfPage extends StatefulWidget {
     super.key,
     required this.page,
     required this.active,
+    this.allowDetail = true,
     required this.transform,
     required this.viewportKey,
     this.onRendered,
@@ -58,8 +59,13 @@ class SharpPdfPage extends StatefulWidget {
   });
   final PdfPage page;
   final bool active;
+  /// Hidden incoming desktop pages need a base, not a crop of the outgoing
+  /// page's zoom. Other readers retain the existing default behavior.
+  final bool allowDetail;
   final TransformationController transform;
   final GlobalKey viewportKey;
+  /// Decoded pixels are available even for hidden prewarming. The page window
+  /// separately acknowledges the selected group's actual paint/presentation.
   final VoidCallback? onRendered;
   final int? previewPixels;
   final ValueChanged<String?>? onError;
@@ -143,7 +149,8 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       _clearDetail();
       _base?.dispose();
       _base = null;
-    } else if (oldWidget.active && !widget.active) {
+    } else if ((oldWidget.active && !widget.active) ||
+        (oldWidget.allowDetail && !widget.allowDetail)) {
       _clearDetail();
     }
   }
@@ -280,7 +287,10 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       unawaited(_render(base, detail: false));
     }
     final zoom = widget.transform.value.getMaxScaleOnAxis();
-    if (widget.previewPixels != null || !widget.active || zoom <= 1.02) {
+    if (widget.previewPixels != null ||
+        !widget.active ||
+        !widget.allowDetail ||
+        zoom <= 1.02) {
       if (_detail != null || _requestedDetail != null) setState(_clearDetail);
       return;
     }

@@ -104,3 +104,4 @@
 !/lib/library/desktop_navigation_history.dart
 !/lib/library/page_count_service.dart
 !/packages/library_sync/lib/src/page_metadata.dart
+!/lib/library/score_file_icon.dart

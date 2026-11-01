@@ -2,6 +2,7 @@ import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
 import 'page_count_service.dart';
+import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
@@ -820,7 +821,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 }
                 return ListTile(
                   key: ValueKey('source-${source.id}'),
-                  leading: const Icon(Icons.library_music_outlined),
+                  leading: const ScoreFileIcon.folder(),
                   selected:
                       source.id == library.selectedSourceId &&
                       library.currentFolder.isEmpty,
@@ -895,10 +896,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         dense: true,
         selected: selected,
         selectedTileColor: const Color(0xffdfe8df),
-        leading: Icon(
-          folder.isEmpty ? Icons.library_music_outlined : Icons.folder_outlined,
-          size: 20,
-        ),
+        leading: const ScoreFileIcon.folder(),
         title: Tooltip(
           message: folder.isEmpty ? library.rootPath! : folder,
           child: Text(
@@ -1040,10 +1038,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         if (index < subfolders.length) {
           final folder = subfolders[index];
           return ListTile(
-            leading: const Icon(
-              Icons.folder_outlined,
-              color: Color(0xff8b784a),
-            ),
+            leading: const ScoreFileIcon.folder(),
             title: Text(p.posix.basename(folder)),
             subtitle: Text(folder, style: const TextStyle(fontSize: 12)),
             trailing: const Icon(Icons.chevron_right),
@@ -1051,21 +1046,26 @@ class _LibraryScreenState extends State<LibraryScreen>
           );
         }
         final entry = entries[index - subfolders.length];
-        final appearance = scoreFileAppearance(entry.relativePath);
         return ListTile(
           minTileHeight: 72,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 12,
             vertical: 0,
           ),
-          leading: Container(
-            width: 38,
-            height: 46,
-            decoration: BoxDecoration(
-              color: appearance.background,
-              borderRadius: BorderRadius.circular(6),
+          leading: Tooltip(
+            message: switch (entry.availability) {
+              ContentAvailability.ready => '本机可读',
+              ContentAvailability.deferred => '未下载，请先从云盘下载到本机',
+              ContentAvailability.unreadable => '本机内容不可读，请检查文件',
+            },
+            child: ScoreFileIcon(
+              path: entry.relativePath,
+              state: switch (entry.availability) {
+                ContentAvailability.ready => ScoreFileIconState.ready,
+                ContentAvailability.deferred => ScoreFileIconState.cloud,
+                ContentAvailability.unreadable => ScoreFileIconState.unreadable,
+              },
             ),
-            child: Icon(appearance.icon, color: appearance.foreground),
           ),
           title: Text(
             p.posix.basenameWithoutExtension(entry.relativePath),

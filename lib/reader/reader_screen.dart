@@ -188,7 +188,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() {
       _page = next;
       _inputGeneration++;
-      _transform.value = Matrix4.identity();
+      if (isMobileReader) _transform.value = Matrix4.identity();
     });
     debugPrint(
       'READER page_request page=$_page previously_rendered=${_renderedPages.contains(_page)}',
@@ -426,6 +426,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final generation = _openGeneration;
     return ReaderPageWindow(
       paperWidthTransition: !isMobileReader,
+      shortPageTransition: !isMobileReader,
+      onWillPresent: () => _transform.value = Matrix4.identity(),
+      onSelected: isMobileReader
+          ? null
+          : (_, number) => setState(() => _visiblePage = number),
       key: ValueKey(generation),
       pageNumber: _page,
       requestedAt: _requestedAt,

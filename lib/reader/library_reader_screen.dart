@@ -220,11 +220,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _pageWatch = Stopwatch()..start();
         _presented = false;
       }
-      _transform.value = Matrix4.identity();
+      if (isMobileReader ||
+          _effectiveDesktopMode == ReaderViewMode.continuous) {
+        _transform.value = Matrix4.identity();
+      }
     }
     setState(() {});
-    if (_session.pageKey == _visiblePage &&
-        _session.page == _session.current?.pageCount) {
+    if (_terminalVisiblePage != null) {
       unawaited(_prewarmNext());
     }
   }
@@ -986,6 +988,35 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   .025;
             }
 
+            ReaderPrewarmPage? warm;
+            final next = _terminalVisiblePage == null ? null : _prewarmScore;
+            if (next != null) {
+              final nextGroups = ReaderSpreads(
+                pageCount: next.pageCount,
+                doublePage: groups.doublePage,
+                arrangement: _arrangementFor(next.target.entryId),
+              );
+              final first = nextGroups.at(1);
+              warm = ReaderPrewarmPage(
+                documentKey: (next.target.key, mode, nextGroups.arrangement),
+                aspect: !nextGroups.doublePage
+                    ? next.aspectFor(first.first)
+                    : next.aspectFor(first.first) +
+                          next.aspectFor(first.last) +
+                          .025,
+                retainDocument: next.retain,
+                releaseDocument: next.release,
+                pageBuilder: (_, active, ready, failed) => ReaderSpreadSurface(
+                  spread: first,
+                  aspectFor: next.aspectFor,
+                  onReady: ready,
+                  onError: failed,
+                  pageBuilder: (number, pageReady, pageFailed) =>
+                      _surface(next, number, active, pageReady, pageFailed),
+                ),
+              );
+            }
+
             return ReaderInput(
               onPrevious: () => _navigate(NavigationDirection.backward),
               onNext: () => _navigate(NavigationDirection.forward),
@@ -1021,10 +1052,27 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 presentationClock: widget.presentationClock,
                 forwardWindowOnly: true,
                 paperWidthTransition: true,
+                shortPageTransition: true,
+                onWillPresent: () => _transform.value = Matrix4.identity(),
+                prewarm: warm,
                 surfaceBackground: Colors.transparent,
                 retainDocument: current.retain,
                 releaseDocument: current.release,
                 holdPresentation: _writing,
+                onSelected: (key, index) {
+                  if (key != viewKey ||
+                      _effectiveDesktopMode != mode ||
+                      _session.current?.target.key != current.target.key ||
+                      _arrangementFor(current.target.entryId) !=
+                          groups.arrangement) {
+                    return;
+                  }
+                  final group = groups.at(index);
+                  _selectVisible(
+                    current,
+                    group.contains(_session.page) ? _session.page : group.first,
+                  );
+                },
                 onPresented: (key, index) {
                   if (key != viewKey ||
                       _effectiveDesktopMode != mode ||
@@ -1061,7 +1109,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
-  void _markPresented(LoadedScore document, int number) {
+  void _selectVisible(LoadedScore document, int number) {
     if (!mounted || _session.current?.target.key != document.target.key) return;
     final visible = PageKey(
       entryId: document.target.entryId,
@@ -1076,7 +1124,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _visibleDocument = document;
       });
     }
-    if (changed && widget.allowAnnotations) {
+  }
+
+  void _markPresented(LoadedScore document, int number) {
+    if (!mounted || _session.current?.target.key != document.target.key) return;
+    _selectVisible(document, number);
+    final visible = _visiblePage!;
+    final newlyPresented =
+        _historyPosition != visible ||
+        _historyItemId != _session.position?.setListItemId;
+    if (newlyPresented && widget.allowAnnotations) {
       _session.rememberPresented(visible, document.pageCount);
     }
     widget.onPresented?.call(visible);
@@ -1088,7 +1145,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         'READER page_presented page=$number elapsed_ms=${_pageWatch?.elapsedMilliseconds ?? 0}',
       );
     }
-    if (number == document.pageCount &&
+    if (_terminalVisiblePage != null &&
         (isMobileReader ||
             _effectiveDesktopMode != ReaderViewMode.continuous)) {
       unawaited(_prewarmNext());
@@ -1115,6 +1172,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           SharpPdfPage(
             page: document.pdf!.pages[number - 1],
             active: active,
+            allowDetail:
+                isMobileReader ||
+                _effectiveDesktopMode == ReaderViewMode.continuous ||
+                (identical(document, _visibleDocument) &&
+                    (_effectiveDesktopMode == ReaderViewMode.spread
+                        ? ReaderSpreads(
+                            pageCount: document.pageCount,
+                            doublePage: true,
+                            arrangement: _arrangementFor(
+                              document.target.entryId,
+                            ),
+                          ).forPage(_visiblePage!.pageNumber).contains(number)
+                        : number == _visiblePage?.pageNumber)),
             previewPixels: previewPixels,
             transform: _transform,
             viewportKey: _viewportKey,
@@ -1190,12 +1260,31 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       (number, active, ready, failed) =>
           _surface(document, number, active, ready, failed);
 
-  Future<void> _prewarmNext() async {
-    if (_session.pageKey != _visiblePage ||
-        _session.page != _visibleDocument?.pageCount) {
-      return;
+  int? get _terminalVisiblePage {
+    final document = _visibleDocument, visible = _visiblePage;
+    if (document == null ||
+        visible == null ||
+        _historyPosition != visible ||
+        _historyItemId != _session.position?.setListItemId ||
+        !identical(document, _session.current) ||
+        _session.pageKey != visible) {
+      return null;
     }
-    final next = _session.nextPrewarmTarget;
+    final last =
+        !isMobileReader && _effectiveDesktopMode == ReaderViewMode.spread
+        ? ReaderSpreads(
+            pageCount: document.pageCount,
+            doublePage: true,
+            arrangement: _arrangementFor(document.target.entryId),
+          ).forPage(visible.pageNumber).last
+        : visible.pageNumber;
+    return last == document.pageCount ? last : null;
+  }
+
+  Future<void> _prewarmNext() async {
+    final last = _terminalVisiblePage;
+    if (last == null) return;
+    final next = _session.nextPrewarmTargetFor(lastVisiblePage: last);
     final anchor = next == null ? null : (_visiblePage!, next.key);
     if (_prewarmAnchor == anchor) return;
     _prewarmAnchor = anchor;
@@ -1203,7 +1292,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _session.cancelPrewarm();
     final epoch = ++_prewarmEpoch;
     if (anchor == null) return;
-    final loaded = await _session.prewarmNext();
+    final loaded = await _session.prewarmNext(lastVisiblePage: last);
     if (mounted && epoch == _prewarmEpoch && loaded != null) {
       setState(() => _prewarmScore = loaded);
     }

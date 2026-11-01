@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import 'reader_stage.dart';
 
@@ -53,6 +54,9 @@ class ReaderPageWindow extends StatefulWidget {
     this.forwardWindowOnly = false,
     this.surfaceBackground = Colors.white,
     this.paperWidthTransition = false,
+    this.shortPageTransition = false,
+    this.onWillPresent,
+    this.onSelected,
   });
   final int pageNumber, pageCount, direction;
   final Object documentKey;
@@ -70,6 +74,15 @@ class ReaderPageWindow extends StatefulWidget {
   final bool forwardWindowOnly;
   final Color surfaceBackground;
   final bool paperWidthTransition;
+
+  /// Desktop replacement uses one opaque group with a short settling movement.
+  /// The callback resets its viewport in the same frame that reveals the group.
+  final bool shortPageTransition;
+  final VoidCallback? onWillPresent;
+
+  /// Metadata selection for the frame being revealed. Persistence still waits
+  /// for [onPresented], after an actual selected paint acknowledgement.
+  final void Function(Object document, int page)? onSelected;
   @override
   State<ReaderPageWindow> createState() => _ReaderPageWindowState();
 }
@@ -92,6 +105,7 @@ class _Surface {
   ReaderPageWindow owner;
   final int number;
   bool ready = false;
+  bool painted = false;
   Duration? readySince;
   String? error;
   int retry = 0;
@@ -108,6 +122,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   bool _initialPresented = false;
   bool _reversing = false;
   bool _startScheduled = false;
+  bool _settleRevealed = false;
+  int _settleEpoch = 0;
+  _PageId? _awaitingPaint;
   Duration _transitionStart = Duration.zero;
   @override
   void initState() {
@@ -153,7 +170,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
         surface.owner = widget;
       }
     }
-    final warm = widget.prewarm;
+    final warm = _canPrewarm ? widget.prewarm : null;
     if (warm != null) {
       final id = _PageId(warm.documentKey, 1);
       if (!(id.document == widget.documentKey &&
@@ -188,13 +205,19 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
             id.number == widget.pageNumber + widget.direction);
   }
 
+  bool get _canPrewarm =>
+      !widget.forwardWindowOnly ||
+      (_incoming == null && _requested == _displayed);
+
   void _trim() {
     final remove = _surfaces.keys
         .where(
           (id) =>
               id != _displayed &&
               id != _incoming &&
-              !(id.document == widget.prewarm?.documentKey && id.number == 1) &&
+              !(_canPrewarm &&
+                  id.document == widget.prewarm?.documentKey &&
+                  id.number == 1) &&
               !_inWindow(id),
         )
         .toList();
@@ -235,6 +258,10 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       : widget.direction;
   void _tryPresent() {
     if (widget.holdPresentation) return;
+    if (widget.shortPageTransition) {
+      _trySettle();
+      return;
+    }
     // A bounded spread cannot mount a third group until its incoming group is
     // released. Reverse an obsolete incoming group before waiting for the new
     // target; otherwise a quick opposite key would first present the old target.
@@ -322,6 +349,68 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     }
   }
 
+  void _trySettle() {
+    if (_incoming != null) {
+      if (_requested == _incoming) return;
+      // Keep the group that has actually become visible while preparing the
+      // latest request. Never bounce back to an obsolete outgoing group.
+      _settleEpoch++;
+      _startScheduled = false;
+      _animation.stop();
+      if (_settleRevealed) {
+        _displayed = _incoming!;
+        _initialPresented = true;
+      }
+      _incoming = null;
+      _settleRevealed = false;
+      _capture();
+    }
+    if (!(_surfaces[_requested]?.ready ?? false)) return;
+    if (_displayed == _requested) {
+      if (!_initialPresented) {
+        _initialPresented = true;
+        _notifyPresented();
+      }
+      return;
+    }
+    _incoming = _requested;
+    _direction = _directionFor(_requested);
+    _settleRevealed = false;
+    final epoch = ++_settleEpoch;
+    _startScheduled = true;
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      if (!mounted || epoch != _settleEpoch || _incoming != _requested) return;
+      _startScheduled = false;
+      setState(() {
+        // This callback runs before build/paint, so the new paper and its fit
+        // transform become visible together. Hidden decoded neighbours do not
+        // have to paint before they may be selected.
+        widget.onWillPresent?.call();
+        _settleRevealed = true;
+        final selected = _incoming!;
+        _surfaces[selected]!.owner.onSelected?.call(
+          selected.document,
+          selected.number,
+        );
+        if (MediaQuery.disableAnimationsOf(context) || widget.direction == 0) {
+          _complete();
+        } else {
+          _animation.forward(from: 0);
+        }
+      });
+    });
+  }
+
+  void _painted(_PageId id, _Surface surface, int retry) {
+    if (!mounted || !_currentSurface(id, surface, retry) || !surface.ready) {
+      return;
+    }
+    surface.painted = true;
+    if (_awaitingPaint == id && _displayed == id && _incoming == null) {
+      _notifyPresented();
+    }
+  }
+
   void _launchAnimation() {
     final elapsed = (_now() - _transitionStart).inMicroseconds / 90000;
     _animation.forward(from: elapsed.clamp(0.0, 1.0));
@@ -329,11 +418,19 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
 
   void _notifyPresented() {
     final id = _displayed;
+    if (widget.shortPageTransition && !(_surfaces[id]?.painted ?? false)) {
+      _awaitingPaint = id;
+      return;
+    }
+    _awaitingPaint = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _displayed == id) {
+      if (mounted &&
+          _displayed == id &&
+          (!widget.shortPageTransition || _requested == id)) {
         _surfaces[id]?.owner.onPresented?.call(id.document, id.number);
       }
     });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   void _status(AnimationStatus status) {
@@ -357,6 +454,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   void _complete() {
     _displayed = _incoming!;
     _incoming = null;
+    _settleRevealed = false;
     _initialPresented = true;
     _notifyPresented();
     widget.forwardWindowOnly ? _capture() : _trim();
@@ -386,6 +484,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
           final distance = widget.paperWidthTransition && _incoming != null
               ? (fittedWidth(_displayed) + fittedWidth(_incoming!)) / 2
               : constraints.maxWidth;
+          final settledVisible = _incoming != null && _settleRevealed
+              ? _incoming!
+              : _displayed;
           final order =
               _surfaces.keys
                   .where((id) => id != _displayed && id != _incoming)
@@ -407,10 +508,16 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                       child: ExcludeSemantics(
                         excluding: id != _displayed,
                         child: Opacity(
-                          opacity: id == _displayed || id == _incoming ? 1 : 0,
+                          opacity: widget.shortPageTransition
+                              ? (id == settledVisible ? 1 : 0)
+                              : (id == _displayed || id == _incoming ? 1 : 0),
                           child: Transform.translate(
                             offset: Offset(
-                              _incoming == null
+                              widget.shortPageTransition
+                                  ? (id == _incoming && _settleRevealed
+                                        ? _direction * (1 - t) * 10
+                                        : 0)
+                                  : _incoming == null
                                   ? 0
                                   : id == _incoming
                                   ? _direction * (1 - t) * distance
@@ -426,7 +533,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                                 ),
                                 child: ColoredBox(
                                   color: _surfaces[id]!.owner.surfaceBackground,
-                                  child: _buildSurface(id),
+                                  child: widget.shortPageTransition
+                                      ? _observePaint(id, _buildSurface(id))
+                                      : _buildSurface(id),
                                 ),
                               ),
                             ),
@@ -495,6 +604,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                 final s = surface;
                 s.error = null;
                 s.ready = false;
+                s.painted = false;
                 s.readySince = null;
                 s.retry++;
               }),
@@ -523,5 +633,53 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
         (error) => _failed(id, surface, retry, error),
       ),
     );
+  }
+
+  Widget _observePaint(_PageId id, Widget child) {
+    final surface = _surfaces[id]!, retry = surface.retry;
+    return _PaintedSurface(
+      onPainted: surface.ready ? () => _painted(id, surface, retry) : null,
+      child: child,
+    );
+  }
+}
+
+/// Decoded readiness also works for hidden prewarming. Presentation is a
+/// separate acknowledgement after the selected group has participated in paint.
+class _PaintedSurface extends SingleChildRenderObjectWidget {
+  const _PaintedSurface({required this.onPainted, required super.child});
+  final VoidCallback? onPainted;
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _PaintedSurfaceBox(onPainted);
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _PaintedSurfaceBox renderObject,
+  ) {
+    renderObject.onPainted = onPainted;
+  }
+}
+
+class _PaintedSurfaceBox extends RenderProxyBox {
+  _PaintedSurfaceBox(this._onPainted);
+  VoidCallback? _onPainted;
+  set onPainted(VoidCallback? value) {
+    final needsAcknowledgement = _onPainted == null && value != null;
+    _onPainted = value;
+    if (needsAcknowledgement) markNeedsPaint();
+  }
+
+  bool _pending = false;
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    final callback = _onPainted;
+    if (callback == null || _pending) return;
+    _pending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pending = false;
+      callback();
+    });
   }
 }

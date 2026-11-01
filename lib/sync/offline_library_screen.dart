@@ -1,6 +1,7 @@
 import '../library/score_path_label.dart';
 import '../library/directory_navigation.dart';
 import '../library/page_count_service.dart';
+import '../library/score_file_icon.dart';
 
 import 'dart:async';
 
@@ -47,7 +48,6 @@ class _OfflineStatusIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final ready = availability == ContentAvailability.ready;
     final unreadable = availability == ContentAvailability.unreadable;
-    final appearance = scoreFileAppearance(path);
     final label = ready
         ? pendingVersion
               ? '离线旧版可读，有更新待下载'
@@ -61,19 +61,15 @@ class _OfflineStatusIcon extends StatelessWidget {
       child: Semantics(
         label: label,
         child: ExcludeSemantics(
-          child: _OfflineAvailabilityTile(
-            icon: appearance.icon,
-            foreground: appearance.foreground,
-            current: ready && !pendingVersion,
-            partial: ready && pendingVersion,
-            error: unreadable,
-            badge: unreadable
-                ? Icons.priority_high
+          child: ScoreFileIcon(
+            path: path,
+            state: unreadable
+                ? ScoreFileIconState.unreadable
                 : !ready
-                ? Icons.cloud_download
+                ? ScoreFileIconState.cloud
                 : pendingVersion
-                ? Icons.update
-                : Icons.check,
+                ? ScoreFileIconState.update
+                : ScoreFileIconState.ready,
           ),
         ),
       ),
@@ -775,7 +771,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                     overflow: TextOverflow.ellipsis,
                   ),
                   leading: _OfflineFolderIcon(
-                    source: true,
                     status: widget.controller.folderOfflineStatus(
                       sourceId: source.id,
                     ),
@@ -845,9 +840,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 }
 
 class _OfflineFolderIcon extends StatelessWidget {
-  const _OfflineFolderIcon({required this.status, this.source = false});
+  const _OfflineFolderIcon({required this.status});
   final OfflineFolderStatus status;
-  final bool source;
   @override
   Widget build(BuildContext context) => Tooltip(
     message: status.description,
@@ -855,89 +849,16 @@ class _OfflineFolderIcon extends StatelessWidget {
     child: Semantics(
       label: status.description,
       child: ExcludeSemantics(
-        child: _OfflineAvailabilityTile(
-          icon: source ? Icons.library_music_outlined : Icons.folder_outlined,
-          foreground: const Color(0xff52615c),
-          current: status.allCurrent,
-          partial: !status.allCurrent && status.readable > 0,
-          empty: status.total == 0,
-          badge: status.allCurrent
-              ? Icons.check
+        child: ScoreFileIcon.folder(
+          state: status.total == 0
+              ? ScoreFileIconState.empty
+              : status.allCurrent
+              ? ScoreFileIconState.ready
               : status.readable == 0
-              ? Icons.cloud_download
-              : Icons.contrast,
+              ? ScoreFileIconState.cloud
+              : ScoreFileIconState.partial,
         ),
       ),
     ),
   );
-}
-
-class _OfflineAvailabilityTile extends StatelessWidget {
-  const _OfflineAvailabilityTile({
-    required this.icon,
-    required this.foreground,
-    required this.current,
-    required this.partial,
-    required this.badge,
-    this.error = false,
-    this.empty = false,
-  });
-  final IconData icon, badge;
-  final Color foreground;
-  final bool current, partial, error, empty;
-  @override
-  Widget build(BuildContext context) {
-    final state = empty
-        ? 'empty'
-        : error
-        ? 'error'
-        : current
-        ? 'ready'
-        : partial
-        ? 'partial'
-        : 'cloud';
-    final color = error
-        ? const Color(0xffa74838)
-        : current
-        ? const Color(0xff246c39)
-        : partial
-        ? const Color(0xff996817)
-        : const Color(0xff62706b);
-    return Container(
-      key: ValueKey('offline-status-$state'),
-      width: 44,
-      height: 44,
-      decoration: BoxDecoration(
-        color: error
-            ? const Color(0xfff4e5e1)
-            : current
-            ? const Color(0xffe1efdf)
-            : partial
-            ? const Color(0xffffedcd)
-            : const Color(0xffe8ece9),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Stack(
-        children: [
-          Positioned(
-            left: 6,
-            top: 6,
-            child: Icon(icon, size: 26, color: foreground),
-          ),
-          if (!empty)
-            Positioned(
-              right: 0,
-              bottom: 0,
-              child: Container(
-                key: ValueKey('offline-badge-$state'),
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                child: Icon(badge, size: 15, color: Colors.white),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
 }

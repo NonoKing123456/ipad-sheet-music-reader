@@ -449,11 +449,15 @@ class ReaderSession extends ChangeNotifier {
     _warmWanted = null;
   }
 
-  ScoreTarget? get nextPrewarmTarget {
+  ScoreTarget? get nextPrewarmTarget => nextPrewarmTargetFor();
+
+  /// A two-page terminal spread may have N-1 as its focused page. Callers may
+  /// supply its actually presented last page without changing navigation focus.
+  ScoreTarget? nextPrewarmTargetFor({int? lastVisiblePage}) {
     if (_disposed ||
         current == null ||
         position == null ||
-        page != current!.pageCount) {
+        (lastVisiblePage ?? page) != current!.pageCount) {
       return null;
     }
     final items = queue,
@@ -463,8 +467,8 @@ class ReaderSession extends ChangeNotifier {
     return target;
   }
 
-  Future<LoadedScore?> prewarmNext() async {
-    final target = nextPrewarmTarget;
+  Future<LoadedScore?> prewarmNext({int? lastVisiblePage}) async {
+    final target = nextPrewarmTargetFor(lastVisiblePage: lastVisiblePage);
     if (target == null) return null;
     _warmWanted = target.key;
     final cached = _cache[target.key];
@@ -490,7 +494,7 @@ class ReaderSession extends ChangeNotifier {
           _warmWanted != target.key) {
         return null;
       }
-      return prewarmNext();
+      return prewarmNext(lastVisiblePage: lastVisiblePage);
     }
     final epoch = _epoch;
     _warmEpoch = epoch;
