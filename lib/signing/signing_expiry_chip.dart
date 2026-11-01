@@ -58,10 +58,14 @@ class SigningExpiryChip extends StatefulWidget {
     this.onRead,
     this.pairedDevice = false,
     this.pairedStatus,
+    this.unavailable,
+    this.onRefresh,
   });
   final ValueChanged<SigningExpiry>? onRead;
   final bool pairedDevice;
   final ValueListenable<SigningStatusReceipt?>? pairedStatus;
+  final ValueListenable<bool>? unavailable;
+  final Future<void> Function()? onRefresh;
 
   @override
   State<SigningExpiryChip> createState() => _SigningExpiryChipState();
@@ -86,6 +90,7 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
       WidgetsBinding.instance.addObserver(this);
       if (widget.pairedDevice) {
         widget.pairedStatus?.addListener(_receiptChanged);
+        widget.unavailable?.addListener(_receiptChanged);
         _receiptChanged();
       } else {
         unawaited(_refresh());
@@ -109,6 +114,11 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
     if (oldWidget.pairedStatus != widget.pairedStatus) {
       oldWidget.pairedStatus?.removeListener(_receiptChanged);
       widget.pairedStatus?.addListener(_receiptChanged);
+      if (widget.pairedDevice) _receiptChanged();
+    }
+    if (oldWidget.unavailable != widget.unavailable) {
+      oldWidget.unavailable?.removeListener(_receiptChanged);
+      widget.unavailable?.addListener(_receiptChanged);
       if (widget.pairedDevice) _receiptChanged();
     }
   }
@@ -163,15 +173,20 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
     }
   }
 
-  Future<void> _details() => showDialog<void>(
-    context: context,
-    builder: (context) => widget.pairedDevice && widget.pairedStatus != null
-        ? ValueListenableBuilder<SigningStatusReceipt?>(
-            valueListenable: widget.pairedStatus!,
-            builder: (context, receipt, _) => _detailsDialog(context, receipt),
-          )
-        : _detailsDialog(context, null),
-  );
+  Future<void> _details() async {
+    await widget.onRefresh?.call();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => widget.pairedDevice && widget.pairedStatus != null
+          ? ValueListenableBuilder<SigningStatusReceipt?>(
+              valueListenable: widget.pairedStatus!,
+              builder: (context, receipt, _) =>
+                  _detailsDialog(context, receipt),
+            )
+          : _detailsDialog(context, null),
+    );
+  }
 
   Widget _detailsDialog(BuildContext context, SigningStatusReceipt? receipt) {
     final display = widget.pairedDevice
@@ -183,7 +198,17 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(display.exactLocalTime),
+          Text(
+            widget.pairedDevice && receipt == null
+                ? widget.unavailable?.value == true
+                      ? '签名信息暂不可读，请重试。'
+                      : '尚未收到当前配对 iPad 的签名回报。'
+                : display.expiration == null
+                ? widget.pairedDevice
+                      ? '已收到回报，暂未读取到到期时间。'
+                      : '暂未读取到到期时间。'
+                : display.exactLocalTime,
+          ),
           if (widget.pairedDevice && receipt != null) ...[
             const SizedBox(height: 8),
             Text('电脑收到：${SigningExpiry(receipt.receivedAt).exactLocalTime}'),
@@ -215,6 +240,18 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
   Widget build(BuildContext context) {
     if (!_ios && !widget.pairedDevice) return const SizedBox.shrink();
     final now = DateTime.now();
+    final receipt = widget.pairedStatus?.value;
+    final label = widget.pairedDevice
+        ? receipt == null
+              ? widget.unavailable?.value == true
+                    ? 'iPad签名暂不可读'
+                    : 'iPad签名未回报'
+              : receipt.status.expiration == null
+              ? 'iPad期限未读取'
+              : 'iPad${_expiry.label(now)}'
+        : _expiry.expiration == null
+        ? '签名期限未读取'
+        : _expiry.label(now);
     final color = _expiry.nearExpiry(now)
         ? const Color(0xff946124)
         : Theme.of(context).colorScheme.onSurfaceVariant;
@@ -239,7 +276,7 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
               const Icon(Icons.history, size: 13),
               const SizedBox(width: 4),
             ],
-            Text('${widget.pairedDevice ? 'iPad' : ''}${_expiry.label(now)}'),
+            Text(label),
           ],
         ),
       ),
@@ -250,6 +287,7 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
   void dispose() {
     _timer?.cancel();
     widget.pairedStatus?.removeListener(_receiptChanged);
+    widget.unavailable?.removeListener(_receiptChanged);
     if (_ios || widget.pairedDevice) {
       WidgetsBinding.instance.removeObserver(this);
     }

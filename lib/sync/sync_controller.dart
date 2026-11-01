@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:collection';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart'
+    show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
@@ -80,12 +83,29 @@ class _OfflineEntryList extends ListBase<LibraryEntry> {
 }
 
 /// App-private orchestration. The protocol and domain stores own durable data.
-class SyncController extends ChangeNotifier {
+class _SigningReadRequest {
+  const _SigningReadRequest(
+    this.statusDirectory,
+    this.serverDirectory,
+    this.serverId,
+  );
+  final String statusDirectory, serverDirectory, serverId;
+  Future<(Set<String>, SigningStatusReceipt?)> call() async {
+    final peers = await SyncServer.authenticatedPeerIdsAt(serverDirectory);
+    return (
+      peers,
+      await SigningStatusStore.readAuthorized(statusDirectory, serverId, peers),
+    );
+  }
+}
+
+class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   SyncController({
     required this.library,
     required this.workspace,
     this.ioTimeout = const Duration(seconds: 30),
     this.bindAddress,
+    this.signingDirectoryWatch,
   }) {
     library.addListener(_libraryChanged);
     workspace.addListener(_workspaceChanged);
@@ -96,6 +116,7 @@ class SyncController extends ChangeNotifier {
 
   /// Tests may restrict the listener to loopback; production binds IPv4 LAN.
   final InternetAddress? bindAddress;
+  final Stream<FileSystemEvent> Function(String)? signingDirectoryWatch;
   Directory? _canonicalDataDirectory;
   Directory get directory => Directory(
     p.join((_canonicalDataDirectory ?? library.dataDirectory).path, 'sync'),
@@ -116,6 +137,7 @@ class SyncController extends ChangeNotifier {
     remote: (keys) async => await _client?.pageMetadata(keys) ?? {},
   );
   final signingStatus = ValueNotifier<SigningStatusReceipt?>(null);
+  final signingUnavailable = ValueNotifier<bool>(false);
   SigningStatusStore? _signingStore;
   int _signingAuthEpoch = 0;
   SigningDeviceStatus? _lastLocalSigning, _pendingSigning;
@@ -123,9 +145,36 @@ class SyncController extends ChangeNotifier {
   bool _sendingSigning = false;
   int _signingRetries = 0;
   DateTime? _signingRetryAt;
+  StreamSubscription<FileSystemEvent>? _signingFileWatch, _signingPeerWatch;
+  String? _signingPeerWatchPath;
+  String? _signingActualPeerWatchPath;
+  Object? _signingFileWatchToken, _signingPeerWatchToken;
+  bool _signingFileWatchDead = false, _signingPeerWatchDead = false;
+  Timer? _signingReloadTimer;
+  Future<void>? _signingReadTask;
+  bool _signingReadPending = false, _signingObserver = false;
+  bool _signingForeground = true, _signingProjecting = false;
+  bool _signingAuthInvalidated = true;
+
+  String? get _currentSigningServer {
+    final root = library.rootPath;
+    final value = root == null
+        ? null
+        : (_settings['roots'] as Map)[_rootKey(root)];
+    return value == null
+        ? null
+        : Map<String, dynamic>.from(value as Map)['id'] as String;
+  }
 
   Future<void> _loadSigningStatus() async {
     if (defaultTargetPlatform != TargetPlatform.windows) return;
+    if (!_signingObserver) {
+      _signingObserver = true;
+      _signingForeground =
+          WidgetsBinding.instance.lifecycleState == null ||
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+      WidgetsBinding.instance.addObserver(this);
+    }
     try {
       final store = await SigningStatusStore.open(
         p.join(directory.path, 'signing-status'),
@@ -136,35 +185,261 @@ class SyncController extends ChangeNotifier {
       }
       _signingStore = store;
       store.onChanged = () {
-        if (!_disposed) signingStatus.value = store.latest;
+        if (!_disposed &&
+            _signingForeground &&
+            !_signingProjecting &&
+            !_signingAuthInvalidated) {
+          final latest = store.latest;
+          if (latest == null || latest.serverId == _currentSigningServer) {
+            signingStatus.value = latest;
+          }
+        }
       };
-      await _refreshSigningAuthorization();
-      if (!_disposed) signingStatus.value = store.latest;
     } catch (_) {
-      // Optional display metadata never prevents library/state initialization.
+      // Another running instance may own the writer lease. Read its committed
+      // snapshot through the same current-server/authentication boundary.
+    }
+    await refreshSigningStatus();
+  }
+
+  Future<void> _refreshSigningAuthorization() =>
+      refreshSigningStatus(invalidate: true);
+
+  Future<void> refreshSigningStatus({
+    bool invalidate = false,
+    bool retryWatch = true,
+  }) {
+    if (_disposed || defaultTargetPlatform != TargetPlatform.windows) {
+      return Future.value();
+    }
+    if (invalidate) {
+      _signingAuthEpoch++;
+      _signingAuthInvalidated = true;
+      signingStatus.value = null;
+    }
+    if (retryWatch) {
+      _signingFileWatchDead = false;
+      _signingPeerWatchDead = false;
+    }
+    _signingReadPending = true;
+    if (!_signingForeground) return Future.value();
+    return _signingReadTask ??= _drainSigningReads().whenComplete(() {
+      _signingReadTask = null;
+      if (_signingReadPending && _signingForeground && !_disposed) {
+        scheduleMicrotask(
+          () => unawaited(refreshSigningStatus(retryWatch: false)),
+        );
+      }
+    });
+  }
+
+  Future<void> _drainSigningReads() async {
+    while (_signingReadPending && _signingForeground && !_disposed) {
+      _signingReadPending = false;
+      final epoch = ++_signingAuthEpoch;
+      final root = library.rootPath, serverId = _currentSigningServer;
+      try {
+        await _bindSigningWatches(serverId, epoch);
+        if (_disposed || epoch != _signingAuthEpoch || !_signingForeground) {
+          continue;
+        }
+        if (_signingFileWatchDead || _signingPeerWatchDead) {
+          signingStatus.value = null;
+          signingUnavailable.value = true;
+          continue;
+        }
+        if (serverId == null) {
+          _signingAuthInvalidated = false;
+          signingStatus.value = null;
+          signingUnavailable.value = false;
+          continue;
+        }
+        final request = _SigningReadRequest(
+          p.join(directory.path, 'signing-status'),
+          p.join(directory.path, 'servers', serverId),
+          serverId,
+        );
+        final result = await Isolate.run(request.call);
+        if (_disposed ||
+            epoch != _signingAuthEpoch ||
+            !_signingForeground ||
+            library.rootPath != root ||
+            _currentSigningServer != serverId) {
+          continue;
+        }
+        final store = _signingStore;
+        _signingAuthInvalidated = false;
+        if (store == null) {
+          signingStatus.value = result.$2;
+        } else {
+          _signingProjecting = true;
+          try {
+            store.selectServer(serverId);
+            store.setAuthenticatedPeers(serverId, result.$1);
+          } finally {
+            _signingProjecting = false;
+          }
+          signingStatus.value = store.latest;
+        }
+        signingUnavailable.value = false;
+      } catch (_) {
+        if (!_disposed && epoch == _signingAuthEpoch && _signingForeground) {
+          _signingAuthInvalidated = true;
+          signingStatus.value = null;
+          signingUnavailable.value = true;
+        }
+      }
     }
   }
 
-  Future<void> _refreshSigningAuthorization() async {
-    final store = _signingStore;
-    if (store == null || _disposed) return;
-    final epoch = ++_signingAuthEpoch, root = library.rootPath;
-    final value = root == null
-        ? null
-        : (_settings['roots'] as Map)[_rootKey(root)];
-    final serverId = value == null
-        ? null
-        : Map<String, dynamic>.from(value as Map)['id'] as String;
-    store.selectServer(serverId);
-    if (serverId == null) return;
-    store.setAuthenticatedPeers(serverId, {});
-    final peers = await SyncServer.authenticatedPeerIdsAt(
-      p.join(directory.path, 'servers', serverId),
+  void _signingFileChanged({bool auth = false}) {
+    if (_disposed || !_signingForeground) return;
+    if (auth) {
+      _signingAuthEpoch++;
+      _signingAuthInvalidated = true;
+      signingStatus.value = null;
+    }
+    _signingReloadTimer?.cancel();
+    _signingReloadTimer = Timer(
+      const Duration(milliseconds: 80),
+      () => unawaited(refreshSigningStatus(retryWatch: false)),
     );
-    if (_disposed || epoch != _signingAuthEpoch || library.rootPath != root) {
+  }
+
+  void _signingWatchEnded(Object token, {bool peer = false}) {
+    if (_disposed ||
+        !identical(
+          token,
+          peer ? _signingPeerWatchToken : _signingFileWatchToken,
+        )) {
       return;
     }
-    store.setAuthenticatedPeers(serverId, peers);
+    final old = peer ? _signingPeerWatch : _signingFileWatch;
+    if (peer) {
+      _signingPeerWatch = null;
+      _signingPeerWatchToken = null;
+      _signingPeerWatchPath = null;
+      _signingActualPeerWatchPath = null;
+      _signingPeerWatchDead = true;
+    } else {
+      _signingFileWatch = null;
+      _signingFileWatchToken = null;
+      _signingFileWatchDead = true;
+    }
+    unawaited(old?.cancel());
+    _signingAuthEpoch++;
+    _signingAuthInvalidated = true;
+    signingStatus.value = null;
+    signingUnavailable.value = true;
+    // Recovery is an explicit refresh/resume, never an error-driven poll loop.
+  }
+
+  Future<void> _bindSigningWatches(String? serverId, int epoch) async {
+    final statusRoot = p.join(directory.path, 'signing-status');
+    if (!_signingFileWatchDead &&
+        _signingFileWatch == null &&
+        await Directory(statusRoot).exists()) {
+      if (_disposed || epoch != _signingAuthEpoch || !_signingForeground) {
+        return;
+      }
+      final token = Object();
+      _signingFileWatchToken = token;
+      _signingFileWatch =
+          (signingDirectoryWatch?.call(statusRoot) ??
+                  Directory(statusRoot).watch())
+              .listen(
+                (event) {
+                  if (!identical(token, _signingFileWatchToken)) return;
+                  if (p.basename(event.path).startsWith('status.json')) {
+                    _signingFileChanged();
+                  }
+                },
+                onError: (Object _) => _signingWatchEnded(token),
+                onDone: () => _signingWatchEnded(token),
+              );
+    }
+    final desired = serverId == null
+        ? null
+        : p.join(directory.path, 'servers', serverId);
+    var watched = desired;
+    while (watched != null &&
+        !await Directory(watched).exists() &&
+        p.isWithin(directory.path, watched)) {
+      watched = p.dirname(watched);
+    }
+    if (_signingPeerWatchPath == desired &&
+        _signingActualPeerWatchPath == watched &&
+        _signingPeerWatch != null) {
+      return;
+    }
+    final old = _signingPeerWatch;
+    _signingPeerWatch = null;
+    _signingPeerWatchPath = null;
+    _signingActualPeerWatchPath = null;
+    _signingPeerWatchToken = null;
+    await old?.cancel();
+    if (_signingPeerWatchDead ||
+        desired == null ||
+        watched == null ||
+        _disposed ||
+        epoch != _signingAuthEpoch ||
+        !_signingForeground) {
+      return;
+    }
+    if (!await Directory(watched).exists() ||
+        _disposed ||
+        epoch != _signingAuthEpoch ||
+        !_signingForeground) {
+      return;
+    }
+    _signingPeerWatchPath = desired;
+    _signingActualPeerWatchPath = watched;
+    final token = Object();
+    _signingPeerWatchToken = token;
+    _signingPeerWatch =
+        (signingDirectoryWatch?.call(watched) ?? Directory(watched).watch())
+            .listen(
+              (event) {
+                if (!identical(token, _signingPeerWatchToken)) return;
+                if (_currentSigningServer != serverId) return;
+                if (p.equals(event.path, desired) ||
+                    (event.isDirectory && p.isWithin(event.path, desired)) ||
+                    (p.equals(p.dirname(event.path), desired) &&
+                        p.basename(event.path).startsWith('peers.json'))) {
+                  _signingFileChanged(auth: true);
+                }
+              },
+              onError: (Object _) => _signingWatchEnded(token, peer: true),
+              onDone: () => _signingWatchEnded(token, peer: true),
+            );
+  }
+
+  Future<void> _stopSigningWatches() async {
+    _signingReloadTimer?.cancel();
+    final status = _signingFileWatch, peers = _signingPeerWatch;
+    _signingFileWatch = null;
+    _signingPeerWatch = null;
+    _signingPeerWatchPath = null;
+    _signingActualPeerWatchPath = null;
+    _signingFileWatchToken = null;
+    _signingPeerWatchToken = null;
+    await Future.wait([
+      if (status != null) status.cancel(),
+      if (peers != null) peers.cancel(),
+    ]);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_signingObserver) return;
+    _signingForeground = state == AppLifecycleState.resumed;
+    if (_signingForeground) {
+      unawaited(refreshSigningStatus(invalidate: true));
+    } else {
+      _signingAuthEpoch++;
+      _signingReadPending = true;
+      unawaited(_stopSigningWatches());
+    }
   }
 
   void reportLocalSigningExpiry(DateTime? expiration) {
@@ -1402,6 +1677,10 @@ class SyncController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _signingAuthEpoch++;
+    if (_signingObserver) WidgetsBinding.instance.removeObserver(this);
+    unawaited(_stopSigningWatches());
+    signingUnavailable.dispose();
     pageCounts.dispose();
     signingStatus.dispose();
     final signingStore = _signingStore;

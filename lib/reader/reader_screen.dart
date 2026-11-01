@@ -425,6 +425,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final document = _document!;
     final generation = _openGeneration;
     return ReaderPageWindow(
+      paperWidthTransition: !isMobileReader,
       key: ValueKey(generation),
       pageNumber: _page,
       requestedAt: _requestedAt,

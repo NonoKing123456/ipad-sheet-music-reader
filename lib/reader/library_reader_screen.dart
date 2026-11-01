@@ -1020,6 +1020,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 requestedAt: _requestedAt,
                 presentationClock: widget.presentationClock,
                 forwardWindowOnly: true,
+                paperWidthTransition: true,
                 surfaceBackground: Colors.transparent,
                 retainDocument: current.retain,
                 releaseDocument: current.release,

@@ -61,41 +61,19 @@ class _OfflineStatusIcon extends StatelessWidget {
       child: Semantics(
         label: label,
         child: ExcludeSemantics(
-          child: SizedBox(
-            width: 28,
-            height: 28,
-            child: Stack(
-              children: [
-                Icon(appearance.icon, color: appearance.foreground),
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.surface,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      unreadable
-                          ? Icons.error
-                          : !ready
-                          ? Icons.cloud_download_outlined
-                          : pendingVersion
-                          ? Icons.update
-                          : Icons.check_circle,
-                      size: 13,
-                      color: unreadable
-                          ? Theme.of(context).colorScheme.error
-                          : !ready
-                          ? const Color(0xff65736b)
-                          : pendingVersion
-                          ? const Color(0xff996515)
-                          : const Color(0xff3e7350),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          child: _OfflineAvailabilityTile(
+            icon: appearance.icon,
+            foreground: appearance.foreground,
+            current: ready && !pendingVersion,
+            partial: ready && pendingVersion,
+            error: unreadable,
+            badge: unreadable
+                ? Icons.priority_high
+                : !ready
+                ? Icons.cloud_download
+                : pendingVersion
+                ? Icons.update
+                : Icons.check,
           ),
         ),
       ),
@@ -230,7 +208,19 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
         ),
       );
       if (sync.paired) {
-        await sync.synchronize();
+        final scope = entry != null
+            ? {entry.id}
+            : {
+                for (final item
+                    in sync.activeCollection?.currentItems ?? <CatalogItem>[])
+                  if (!item.missing &&
+                      item.sourceId == source &&
+                      (folder == null ||
+                          folder.isEmpty ||
+                          item.relativePath.startsWith('$folder/')))
+                    item.entryId,
+              };
+        await sync.synchronize(onlyEntryIds: scope);
       } else if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('已记住所选曲谱，连接电脑后可下载。')));
@@ -276,20 +266,23 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   );
   Future<void> _open(LibraryEntry entry) async {
     if (_opening) return;
-    final target = widget.controller.locateOffline(entry.id);
-    if (target == null) {
-      await _download(entry: entry);
-      return;
-    }
     _opening = true;
     try {
+      var target = widget.controller.locateOffline(entry.id);
+      if (target == null) {
+        await _download(entry: entry);
+        if (!mounted) return;
+        target = widget.controller.locateOffline(entry.id);
+        if (target == null) return;
+      }
+      final readable = target;
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
           builder: (_) => LibraryReaderScreen(
             workspace: widget.controller.workspace,
             locate: widget.controller.locateOffline,
-            initialTarget: target,
+            initialTarget: readable,
             sourceChanges: widget.controller,
             onLoaded: (document) => widget.controller.pageCounts.remember(
               PageMetadataKey(
@@ -304,6 +297,29 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     } finally {
       _opening = false;
     }
+  }
+
+  Widget? _folderDownloadMenu({
+    required String sourceId,
+    required String folder,
+  }) {
+    if (!widget.controller.needsOfflineDownload(
+      sourceId: sourceId,
+      folder: folder,
+    )) {
+      return null;
+    }
+    return PopupMenuButton<String>(
+      tooltip: '文件夹选项',
+      onSelected: (_) =>
+          unawaited(_download(sourceId: sourceId, folder: folder)),
+      itemBuilder: (_) => [
+        PopupMenuItem(
+          value: 'download',
+          child: Text(folder.isEmpty ? '下载整个谱库' : '下载此文件夹'),
+        ),
+      ],
+    );
   }
 
   void _setLists() => unawaited(
@@ -352,38 +368,55 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           final wide = constraints.maxWidth >= 850;
           return Scaffold(
             appBar: AppBar(
-              title: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: _searchOpen
-                        ? DirectorySearchField(
-                            controller: _search,
-                            focusNode: _searchFocus,
-                            onChanged: (_) => setState(() {}),
-                          )
-                        : Text(
-                            widget.isHome ? '曲谱库' : '离线谱库',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                  ),
-                  if (widget.isHome &&
-                      !kIsWeb &&
-                      defaultTargetPlatform == TargetPlatform.iOS)
-                    Visibility(
-                      visible: !_searchOpen,
-                      maintainState: true,
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 8),
-                        child: SigningExpiryChip(
-                          onRead: (value) =>
-                              sync.reportLocalSigningExpiry(value.expiration),
+              title: wide && defaultTargetPlatform == TargetPlatform.windows
+                  ? Row(
+                      children: [
+                        SizedBox(
+                          width: 261,
+                          child: Text(widget.isHome ? '曲谱库' : '离线谱库'),
                         ),
-                      ),
+                        if (_searchOpen)
+                          Expanded(
+                            child: DirectorySearchField(
+                              controller: _search,
+                              focusNode: _searchFocus,
+                              onChanged: (_) => setState(() {}),
+                            ),
+                          ),
+                      ],
+                    )
+                  : Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: _searchOpen
+                              ? DirectorySearchField(
+                                  controller: _search,
+                                  focusNode: _searchFocus,
+                                  onChanged: (_) => setState(() {}),
+                                )
+                              : Text(
+                                  widget.isHome ? '曲谱库' : '离线谱库',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                        ),
+                        if (widget.isHome &&
+                            !kIsWeb &&
+                            defaultTargetPlatform == TargetPlatform.iOS)
+                          Visibility(
+                            visible: !_searchOpen,
+                            maintainState: true,
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: SigningExpiryChip(
+                                onRead: (value) => sync
+                                    .reportLocalSigningExpiry(value.expiration),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
-                ],
-              ),
               leading: widget.isHome
                   ? null
                   : IconButton(
@@ -525,12 +558,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   sourceId: _activeSourceId!,
                                   folder: folder,
                                 ))
-                              IconButton(
-                                tooltip: folder.isEmpty ? '下载整个谱库' : '下载此文件夹',
-                                onPressed: () =>
-                                    unawaited(_download(folder: folder)),
-                                icon: const Icon(Icons.download_outlined),
-                              ),
+                              _folderDownloadMenu(
+                                sourceId: _activeSourceId!,
+                                folder: folder,
+                              )!,
                           ],
                         ),
                       ),
@@ -596,21 +627,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       ),
                                       title: Text(p.posix.basename(child)),
                                       subtitle: Text(child),
-                                      trailing:
-                                          sync.needsOfflineDownload(
-                                            sourceId: _activeSourceId!,
-                                            folder: child,
-                                          )
-                                          ? IconButton(
-                                              tooltip: '下载到iPad',
-                                              icon: const Icon(
-                                                Icons.download_outlined,
-                                              ),
-                                              onPressed: () => unawaited(
-                                                _download(folder: child),
-                                              ),
-                                            )
-                                          : null,
+                                      trailing: _folderDownloadMenu(
+                                        sourceId: _activeSourceId!,
+                                        folder: child,
+                                      ),
                                       onTap: () => _selectFolder(child),
                                     );
                                   }
@@ -641,61 +661,55 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       overflow: TextOverflow.ellipsis,
                                     ),
                                     onTap: () => unawaited(_open(entry)),
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        ScoreFileMetadata(
-                                          key: ValueKey((
-                                            entry.id,
-                                            entry.currentRevisionId,
-                                          )),
-                                          entryId: entry.id,
-                                          revisionId: entry.currentRevisionId,
-                                          path: entry.relativePath,
-                                          service: sync.pageCounts,
-                                        ),
-                                        const SizedBox(width: 8),
-                                        if (!ready || pending)
-                                          IconButton(
-                                            tooltip: '下载到iPad',
-                                            icon: const Icon(
-                                              Icons.download_outlined,
-                                            ),
-                                            onPressed: () => unawaited(
-                                              _download(entry: entry),
-                                            ),
-                                          ),
-                                        PopupMenuButton<String>(
-                                          tooltip: '离线选项',
-                                          onSelected: (value) => unawaited(
-                                            value == 'remove'
-                                                ? sync.removeOfflineDownload(
-                                                    entry.id,
-                                                  )
-                                                : sync.selectOffline(
-                                                    OfflineRule(
-                                                      sourceId: sync
-                                                          .sourceIdFor(
-                                                            entry.id,
-                                                          )!,
-                                                      entryId: entry.id,
-                                                      selected: false,
-                                                    ),
+                                    trailing: ScoreFileTrailing(
+                                      metadata: ScoreFileMetadata(
+                                        key: ValueKey((
+                                          entry.id,
+                                          entry.currentRevisionId,
+                                        )),
+                                        entryId: entry.id,
+                                        revisionId: entry.currentRevisionId,
+                                        path: entry.relativePath,
+                                        service: sync.pageCounts,
+                                      ),
+                                      menuAction: PopupMenuButton<String>(
+                                        tooltip: '离线选项',
+                                        onSelected: (value) => unawaited(
+                                          value == 'download'
+                                              ? _download(entry: entry)
+                                              : value == 'remove'
+                                              ? sync.removeOfflineDownload(
+                                                  entry.id,
+                                                )
+                                              : sync.selectOffline(
+                                                  OfflineRule(
+                                                    sourceId: sync.sourceIdFor(
+                                                      entry.id,
+                                                    )!,
+                                                    entryId: entry.id,
+                                                    selected: false,
                                                   ),
-                                          ),
-                                          itemBuilder: (_) => [
-                                            const PopupMenuItem(
-                                              value: 'unselect',
-                                              child: Text('取消离线选择'),
-                                            ),
-                                            if (ready)
-                                              const PopupMenuItem(
-                                                value: 'remove',
-                                                child: Text('移除本机下载'),
-                                              ),
-                                          ],
+                                                ),
                                         ),
-                                      ],
+                                        itemBuilder: (_) => [
+                                          if (!ready || pending)
+                                            PopupMenuItem(
+                                              value: 'download',
+                                              child: Text(
+                                                pending ? '更新下载' : '下载到iPad',
+                                              ),
+                                            ),
+                                          const PopupMenuItem(
+                                            value: 'unselect',
+                                            child: Text('取消离线选择'),
+                                          ),
+                                          if (ready)
+                                            const PopupMenuItem(
+                                              value: 'remove',
+                                              child: Text('移除本机下载'),
+                                            ),
+                                        ],
+                                      ),
                                     ),
                                   );
                                 },
@@ -735,47 +749,61 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     ];
     return Material(
       color: const Color(0xfff6f5ef),
-      child: ListView.builder(
-        key: const PageStorageKey('offline-folder-tree'),
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        itemCount: rows.length + 1,
-        itemBuilder: (context, index) {
-          if (index == 0) {
-            return const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text(
-                '离线文件夹',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-            );
-          }
-          final (source, row) = rows[index - 1];
-          if (row != null) return _node(row.path, row.depth);
-          return ListTile(
-            title: Text(
-              source.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+      child: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              key: const PageStorageKey('offline-folder-tree'),
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              itemCount: rows.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text(
+                      '离线文件夹',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  );
+                }
+                final (source, row) = rows[index - 1];
+                if (row != null) return _node(row.path, row.depth);
+                return ListTile(
+                  title: Text(
+                    source.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  leading: _OfflineFolderIcon(
+                    source: true,
+                    status: widget.controller.folderOfflineStatus(
+                      sourceId: source.id,
+                    ),
+                  ),
+                  selected: _activeSourceId == source.id && _folder.isEmpty,
+                  onTap: () => _selectSource(source.id),
+                  trailing: _folderDownloadMenu(
+                    sourceId: source.id,
+                    folder: '',
+                  ),
+                );
+              },
             ),
-            leading: _OfflineFolderIcon(
-              source: true,
-              status: widget.controller.folderOfflineStatus(
-                sourceId: source.id,
+          ),
+          if (defaultTargetPlatform == TargetPlatform.windows)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SigningExpiryChip(
+                  pairedDevice: true,
+                  pairedStatus: widget.controller.signingStatus,
+                  unavailable: widget.controller.signingUnavailable,
+                  onRefresh: widget.controller.refreshSigningStatus,
+                ),
               ),
             ),
-            selected: _activeSourceId == source.id && _folder.isEmpty,
-            onTap: () => _selectSource(source.id),
-            trailing:
-                widget.controller.needsOfflineDownload(sourceId: source.id)
-                ? IconButton(
-                    tooltip: '下载整个谱库',
-                    icon: const Icon(Icons.download_outlined),
-                    onPressed: () =>
-                        unawaited(_download(sourceId: source.id, folder: '')),
-                  )
-                : null,
-          );
-        },
+        ],
       ),
     );
   }
@@ -827,39 +855,89 @@ class _OfflineFolderIcon extends StatelessWidget {
     child: Semantics(
       label: status.description,
       child: ExcludeSemantics(
-        child: SizedBox.square(
-          dimension: 28,
-          child: Stack(
-            children: [
-              Icon(
-                source ? Icons.library_music_outlined : Icons.folder_outlined,
-              ),
-              if (status.total > 0)
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.surface,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      status.allCurrent
-                          ? Icons.check_circle
-                          : status.readable == 0
-                          ? Icons.cloud_download
-                          : Icons.contrast,
-                      size: 14,
-                      color: status.allCurrent
-                          ? const Color(0xff3e7350)
-                          : const Color(0xff52615c),
-                    ),
-                  ),
-                ),
-            ],
-          ),
+        child: _OfflineAvailabilityTile(
+          icon: source ? Icons.library_music_outlined : Icons.folder_outlined,
+          foreground: const Color(0xff52615c),
+          current: status.allCurrent,
+          partial: !status.allCurrent && status.readable > 0,
+          empty: status.total == 0,
+          badge: status.allCurrent
+              ? Icons.check
+              : status.readable == 0
+              ? Icons.cloud_download
+              : Icons.contrast,
         ),
       ),
     ),
   );
+}
+
+class _OfflineAvailabilityTile extends StatelessWidget {
+  const _OfflineAvailabilityTile({
+    required this.icon,
+    required this.foreground,
+    required this.current,
+    required this.partial,
+    required this.badge,
+    this.error = false,
+    this.empty = false,
+  });
+  final IconData icon, badge;
+  final Color foreground;
+  final bool current, partial, error, empty;
+  @override
+  Widget build(BuildContext context) {
+    final state = empty
+        ? 'empty'
+        : error
+        ? 'error'
+        : current
+        ? 'ready'
+        : partial
+        ? 'partial'
+        : 'cloud';
+    final color = error
+        ? const Color(0xffa74838)
+        : current
+        ? const Color(0xff246c39)
+        : partial
+        ? const Color(0xff996817)
+        : const Color(0xff62706b);
+    return Container(
+      key: ValueKey('offline-status-$state'),
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        color: error
+            ? const Color(0xfff4e5e1)
+            : current
+            ? const Color(0xffe1efdf)
+            : partial
+            ? const Color(0xffffedcd)
+            : const Color(0xffe8ece9),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            left: 6,
+            top: 6,
+            child: Icon(icon, size: 26, color: foreground),
+          ),
+          if (!empty)
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                key: ValueKey('offline-badge-$state'),
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                child: Icon(badge, size: 15, color: Colors.white),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

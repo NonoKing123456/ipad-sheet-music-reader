@@ -52,6 +52,7 @@ class ReaderPageWindow extends StatefulWidget {
     this.presentationClock,
     this.forwardWindowOnly = false,
     this.surfaceBackground = Colors.white,
+    this.paperWidthTransition = false,
   });
   final int pageNumber, pageCount, direction;
   final Object documentKey;
@@ -68,6 +69,7 @@ class ReaderPageWindow extends StatefulWidget {
   /// Desktop spreads use at most two groups (four actual paper surfaces).
   final bool forwardWindowOnly;
   final Color surfaceBackground;
+  final bool paperWidthTransition;
   @override
   State<ReaderPageWindow> createState() => _ReaderPageWindowState();
 }
@@ -203,10 +205,13 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
 
   Duration _now() =>
       widget.presentationClock?.call() ?? readerPresentationNow();
-  void _ready(_PageId id) {
+  bool _currentSurface(_PageId id, _Surface surface, int retry) =>
+      identical(_surfaces[id], surface) && surface.retry == retry;
+
+  void _ready(_PageId id, _Surface surface, int retry) {
     final readyTime = _now();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_surfaces.containsKey(id)) return;
+      if (!mounted || !_currentSurface(id, surface, retry)) return;
       setState(() {
         _surfaces[id]!.readySince ??= readyTime;
         _surfaces[id]!.ready = true;
@@ -217,9 +222,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
-  void _failed(_PageId id, String? error) {
+  void _failed(_PageId id, _Surface surface, int retry, String? error) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _surfaces.containsKey(id)) {
+      if (mounted && _currentSurface(id, surface, retry)) {
         setState(() => _surfaces[id]!.error = error);
       }
     });
@@ -229,9 +234,26 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       ? (id.number > _displayed.number ? 1 : -1)
       : widget.direction;
   void _tryPresent() {
-    if (widget.holdPresentation || !(_surfaces[_requested]?.ready ?? false)) {
+    if (widget.holdPresentation) return;
+    // A bounded spread cannot mount a third group until its incoming group is
+    // released. Reverse an obsolete incoming group before waiting for the new
+    // target; otherwise a quick opposite key would first present the old target.
+    if (widget.forwardWindowOnly &&
+        _incoming != null &&
+        _requested != _incoming &&
+        (_requested == _displayed || _directionFor(_requested) != _direction)) {
+      if (_startScheduled && !_animation.isAnimating) {
+        _incoming = null;
+        _reversing = false;
+        widget.forwardWindowOnly ? _capture() : _trim();
+        _tryPresent();
+      } else if (!_reversing) {
+        _reversing = true;
+        _animation.reverse();
+      }
       return;
     }
+    if (!(_surfaces[_requested]?.ready ?? false)) return;
     if (_incoming != null) {
       if (_requested == _incoming && !_reversing) return;
       if (MediaQuery.disableAnimationsOf(context)) {
@@ -357,6 +379,13 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
         animation: _animation,
         builder: (context, _) {
           final t = Curves.easeOutCubic.transform(_animation.value);
+          double fittedWidth(_PageId id) => math.min(
+            constraints.maxWidth,
+            constraints.maxHeight * _surfaces[id]!.owner.aspectFor(id.number),
+          );
+          final distance = widget.paperWidthTransition && _incoming != null
+              ? (fittedWidth(_displayed) + fittedWidth(_incoming!)) / 2
+              : constraints.maxWidth;
           final order =
               _surfaces.keys
                   .where((id) => id != _displayed && id != _incoming)
@@ -384,9 +413,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                               _incoming == null
                                   ? 0
                                   : id == _incoming
-                                  ? _direction * (1 - t) * constraints.maxWidth
+                                  ? _direction * (1 - t) * distance
                                   : id == _displayed
-                                  ? -_direction * t * constraints.maxWidth
+                                  ? -_direction * t * distance
                                   : 0,
                               0,
                             ),
@@ -479,9 +508,10 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
 
   Widget _buildSurface(_PageId id) {
     final surface = _surfaces[id]!;
+    final retry = surface.retry;
     final readyBuilder = surface.owner.readyPageBuilder;
     if (readyBuilder == null) {
-      if (!surface.ready) _ready(id);
+      if (!surface.ready) _ready(id, surface, retry);
       return surface.owner.pageBuilder!(id.number);
     }
     return KeyedSubtree(
@@ -489,8 +519,8 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       child: readyBuilder(
         id.number,
         id == _requested || id == _displayed,
-        () => _ready(id),
-        (error) => _failed(id, error),
+        () => _ready(id, surface, retry),
+        (error) => _failed(id, surface, retry, error),
       ),
     );
   }

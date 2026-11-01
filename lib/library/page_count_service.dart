@@ -377,6 +377,12 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
   PageMetadataKey get _key =>
       PageMetadataKey(widget.entryId, widget.revisionId);
   bool get _pdf => p.extension(widget.path).toLowerCase() == '.pdf';
+  bool get _image => const [
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.webp',
+  ].contains(p.extension(widget.path).toLowerCase());
   @override
   void initState() {
     super.initState();
@@ -412,7 +418,7 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
     final appearance = scoreFileAppearance(widget.path);
     final extension = appearance.label;
     return Semantics(
-      label: '$extension，${count ?? '未知'}页',
+      label: count == null ? '$extension，尚未取得页数' : '$extension，$count页',
       child: SizedBox(
         width: 100,
         child: Row(
@@ -433,9 +439,12 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
               ),
             ),
             const Spacer(),
-            Text(
-              '${count ?? '—'}页',
-              style: const TextStyle(fontSize: 13, color: Color(0xff65736b)),
+            Tooltip(
+              message: count == null ? '尚未取得页数' : '$count页',
+              child: Text(
+                count == null ? '待获取' : '$count页',
+                style: const TextStyle(fontSize: 13, color: Color(0xff65736b)),
+              ),
             ),
           ],
         ),
@@ -444,7 +453,7 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
   }
 
   @override
-  Widget build(BuildContext context) => !_pdf
+  Widget build(BuildContext context) => _image
       ? _label(1)
       : _value == null
       ? _label(null)
@@ -452,4 +461,26 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
           valueListenable: _value!,
           builder: (_, value, _) => _label(value),
         );
+}
+
+/// Hidden actions keep their physical column so mixed offline states align.
+class ScoreFileTrailing extends StatelessWidget {
+  const ScoreFileTrailing({
+    super.key,
+    required this.metadata,
+    required this.menuAction,
+  });
+  final Widget metadata, menuAction;
+  static const width = 160.0;
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
+    child: Row(
+      children: [
+        SizedBox(width: 100, child: metadata),
+        const SizedBox(width: 12),
+        SizedBox(width: 48, child: menuAction),
+      ],
+    ),
+  );
 }

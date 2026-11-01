@@ -97,6 +97,45 @@ class SigningStatusStore {
   void Function()? onChanged;
   bool _closed = false, _closing = false, _scopeSelected = false;
   String? _selectedServer;
+
+  /// A second app instance can project the owner's committed receipt without
+  /// taking or modifying its lease. Authentication is supplied by the current
+  /// server's peer projection; unrelated cached receipts are never returned.
+  static Future<SigningStatusReceipt?> readAuthorized(
+      String directory, String serverId, Set<String> authenticatedPeers) async {
+    if (!_id(serverId) || authenticatedPeers.isEmpty) return null;
+    final root = p.normalize(p.absolute(directory));
+    final path = p.join(root, 'status.json');
+    for (final candidate in [path, '$path.backup']) {
+      assertSafePath(root, candidate);
+      final file = File(candidate);
+      if (await file.exists() && await file.length() > 65536) {
+        throw const FormatException('Signing status file too large.');
+      }
+    }
+    final json = await readJson(path);
+    if (json == null) return null;
+    if (json['schema'] != 1 ||
+        json['receipts'] is! List ||
+        (json['receipts'] as List).length > 64) {
+      throw const FormatException('Invalid signing status file.');
+    }
+    SigningStatusReceipt? latest;
+    for (final value in json['receipts'] as List) {
+      final item = SigningStatusReceipt.fromJson(
+          Map<String, dynamic>.from(value as Map));
+      if (item.serverId != serverId ||
+          !authenticatedPeers.contains(item.peerId)) continue;
+      if (latest == null ||
+          item.receivedAt.isAfter(latest.receivedAt) ||
+          (item.receivedAt == latest.receivedAt &&
+              item.peerId.compareTo(latest.peerId) > 0)) {
+        latest = item;
+      }
+    }
+    return latest;
+  }
+
   void selectServer(String? serverId) {
     _scopeSelected = true;
     _selectedServer = serverId;

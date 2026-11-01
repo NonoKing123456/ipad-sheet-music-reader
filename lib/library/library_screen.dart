@@ -620,31 +620,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                                 style: TextStyle(fontWeight: FontWeight.w600),
                               ),
                       ),
-                      if (!wide &&
-                          defaultTargetPlatform == TargetPlatform.windows)
-                        Visibility(
-                          visible: !_searchOpen,
-                          maintainState: true,
-                          child: Padding(
-                            padding: const EdgeInsets.only(left: 8),
-                            child: SigningExpiryChip(
-                              pairedDevice: true,
-                              pairedStatus: _sync?.signingStatus,
-                            ),
-                          ),
-                        ),
                     ],
                   ),
             backgroundColor: const Color(0xfffaf9f5),
             actions: [
-              if (wide && defaultTargetPlatform == TargetPlatform.windows)
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: SigningExpiryChip(
-                    pairedDevice: true,
-                    pairedStatus: _sync?.signingStatus,
-                  ),
-                ),
               IconButton(
                 tooltip: _searchOpen ? '关闭搜索' : '搜索',
                 icon: Icon(_searchOpen ? Icons.close : Icons.search),
@@ -865,15 +844,34 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Tooltip(
-              message:
-                  library.selectedSource?.catalog.rootPath ?? library.rootPath!,
-              child: Text(
-                library.selectedSource?.name ?? p.basename(library.rootPath!),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Color(0xff65736b)),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Tooltip(
+                  message:
+                      library.selectedSource?.catalog.rootPath ??
+                      library.rootPath!,
+                  child: Text(
+                    library.selectedSource?.name ??
+                        p.basename(library.rootPath!),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xff65736b),
+                    ),
+                  ),
+                ),
+                if (defaultTargetPlatform == TargetPlatform.windows) ...[
+                  const SizedBox(height: 12),
+                  SigningExpiryChip(
+                    pairedDevice: true,
+                    pairedStatus: _sync?.signingStatus,
+                    unavailable: _sync?.signingUnavailable,
+                    onRefresh: _sync?.refreshSigningStatus,
+                  ),
+                ],
+              ],
             ),
           ),
         ],
@@ -1084,23 +1082,19 @@ class _LibraryScreenState extends State<LibraryScreen>
               style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),
             ),
           ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ScoreFileMetadata(
-                key: ValueKey((entry.id, entry.currentRevisionId)),
-                entryId: entry.id,
-                revisionId: entry.currentRevisionId,
-                path: entry.relativePath,
-                service: _sync?.pageCounts,
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                tooltip: '查看完整路径',
-                icon: const Icon(Icons.info_outline, size: 19),
-                onPressed: () => _pathDetails(entry),
-              ),
-            ],
+          trailing: ScoreFileTrailing(
+            metadata: ScoreFileMetadata(
+              key: ValueKey((entry.id, entry.currentRevisionId)),
+              entryId: entry.id,
+              revisionId: entry.currentRevisionId,
+              path: entry.relativePath,
+              service: _sync?.pageCounts,
+            ),
+            menuAction: IconButton(
+              tooltip: '查看完整路径',
+              icon: const Icon(Icons.info_outline, size: 19),
+              onPressed: () => _pathDetails(entry),
+            ),
           ),
           onTap: () => unawaited(_openEntry(entry)),
         );
