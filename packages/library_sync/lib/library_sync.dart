@@ -6,3 +6,5 @@ export 'src/protocol.dart';
 export 'src/storage.dart' show prepareTrustedStateRoot;
 export 'src/collection.dart';
 export 'src/collection_replica.dart';
+
+export 'src/signing_status.dart';

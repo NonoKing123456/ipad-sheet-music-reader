@@ -1,3 +1,4 @@
+import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
 
@@ -524,16 +525,37 @@ class _LibraryScreenState extends State<LibraryScreen>
         final wide = constraints.maxWidth >= 850;
         return Scaffold(
           appBar: AppBar(
-            title: _searchOpen
-                ? DirectorySearchField(
-                    controller: _search,
-                    focusNode: _searchFocus,
-                    onChanged: (text) => library?.setQuery(text),
-                  )
-                : const Text(
-                    '曲谱库',
-                    style: TextStyle(fontWeight: FontWeight.w600),
+            title: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: _searchOpen
+                      ? DirectorySearchField(
+                          controller: _search,
+                          focusNode: _searchFocus,
+                          onChanged: (text) => library?.setQuery(text),
+                        )
+                      : const Text(
+                          '曲谱库',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                ),
+                if (defaultTargetPlatform == TargetPlatform.windows)
+                  Visibility(
+                    visible: !_searchOpen,
+                    maintainState: true,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: SigningExpiryChip(
+                        pairedDevice: true,
+                        pairedStatus: _sync?.signingStatus,
+                      ),
+                    ),
                   ),
+              ],
+            ),
             backgroundColor: const Color(0xfffaf9f5),
             actions: [
               IconButton(

@@ -103,6 +103,103 @@ class SyncController extends ChangeNotifier {
   Map<String, dynamic> _settings = {'version': 1, 'roots': <String, dynamic>{}};
   SyncServer? _server;
   SyncClient? _client;
+  final signingStatus = ValueNotifier<SigningStatusReceipt?>(null);
+  SigningStatusStore? _signingStore;
+  int _signingAuthEpoch = 0;
+  SigningDeviceStatus? _lastLocalSigning, _pendingSigning;
+  int _signingSequence = 0;
+  bool _sendingSigning = false;
+  int _signingRetries = 0;
+  DateTime? _signingRetryAt;
+
+  Future<void> _loadSigningStatus() async {
+    if (defaultTargetPlatform != TargetPlatform.windows) return;
+    try {
+      final store = await SigningStatusStore.open(
+        p.join(directory.path, 'signing-status'),
+      );
+      if (_disposed) {
+        await store.close();
+        return;
+      }
+      _signingStore = store;
+      store.onChanged = () {
+        if (!_disposed) signingStatus.value = store.latest;
+      };
+      await _refreshSigningAuthorization();
+      if (!_disposed) signingStatus.value = store.latest;
+    } catch (_) {
+      // Optional display metadata never prevents library/state initialization.
+    }
+  }
+
+  Future<void> _refreshSigningAuthorization() async {
+    final store = _signingStore;
+    if (store == null || _disposed) return;
+    final epoch = ++_signingAuthEpoch, root = library.rootPath;
+    final value = root == null
+        ? null
+        : (_settings['roots'] as Map)[_rootKey(root)];
+    final serverId = value == null
+        ? null
+        : Map<String, dynamic>.from(value as Map)['id'] as String;
+    store.selectServer(serverId);
+    if (serverId == null) return;
+    store.setAuthenticatedPeers(serverId, {});
+    final peers = await SyncServer.authenticatedPeerIdsAt(
+      p.join(directory.path, 'servers', serverId),
+    );
+    if (_disposed || epoch != _signingAuthEpoch || library.rootPath != root) {
+      return;
+    }
+    store.setAuthenticatedPeers(serverId, peers);
+  }
+
+  void reportLocalSigningExpiry(DateTime? expiration) {
+    _lastLocalSigning = SigningDeviceStatus(expiration?.toUtc());
+    _retrySigningReport();
+  }
+
+  void _retrySigningReport() {
+    if (_disposed || _lastLocalSigning == null) return;
+    _pendingSigning = _lastLocalSigning;
+    _signingSequence++;
+    _signingRetries = 3;
+    _signingRetryAt = null;
+    unawaited(_sendSigningReports());
+  }
+
+  Future<void> _sendSigningReports() async {
+    if (_sendingSigning || _disposed) return;
+    _sendingSigning = true;
+    try {
+      while (!_disposed && _client != null && _pendingSigning != null) {
+        final client = _client!,
+            report = _pendingSigning!,
+            sequence = _signingSequence;
+        try {
+          await client.reportSigningStatus(report);
+          if (identical(client, _client) && sequence == _signingSequence) {
+            _pendingSigning = null;
+            _signingRetryAt = null;
+            _signingRetries = 0;
+          }
+        } catch (_) {
+          if (identical(client, _client) && sequence == _signingSequence) {
+            if (_signingRetries > 0) {
+              _signingRetryAt = DateTime.now().add(
+                Duration(seconds: 2 << (3 - _signingRetries)),
+              );
+            }
+            break;
+          }
+        }
+      }
+    } finally {
+      _sendingSigning = false;
+    }
+  }
+
   SyncCancellation? _cancellation;
   String? _serverRoot;
   bool _disposed = false;
@@ -630,6 +727,7 @@ class SyncController extends ChangeNotifier {
         }
       }
     }
+    await _loadSigningStatus();
     // Offline content must not depend on credentials or settings being readable.
     try {
       replica = await ReplicaLibraryView.open(
@@ -702,6 +800,7 @@ class SyncController extends ChangeNotifier {
     if (_lastSelectedRoot != library.rootPath) {
       _lastSelectedRoot = library.rootPath;
       _autoStartAttemptedRoot = null;
+      unawaited(_refreshSigningAuthorization());
     }
     if (_serverRoot != null && library.rootPath != _serverRoot) {
       unawaited(stopServer(reason: '谱库目录已切换，无线服务已关闭。请在新谱库中重新开启。'));
@@ -763,6 +862,15 @@ class SyncController extends ChangeNotifier {
 
   void _tick() {
     if (_disposed) return;
+    if (!_sendingSigning &&
+        _pendingSigning != null &&
+        _client != null &&
+        _signingRetryAt != null &&
+        !DateTime.now().isBefore(_signingRetryAt!)) {
+      _signingRetryAt = null;
+      _signingRetries--;
+      unawaited(_sendSigningReports());
+    }
     if (serving &&
         pairingExpires != null &&
         !pairingExpires!.isAfter(DateTime.now())) {
@@ -840,6 +948,32 @@ class SyncController extends ChangeNotifier {
       if (_disposed || library.rootPath != root) {
         await started.close();
         return;
+      }
+      final statusStore = _signingStore;
+      if (statusStore != null) {
+        final server = started;
+        _signingAuthEpoch++;
+        statusStore.selectServer(identity['id'] as String);
+        statusStore.setAuthenticatedPeers(
+          identity['id'] as String,
+          server.authenticatedPeerIds,
+        );
+        server.onSigningStatus = (peer, status, receivedAt) async {
+          if (_disposed || library.rootPath != root) {
+            throw const SyncProtocolException('Server changed.', 409);
+          }
+          _signingAuthEpoch++;
+          statusStore.setAuthenticatedPeers(
+            identity['id'] as String,
+            server.authenticatedPeerIds,
+          );
+          await statusStore.receive(
+            identity['id'] as String,
+            peer,
+            status,
+            receivedAt,
+          );
+        };
       }
       identity['port'] = started.port;
       roots[key] = identity;
@@ -1019,6 +1153,7 @@ class SyncController extends ChangeNotifier {
       );
       await _saveSettings({..._settings, 'clientFolder': folder});
       _client = client;
+      _retrySigningReport();
       phase = SyncPhase.idle;
       message = '已记住这台电脑，以后点击“立即同步”即可。';
       return true;
@@ -1094,6 +1229,7 @@ class SyncController extends ChangeNotifier {
         message = '批注未保存，请先重试保存。';
         return;
       }
+      _retrySigningReport();
       phase = SyncPhase.merging;
       final contentPartial = result.status != LibrarySyncStatus.complete;
       message = '正在交换已保存的批注和曲单…';
@@ -1228,6 +1364,9 @@ class SyncController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    signingStatus.dispose();
+    final signingStore = _signingStore;
+    if (signingStore != null) unawaited(signingStore.close());
     _timer?.cancel();
     _cancellation?.cancel();
     library.removeListener(_libraryChanged);

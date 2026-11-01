@@ -3,7 +3,10 @@ import '../library/directory_navigation.dart';
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+import '../signing/signing_expiry_chip.dart';
 import 'package:flutter/services.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
@@ -338,13 +341,38 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           final wide = constraints.maxWidth >= 850;
           return Scaffold(
             appBar: AppBar(
-              title: _searchOpen
-                  ? DirectorySearchField(
-                      controller: _search,
-                      focusNode: _searchFocus,
-                      onChanged: (_) => setState(() {}),
-                    )
-                  : Text(widget.isHome ? '曲谱库' : '离线谱库'),
+              title: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: _searchOpen
+                        ? DirectorySearchField(
+                            controller: _search,
+                            focusNode: _searchFocus,
+                            onChanged: (_) => setState(() {}),
+                          )
+                        : Text(
+                            widget.isHome ? '曲谱库' : '离线谱库',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                  ),
+                  if (widget.isHome &&
+                      !kIsWeb &&
+                      defaultTargetPlatform == TargetPlatform.iOS)
+                    Visibility(
+                      visible: !_searchOpen,
+                      maintainState: true,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 8),
+                        child: SigningExpiryChip(
+                          onRead: (value) =>
+                              sync.reportLocalSigningExpiry(value.expiration),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
               leading: widget.isHome
                   ? null
                   : IconButton(

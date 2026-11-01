@@ -12,6 +12,7 @@ import AVFoundation
   private var scannerChannel: FlutterMethodChannel?
   private var rasterChannel: FlutterMethodChannel?
   private var readerActivityChannel: FlutterMethodChannel?
+  private var signingExpiryChannel: FlutterMethodChannel?
   private var scanPending = false
   override func application(
     _ application: UIApplication,
@@ -22,6 +23,9 @@ import AVFoundation
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    signingExpiryChannel = ProvisioningExpiryBridge.register(
+      messenger: engineBridge.applicationRegistrar.messenger()
+    )
     let raster = FlutterMethodChannel(
       name: "score_reader/raster_decode",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()

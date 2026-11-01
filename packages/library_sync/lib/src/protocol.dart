@@ -11,6 +11,7 @@ import 'replica.dart';
 import 'storage.dart';
 import 'collection.dart';
 import 'collection_replica.dart';
+import 'signing_status.dart';
 
 class SyncProtocolException implements Exception {
   const SyncProtocolException(this.message, [this.status, this.code]);
@@ -292,6 +293,20 @@ class SyncServer {
   final Duration catalogSnapshotTtl;
   final _catalogTransfers = <String, _CatalogTransfer>{};
   int get activeCatalogSnapshots => _catalogTransfers.length;
+  Future<void> Function(String peerId, SigningDeviceStatus status, DateTime receivedAt)? onSigningStatus;
+  Set<String> get authenticatedPeerIds => _peerIds(_state);
+  static Set<String> _peerIds(Map<String, dynamic> state) => {
+    for (final entry in asMap(state['peers']).entries)
+      if (asMap(entry.value)['token'] is String &&
+          (asMap(entry.value)['token'] as String).isNotEmpty) entry.key,
+  };
+  /// Projection only: callers never receive tokens or peer baselines.
+  static Future<Set<String>> authenticatedPeerIdsAt(String directory) async {
+    try {
+      final state = await readJson(p.join(directory, 'peers.json'));
+      return state == null || state['schema'] != 1 ? {} : _peerIds(state);
+    } catch (_) { return {}; }
+  }
   final DirectoryLease _lease;
   Map<String, dynamic> _state;
   late HttpServer _server;
@@ -427,7 +442,16 @@ class SyncServer {
       }
       final peerId = _authenticate(request);
       final collection = collectionSource;
-      if (request.method == 'GET' && path == '/state-capabilities') {
+      if (request.method == 'POST' && path == '/device-status/signing' && onSigningStatus != null) {
+        if (request.contentLength > 1024) {
+          throw const SyncProtocolException('Signing status too large.', 413);
+        }
+        final body = await _readBody(request, ioTimeout, 1024);
+        final status = SigningDeviceStatus.fromJson(body);
+        final receivedAt = DateTime.now().toUtc();
+        await onSigningStatus!(peerId, status, receivedAt);
+        await _reply(request.response, {'accepted': true});
+      } else if (request.method == 'GET' && path == '/state-capabilities') {
         await _reply(request.response,
             {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
       } else if (collection != null &&
@@ -800,6 +824,20 @@ class SyncClient {
               body: body, readLibraryFailure: readLibraryFailure),
           ioTimeout,
           maxJsonBytes);
+
+  /// Optional best-effort metadata report; no catalogue/state exchange is run.
+  Future<bool> reportSigningStatus(SigningDeviceStatus status) async {
+    final http = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    try {
+      final response = await _request(http, 'POST', '/device-status/signing',
+          body: status.toJson()).timeout(const Duration(seconds: 3));
+      final body = await _readBody(response, const Duration(seconds: 3), 1024);
+      return body['accepted'] == true;
+    } on SyncProtocolException catch (error) {
+      if (error.status == 404) return false;
+      rethrow;
+    } finally { http.close(force: true); }
+  }
 
   Future<CollectionIndex> _collectionIndex(
       HttpClient http, SyncCancellation? cancellation) async {

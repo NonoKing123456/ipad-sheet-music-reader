@@ -97,3 +97,7 @@
 !/lib/reader/desktop_reader.dart
 !/lib/reader/reader_continuous.dart
 !/lib/reader/reader_spreads.dart
+!/ios/Runner/ProvisioningExpiry.swift
+!/lib/signing/signing_expiry_chip.dart
+!/packages/library_sync/lib/src/signing_status.dart
+!/tool/signing_expiry_smoke.swift
