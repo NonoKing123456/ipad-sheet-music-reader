@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 enum ScoreFileIconState { ready, cloud, partial, update, unreadable, empty }
 
-/// Shared library leading: solid local content, outlined remote content.
+/// Shared library leading: 32px outline type icons with 14px corner status marks.
 /// Labels and tooltips remain with the row that knows the actual availability.
 class ScoreFileIcon extends StatelessWidget {
   const ScoreFileIcon({
@@ -22,6 +22,7 @@ class ScoreFileIcon extends StatelessWidget {
   final bool isFolder;
 
   static const localColor = Color(0xff356451);
+  static const outlineColor = Color(0xff53645c);
   static const remoteColor = Color(0xff87908c);
   static const unreadableColor = Color(0xff9b5c52);
 
@@ -37,16 +38,10 @@ class ScoreFileIcon extends StatelessWidget {
         : _image
         ? Icons.image_outlined
         : Icons.description_outlined;
-    final solid = isFolder
-        ? Icons.folder
-        : _image
-        ? Icons.image
-        : Icons.description;
-    final half =
-        state == ScoreFileIconState.partial ||
-        state == ScoreFileIconState.update;
     final corner = switch (state) {
+      ScoreFileIconState.ready => _CornerMark.check,
       ScoreFileIconState.cloud => _CornerMark.cloud,
+      ScoreFileIconState.partial => _CornerMark.partial,
       ScoreFileIconState.update => _CornerMark.refresh,
       ScoreFileIconState.unreadable => _CornerMark.error,
       _ => null,
@@ -62,38 +57,17 @@ class ScoreFileIcon extends StatelessWidget {
               top: 5,
               width: 32,
               height: 32,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Icon(
-                    state == ScoreFileIconState.ready ? solid : outline,
-                    size: 32,
-                    color: state == ScoreFileIconState.ready
-                        ? localColor
-                        : state == ScoreFileIconState.unreadable
-                        ? unreadableColor
-                        : remoteColor,
-                  ),
-                  if (half)
-                    ClipRect(
-                      clipper: const _LeftHalfClipper(),
-                      child: Icon(solid, size: 32, color: localColor),
-                    ),
-                ],
-              ),
+              child: Icon(outline, size: 32, color: outlineColor),
             ),
             if (corner != null)
               Positioned(
-                right: 1,
-                bottom: 3,
-                width: 16,
-                height: 14,
-                child: CustomPaint(
+                right: 2,
+                bottom: 2,
+                width: 18,
+                height: 18,
+                child: _CornerBadge(
                   key: ValueKey('score-file-corner-${corner.name}'),
-                  painter: _CornerPainter(
-                    corner,
-                    Theme.of(context).colorScheme.surface,
-                  ),
+                  mark: corner,
                 ),
               ),
           ],
@@ -103,80 +77,108 @@ class ScoreFileIcon extends StatelessWidget {
   }
 }
 
-class _LeftHalfClipper extends CustomClipper<Rect> {
-  const _LeftHalfClipper();
+enum _CornerMark { check, cloud, partial, refresh, error }
+
+class _CornerBadge extends StatelessWidget {
+  const _CornerBadge({super.key, required this.mark});
+  final _CornerMark mark;
+
   @override
-  Rect getClip(Size size) => Rect.fromLTWH(0, 0, size.width / 2, size.height);
-  @override
-  bool shouldReclip(covariant _LeftHalfClipper oldClipper) => false;
+  Widget build(BuildContext context) {
+    final symbol = SizedBox(
+      key: ValueKey('score-file-symbol-${mark.name}'),
+      width: 14,
+      height: 14,
+      child: mark == _CornerMark.cloud
+          ? const CustomPaint(painter: _CloudOutlinePainter())
+          : mark == _CornerMark.partial
+          ? const CustomPaint(painter: _PartialPainter())
+          : DecoratedBox(
+              decoration: BoxDecoration(
+                color: mark == _CornerMark.error
+                    ? ScoreFileIcon.unreadableColor
+                    : ScoreFileIcon.localColor,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                mark == _CornerMark.check
+                    ? Icons.check_rounded
+                    : mark == _CornerMark.refresh
+                    ? Icons.refresh_rounded
+                    : Icons.priority_high_rounded,
+                size: mark == _CornerMark.check ? 11 : 10,
+                color: Colors.white,
+              ),
+            ),
+    );
+    if (mark == _CornerMark.cloud) {
+      return Center(child: symbol);
+    }
+    return Center(
+      child: Container(
+        width: 16,
+        height: 16,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          shape: BoxShape.circle,
+        ),
+        child: Center(child: symbol),
+      ),
+    );
+  }
 }
 
-enum _CornerMark { cloud, refresh, error }
-
-class _CornerPainter extends CustomPainter {
-  const _CornerPainter(this.mark, this.surface);
-  final _CornerMark mark;
-  final Color surface;
+class _PartialPainter extends CustomPainter {
+  const _PartialPainter();
 
   @override
   void paint(Canvas canvas, Size size) {
-    final p = Paint()
-      ..strokeWidth = 1.5
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    if (mark == _CornerMark.cloud) {
-      final cloud = Path()
-        ..moveTo(4, 11)
-        ..cubicTo(.3, 11, .3, 6.2, 3.8, 5.6)
-        ..cubicTo(4.5, .8, 11, .6, 12.4, 5)
-        ..cubicTo(16.7, 4.8, 17, 11, 12.5, 11)
-        ..close();
-      // Only the cloud silhouette clears the paper edge; there is no badge base.
-      canvas.drawPath(cloud, p..color = surface);
-      canvas.drawPath(
-        cloud,
-        p
-          ..style = PaintingStyle.stroke
-          ..color = ScoreFileIcon.remoteColor,
-      );
-      return;
-    }
-    final path = Path();
-    if (mark == _CornerMark.refresh) {
-      path
-        ..addArc(
-          const Rect.fromLTWH(2.5, 1.5, 11, 11),
-          -.35 * math.pi,
-          1.7 * math.pi,
-        )
-        ..moveTo(12.9, 1.2)
-        ..lineTo(12.9, 4.5)
-        ..lineTo(9.6, 4.5);
-    } else {
-      path
-        ..moveTo(8, 2)
-        ..lineTo(8, 8)
-        ..moveTo(8, 11.6)
-        ..lineTo(8, 11.7);
-    }
-    canvas.drawPath(
-      path,
+    final circle = Rect.fromCircle(
+      center: size.center(Offset.zero),
+      radius: 6.2,
+    );
+    final p = Paint()..color = ScoreFileIcon.localColor;
+    canvas.drawArc(circle, math.pi / 2, math.pi, true, p);
+    canvas.drawOval(
+      circle,
       p
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 4
-        ..color = surface,
-    );
-    canvas.drawPath(
-      path,
-      p
-        ..strokeWidth = mark == _CornerMark.error ? 2 : 1.5
-        ..color = mark == _CornerMark.error
-            ? ScoreFileIcon.unreadableColor
-            : ScoreFileIcon.localColor,
+        ..strokeWidth = 1.4,
     );
   }
 
   @override
-  bool shouldRepaint(covariant _CornerPainter oldDelegate) =>
-      oldDelegate.mark != mark || oldDelegate.surface != surface;
+  bool shouldRepaint(covariant _PartialPainter oldDelegate) => false;
+}
+
+class _CloudOutlinePainter extends CustomPainter {
+  const _CloudOutlinePainter();
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cloud = Path()
+      ..moveTo(3.5, 10.8)
+      ..cubicTo(.7, 10.8, .3, 6.6, 3.1, 6)
+      ..cubicTo(3.7, 2.3, 9, 1.9, 10.4, 5.3)
+      ..cubicTo(13.2, 5.1, 13.5, 10.8, 10.7, 10.8)
+      ..close();
+    final p = Paint()
+      ..color = Colors.white
+      ..strokeJoin = StrokeJoin.round;
+    canvas.drawPath(cloud, p);
+    canvas.drawPath(
+      cloud,
+      p
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3.4,
+    );
+    canvas.drawPath(
+      cloud,
+      p
+        ..color = const Color(0xff4f6059)
+        ..strokeWidth = 1.6,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _CloudOutlinePainter oldDelegate) => false;
 }
