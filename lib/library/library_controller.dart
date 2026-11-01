@@ -11,6 +11,7 @@ import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
 
 import 'windows_file_identity.dart';
+import 'page_count_service.dart';
 
 class LibraryScanPacket {
   const LibraryScanPacket(
@@ -367,6 +368,24 @@ class LibraryController extends ChangeNotifier {
     snapshot;
     final owner = _owners[entry.id]!;
     return owner.$1.catalog.absolutePathFor(owner.$2);
+  }
+
+  PageCountFile? pageCountFile(PageMetadataKey key) {
+    snapshot;
+    final owner = _owners[key.entryId];
+    if (owner == null ||
+        owner.$2.status != EntryStatus.available ||
+        owner.$2.currentRevisionId != key.revisionId ||
+        !owner.$1.online) {
+      return null;
+    }
+    final revision = owner.$2.currentRevision;
+    return PageCountFile(
+      owner.$1.catalog.absolutePathFor(owner.$2),
+      owner.$1.catalog.rootPath,
+      size: revision.size,
+      modifiedUtc: revision.modifiedUtc,
+    );
   }
 
   /// A chosen file inside a registered source reuses that source's identity.

@@ -1,5 +1,6 @@
 import '../library/score_path_label.dart';
 import '../library/directory_navigation.dart';
+import '../library/page_count_service.dart';
 
 import 'dart:async';
 
@@ -7,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../signing/signing_expiry_chip.dart';
+
 import 'package:flutter/services.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
@@ -34,15 +36,18 @@ class _OfflineStatusIcon extends StatelessWidget {
   const _OfflineStatusIcon({
     required this.availability,
     required this.pendingVersion,
+    required this.path,
   });
 
   final ContentAvailability availability;
   final bool pendingVersion;
+  final String path;
 
   @override
   Widget build(BuildContext context) {
     final ready = availability == ContentAvailability.ready;
     final unreadable = availability == ContentAvailability.unreadable;
+    final appearance = scoreFileAppearance(path);
     final label = ready
         ? pendingVersion
               ? '离线旧版可读，有更新待下载'
@@ -61,35 +66,34 @@ class _OfflineStatusIcon extends StatelessWidget {
             height: 28,
             child: Stack(
               children: [
-                Icon(
-                  ready
-                      ? Icons.description_outlined
-                      : Icons.cloud_download_outlined,
-                ),
-                if (ready || unreadable)
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surface,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        unreadable
-                            ? Icons.error
-                            : pendingVersion
-                            ? Icons.update
-                            : Icons.check_circle,
-                        size: 13,
-                        color: unreadable
-                            ? Theme.of(context).colorScheme.error
-                            : pendingVersion
-                            ? const Color(0xff996515)
-                            : const Color(0xff3e7350),
-                      ),
+                Icon(appearance.icon, color: appearance.foreground),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surface,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      unreadable
+                          ? Icons.error
+                          : !ready
+                          ? Icons.cloud_download_outlined
+                          : pendingVersion
+                          ? Icons.update
+                          : Icons.check_circle,
+                      size: 13,
+                      color: unreadable
+                          ? Theme.of(context).colorScheme.error
+                          : !ready
+                          ? const Color(0xff65736b)
+                          : pendingVersion
+                          ? const Color(0xff996515)
+                          : const Color(0xff3e7350),
                     ),
                   ),
+                ),
               ],
             ),
           ),
@@ -287,6 +291,13 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             locate: widget.controller.locateOffline,
             initialTarget: target,
             sourceChanges: widget.controller,
+            onLoaded: (document) => widget.controller.pageCounts.remember(
+              PageMetadataKey(
+                document.target.entryId,
+                document.target.revisionId,
+              ),
+              document.pageCount,
+            ),
           ),
         ),
       );
@@ -611,9 +622,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   final pending =
                                       ready && sync.hasPendingVersion(entry.id);
                                   return ListTile(
+                                    minTileHeight: 72,
                                     leading: _OfflineStatusIcon(
                                       availability: entry.availability,
                                       pendingVersion: pending,
+                                      path: entry.relativePath,
                                     ),
                                     title: Text(
                                       p.posix.basenameWithoutExtension(
@@ -631,6 +644,17 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                     trailing: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
+                                        ScoreFileMetadata(
+                                          key: ValueKey((
+                                            entry.id,
+                                            entry.currentRevisionId,
+                                          )),
+                                          entryId: entry.id,
+                                          revisionId: entry.currentRevisionId,
+                                          path: entry.relativePath,
+                                          service: sync.pageCounts,
+                                        ),
+                                        const SizedBox(width: 8),
                                         if (!ready || pending)
                                           IconButton(
                                             tooltip: '下载到iPad',

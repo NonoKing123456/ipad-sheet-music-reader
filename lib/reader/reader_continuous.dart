@@ -14,12 +14,22 @@ class ReaderScrollAnchor {
   final double fraction, horizontalFraction;
 }
 
+const continuousMinScale = .25, continuousMaxScale = 8.0;
+const continuousPreviewPixels = 2000000;
+
+typedef ContinuousPreviewBuilder = Widget Function(
+  int page,
+  int pixelBudget,
+  VoidCallback ready,
+  ValueChanged<String?> failed,
+);
+
 class ReaderContinuousController {
   double scale = 1;
   ReaderScrollAnchor? anchor;
   ValueChanged<double>? _zoom;
   void zoom(double factor) {
-    final next = (scale * factor).clamp(1.0, 4.0);
+    final next = (scale * factor).clamp(continuousMinScale, continuousMaxScale);
     if (_zoom != null) {
       _zoom!(next);
     } else {
@@ -45,6 +55,7 @@ class ReaderContinuousView extends StatefulWidget {
     required this.pageCount,
     required this.aspectFor,
     required this.pageBuilder,
+    this.previewPageBuilder,
     required this.controller,
     required this.requestedPage,
     required this.navigationToken,
@@ -62,6 +73,7 @@ class ReaderContinuousView extends StatefulWidget {
   final int pageCount, requestedPage, navigationToken;
   final double Function(int) aspectFor;
   final ReadyPageBuilder pageBuilder;
+  final ContinuousPreviewBuilder? previewPageBuilder;
   final ReaderContinuousController controller;
   final ReaderScrollAnchor? initialAnchor;
   final ValueChanged<int> onPresented;
@@ -80,11 +92,19 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   Set<int> _visible = {};
   Size _viewport = Size.zero;
   double _paperWidth = 0;
+  double get _paperLeft =>
+      (math.max(_viewport.width, _paperWidth + 32) - _paperWidth) / 2;
+  int get _previewBudget => math.min(
+    256000,
+    continuousPreviewPixels ~/ math.max(1, _visible.difference(_window).length),
+  );
   List<double> _prefix = [0], _heights = [];
   bool _scheduled = false, _layoutPending = true, _ignoredGesture = false;
   ReaderScrollAnchor? _pendingAnchor;
   (int, double, Offset, double)? _pendingZoom;
   int? _reported;
+  int? _requestedPresentation;
+  int? _navigationFocus;
   double _gestureScale = 1;
   late final ValueChanged<double> _zoomCallback = _zoomFromController;
   void _zoomFromController(double value) => _zoom(value, null);
@@ -94,6 +114,8 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
     widget.retainDocument?.call();
     _pendingAnchor =
         widget.initialAnchor ?? ReaderScrollAnchor(widget.requestedPage, 0, 0);
+    _requestedPresentation = _pendingAnchor!.page;
+    _navigationFocus = _requestedPresentation;
     widget.controller._zoom = _zoomCallback;
     _vertical.addListener(_schedule);
   }
@@ -103,6 +125,8 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.navigationToken != widget.navigationToken) {
       _pendingAnchor = ReaderScrollAnchor(widget.requestedPage, 0, 0);
+      _requestedPresentation = widget.requestedPage;
+      _navigationFocus = widget.requestedPage;
       _pendingZoom = null;
       _layoutPending = true;
       _schedule();
@@ -174,7 +198,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         _jump(_prefix[index] + 8 + zoom.$2 * _heights[index] - zoom.$3.dy);
         if (_horizontal.hasClients) {
           _horizontal.jumpTo(
-            (16 + zoom.$4 * _paperWidth - zoom.$3.dx).clamp(
+            (_paperLeft + zoom.$4 * _paperWidth - zoom.$3.dx).clamp(
               0.0,
               _horizontal.position.maxScrollExtent,
             ),
@@ -211,7 +235,12 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
           return area == 0 ? a.compareTo(b) : area;
         });
       final primary = priority.isEmpty ? start + 1 : priority.first;
-      final nextWindow = priority.take(4).toSet();
+      final navigationFocus = _navigationFocus;
+      final nextWindow = <int>{
+        if (navigationFocus != null && visible.containsKey(navigationFocus))
+          navigationFocus,
+        ...priority,
+      }.take(4).toSet();
       for (
         var distance = 0;
         nextWindow.length < math.min(4, widget.pageCount);
@@ -231,9 +260,17 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
           _visible = nextVisible;
         });
       }
-      if (!_layoutPending && _ready.contains(primary) && primary != _reported) {
-        _reported = primary;
-        widget.onPresented(primary);
+      final requested = _requestedPresentation;
+      final presented =
+          navigationFocus != null && visible.containsKey(navigationFocus)
+          ? navigationFocus
+          : primary;
+      if (!_layoutPending &&
+          _ready.contains(presented) &&
+          (presented != _reported || requested != null)) {
+        _requestedPresentation = null;
+        _reported = presented;
+        widget.onPresented(presented);
       }
     });
     WidgetsBinding.instance.ensureVisualUpdate();
@@ -244,6 +281,8 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
       return;
     }
     final focal = focalPoint ?? _viewport.center(Offset.zero);
+    _navigationFocus = null;
+    _requestedPresentation = null;
     final index = _indexAt(_offset + focal.dy);
     final fraction =
         ((_offset + focal.dy - _prefix[index] - 8) / _heights[index]).clamp(
@@ -251,12 +290,16 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
           1.0,
         );
     final horizontalOffset = _horizontal.hasClients ? _horizontal.offset : 0.0;
-    final fractionX = (horizontalOffset + focal.dx - 16) / _paperWidth;
+    final fractionX = ((horizontalOffset + focal.dx - _paperLeft) / _paperWidth)
+        .clamp(0.0, 1.0);
     setState(() {
       _pendingZoom = (index, fraction, focal, fractionX);
       _pendingAnchor = null;
       _layoutPending = true;
-      widget.controller.scale = value.clamp(1.0, 4.0);
+      widget.controller.scale = value.clamp(
+        continuousMinScale,
+        continuousMaxScale,
+      );
     });
     _schedule();
   }
@@ -264,10 +307,12 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   void _signal(PointerSignalEvent event) {
     if (event is! PointerScrollEvent || _insideControl(event.position)) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+      _requestedPresentation = null;
+      _navigationFocus = null;
       if (HardwareKeyboard.instance.isControlPressed) {
         _zoom(
           (widget.controller.scale * math.exp(-event.scrollDelta.dy / 360))
-              .clamp(1.0, 4.0),
+              .clamp(continuousMinScale, continuousMaxScale),
           event.localPosition,
         );
       } else {
@@ -327,13 +372,20 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
           },
           onScaleStart: (details) {
             _ignoredGesture = _insideControl(details.focalPoint);
+            if (!_ignoredGesture) {
+              _requestedPresentation = null;
+              _navigationFocus = null;
+            }
             _gestureScale = widget.controller.scale;
           },
           onScaleUpdate: (details) {
             if (_ignoredGesture) return;
             if (details.pointerCount >= 2) {
               _zoom(
-                (_gestureScale * details.scale).clamp(1.0, 4.0),
+                (_gestureScale * details.scale).clamp(
+                  continuousMinScale,
+                  continuousMaxScale,
+                ),
                 details.localFocalPoint,
               );
             } else {
@@ -351,23 +403,41 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
                 key: const ValueKey('continuous-page-list'),
                 controller: _vertical,
                 physics: const NeverScrollableScrollPhysics(),
-                scrollCacheExtent: ScrollCacheExtent.pixels(_viewport.height * .6),
+                scrollCacheExtent: ScrollCacheExtent.pixels(
+                  _viewport.height * .6,
+                ),
                 itemCount: widget.pageCount,
                 itemExtentBuilder: (index, _) => _heights[index] + 16,
                 itemBuilder: (context, index) {
                   final number = index + 1;
+                  final preview =
+                      !_window.contains(number) &&
+                      _visible.contains(number) &&
+                      widget.previewPageBuilder != null;
                   return Center(
                     child: SizedBox(
                       width: _paperWidth,
                       height: _heights[index],
-                      child: _window.contains(number)
+                      child: _window.contains(number) || preview
                           ? _ContinuousPaper(
-                              key: ValueKey((widget.documentKey, number)),
+                              key: ValueKey((
+                                widget.documentKey,
+                                number,
+                                preview,
+                              )),
                               number: number,
                               active:
                                   _prefix[index] < _offset + _viewport.height &&
                                   _prefix[index + 1] > _offset,
-                              builder: widget.pageBuilder,
+                              builder: preview
+                                  ? (number, active, ready, failed) =>
+                                        widget.previewPageBuilder!(
+                                          number,
+                                          _previewBudget,
+                                          ready,
+                                          failed,
+                                        )
+                                  : widget.pageBuilder,
                               mounted: (token) {
                                 _mounted[number] = token;
                                 _ready.remove(number);
@@ -381,7 +451,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
                               ready: (token) {
                                 if (mounted &&
                                     identical(_mounted[number], token)) {
-                                  _ready.add(number);
+                                  if (!preview) _ready.add(number);
                                   _schedule();
                                 }
                               },

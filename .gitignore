@@ -101,3 +101,6 @@
 !/lib/signing/signing_expiry_chip.dart
 !/packages/library_sync/lib/src/signing_status.dart
 !/tool/signing_expiry_smoke.swift
+!/lib/library/desktop_navigation_history.dart
+!/lib/library/page_count_service.dart
+!/packages/library_sync/lib/src/page_metadata.dart

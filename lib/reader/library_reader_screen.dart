@@ -19,6 +19,7 @@ import 'reader_tool_button.dart';
 import 'reader_spreads.dart';
 import 'desktop_reader.dart';
 import 'reader_continuous.dart';
+import '../library/desktop_navigation_history.dart';
 
 class LibraryReaderScreen extends StatefulWidget {
   const LibraryReaderScreen({
@@ -34,6 +35,8 @@ class LibraryReaderScreen extends StatefulWidget {
     this.presentationClock,
     this.allowAnnotations = true,
     this.onPresented,
+    this.initialPageNumber,
+    this.onLoaded,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -46,6 +49,8 @@ class LibraryReaderScreen extends StatefulWidget {
   final Duration Function()? presentationClock;
   final bool allowAnnotations;
   final ValueChanged<PageKey>? onPresented;
+  final int? initialPageNumber;
+  final ValueChanged<LoadedScore>? onLoaded;
   @override
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
@@ -101,10 +106,43 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   (PageKey, DocumentKey)? _prewarmAnchor;
   int _color = 0xffc12b32;
   double _scale = 1;
+  bool _desktopMenuOpen = false;
   PageKey? _shownPage;
   final Set<PageKey> _renderedPages = {};
   Stopwatch? _pageWatch;
   bool _presented = false;
+  PageKey? _historyPosition;
+  String? _historyItemId;
+  LoadedScore? _notifiedDocument;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    DesktopHistoryScope.of(context)?.reader(route, _leaveSafely, () {
+      final position = _historyPosition;
+      final latest = widget.locate(
+        position?.entryId ?? widget.initialTarget.entryId,
+      );
+      if (latest == null) return null;
+      return LibraryReaderScreen(
+        workspace: widget.workspace,
+        locate: widget.locate,
+        initialTarget: latest,
+        initialPageNumber: latest.revisionId == position?.revisionId
+            ? position!.pageNumber
+            : 1,
+        setListId: widget.setListId,
+        itemId: _historyItemId ?? widget.itemId,
+        sourceChanges: widget.sourceChanges,
+        loader: widget.loader,
+        allowAnnotations: widget.allowAnnotations,
+        onPresented: widget.onPresented,
+        onLoaded: widget.onLoaded,
+      );
+    }, blockKeys: () => _desktopMenuOpen || _sampleMenuOpen || _writing);
+  }
 
   @override
   void initState() {
@@ -140,7 +178,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     await _session.open(
       widget.initialTarget,
       itemId: widget.itemId,
-      restore: widget.allowAnnotations && widget.setListId == null,
+      pageNumber: widget.initialPageNumber,
+      restore:
+          widget.initialPageNumber == null &&
+          widget.allowAnnotations &&
+          widget.setListId == null,
     );
   }
 
@@ -151,6 +193,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   void _changed() {
     if (!mounted) return;
+    final document = _session.current;
+    if (document != null && !identical(document, _notifiedDocument)) {
+      _notifiedDocument = document;
+      widget.onLoaded?.call(document);
+    }
     if (_shownPage != _session.pageKey) {
       if (!_followingContinuous && !isMobileReader) _continuousNavigation++;
       _inputGeneration++;
@@ -221,9 +268,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _back() async {
-    if (widget.allowAnnotations && !await _confirmLeaving()) return;
+    if (await _leaveSafely() && mounted) Navigator.pop(context);
+  }
+
+  Future<bool> _leaveSafely() async {
+    if (!mounted || (widget.allowAnnotations && !await _confirmLeaving())) {
+      return false;
+    }
     await widget.workspace.flushPositions();
-    if (mounted) Navigator.pop(context);
+    return mounted;
   }
 
   StrokeStyle get _style => StrokeStyle(
@@ -658,7 +711,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
-  Future<void> _annotationAction() async {
+  Future<void> _annotationAction({
+    int? pageNumber,
+    DocumentKey? expectedDocument,
+  }) async {
     if (_writing) return;
     if (_editing) {
       _finishAnnotation();
@@ -671,41 +727,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _session.sourceChanged) {
       return;
     }
-    var selected = visible.pageNumber;
+    if (expectedDocument != null && expectedDocument != document.target.key) {
+      return;
+    }
+    var selected = pageNumber ?? visible.pageNumber;
     if (_desktopMode == ReaderViewMode.spread) {
       final spread = ReaderSpreads(
         pageCount: document.pageCount,
         doublePage: true,
         arrangement: _arrangementFor(document.target.entryId),
       ).forPage(selected);
-      if (spread.first != spread.last) {
-        final result = await showDialog<int>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('选择批注页'),
-            content: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                OutlinedButton(
-                  onPressed: () => Navigator.pop(context, spread.first),
-                  child: Text('左页 · ${spread.first}'),
-                ),
-                const SizedBox(width: 12),
-                OutlinedButton(
-                  onPressed: () => Navigator.pop(context, spread.last),
-                  child: Text('右页 · ${spread.last}'),
-                ),
-              ],
-            ),
-          ),
-        );
-        if (result == null ||
-            !mounted ||
-            _writing ||
-            _visibleDocument?.target.key != document.target.key) {
-          return;
-        }
-        selected = result;
+      if (!spread.contains(selected) ||
+          (spread.first != spread.last && pageNumber == null)) {
+        return;
       }
     }
     if (_desktopMode == ReaderViewMode.continuous) {
@@ -746,7 +780,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             initialValue: input,
             onChanged: (value) => input = value,
             keyboardType: TextInputType.number,
-            onFieldSubmitted: (value) => Navigator.pop(context, int.tryParse(value)),
+            onFieldSubmitted: (value) =>
+                Navigator.pop(context, int.tryParse(value)),
             decoration: InputDecoration(suffixText: '/ ${document.pageCount}'),
           ),
         ),
@@ -824,11 +859,25 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
         allowOverlayPageKeys: _sampleMenuOpen,
+        blockArrowKeys: _desktopMenuOpen,
         contentBuilder: (_) => DesktopReaderShell(
           title: p.basename(title),
           pageLabel: pageLabel,
           mode: _effectiveDesktopMode,
           arrangement: grouping.arrangement,
+          annotationPages:
+              !_editing && _effectiveDesktopMode == ReaderViewMode.spread
+              ? shown.pages.toList()
+              : const [],
+          onAnnotatePage: (number) => _annotationAction(
+            pageNumber: number,
+            expectedDocument: document?.target.key,
+          ),
+          onMenuChanged: (open) {
+            if (mounted && _desktopMenuOpen != open) {
+              setState(() => _desktopMenuOpen = open);
+            }
+          },
           onMode: _changeView,
           onArrangement: _changeArrangement,
           onPrevious: () => _navigate(NavigationDirection.backward),
@@ -891,6 +940,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 onNext: () => _navigate(NavigationDirection.forward),
                 pageBuilder: (number, active, ready, failed) =>
                     _surface(current, number, active, ready, failed),
+                previewPageBuilder: (number, pixels, ready, failed) => _surface(
+                  current,
+                  number,
+                  false,
+                  ready,
+                  failed,
+                  previewPixels: pixels,
+                ),
                 onPresented: (number) {
                   if (_effectiveDesktopMode != ReaderViewMode.continuous ||
                       _session.current?.target.key != current.target.key) {
@@ -1022,6 +1079,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _session.rememberPresented(visible, document.pageCount);
     }
     widget.onPresented?.call(visible);
+    _historyPosition = visible;
+    _historyItemId = _session.position?.setListItemId;
     if (visible == _shownPage && !_presented) {
       _presented = true;
       debugPrint(
@@ -1029,7 +1088,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       );
     }
     if (number == document.pageCount &&
-        (isMobileReader || _effectiveDesktopMode != ReaderViewMode.continuous)) {
+        (isMobileReader ||
+            _effectiveDesktopMode != ReaderViewMode.continuous)) {
       unawaited(_prewarmNext());
     }
   }
@@ -1039,8 +1099,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     int number,
     bool active,
     VoidCallback ready,
-    ValueChanged<String?> failed,
-  ) {
+    ValueChanged<String?> failed, {
+    int? previewPixels,
+  }) {
     final surfacePage = PageKey(
       entryId: document.target.entryId,
       revisionId: document.target.revisionId,
@@ -1053,6 +1114,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           SharpPdfPage(
             page: document.pdf!.pages[number - 1],
             active: active,
+            previewPixels: previewPixels,
             transform: _transform,
             viewportKey: _viewportKey,
             onRendered: () {

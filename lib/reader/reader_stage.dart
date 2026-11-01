@@ -73,6 +73,7 @@ class ReaderStage extends StatefulWidget {
     this.onPrevious,
     this.onNext,
     this.allowOverlayPageKeys = false,
+    this.blockArrowKeys = false,
     this.onObstructionChanged,
     this.onToolsVisibilityChanged,
     this.hasReadablePage = false,
@@ -87,6 +88,7 @@ class ReaderStage extends StatefulWidget {
   final VoidCallback? onViewportChanged;
   final VoidCallback? onPrevious, onNext;
   final bool allowOverlayPageKeys;
+  final bool blockArrowKeys;
   final ValueChanged<EdgeInsets>? onObstructionChanged;
   final ValueChanged<bool>? onToolsVisibilityChanged;
   final bool hasReadablePage, loading;
@@ -192,9 +194,19 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   KeyEventResult _pageKey(KeyEvent event) {
+    final arrowPrevious =
+        defaultTargetPlatform == TargetPlatform.windows &&
+        (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowUp);
+    final arrowNext =
+        defaultTargetPlatform == TargetPlatform.windows &&
+        (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+            event.logicalKey == LogicalKeyboardKey.arrowDown);
+    final arrow = arrowPrevious || arrowNext;
+    if (arrow && widget.blockArrowKeys) return KeyEventResult.ignored;
     if (!mounted ||
         (!(ModalRoute.of(context)?.isCurrent ?? true) &&
-            !widget.allowOverlayPageKeys)) {
+            (!widget.allowOverlayPageKeys || arrow))) {
       return KeyEventResult.ignored;
     }
     final focus = FocusManager.instance.primaryFocus?.context;
@@ -208,9 +220,9 @@ class _ReaderStageState extends State<ReaderStage>
         keyboard.isMetaPressed) {
       return KeyEventResult.ignored;
     }
-    final action = event.logicalKey == LogicalKeyboardKey.pageDown
+    final action = event.logicalKey == LogicalKeyboardKey.pageDown || arrowNext
         ? widget.onNext
-        : event.logicalKey == LogicalKeyboardKey.pageUp
+        : event.logicalKey == LogicalKeyboardKey.pageUp || arrowPrevious
         ? widget.onPrevious
         : null;
     if (action == null) return KeyEventResult.ignored;

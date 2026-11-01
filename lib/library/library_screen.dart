@@ -1,6 +1,10 @@
 import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
+import 'page_count_service.dart';
+import 'desktop_navigation_history.dart';
+
+import 'package:library_sync/library_sync.dart' show PageMetadataKey;
 
 import 'dart:async';
 import 'dart:convert';
@@ -58,6 +62,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   final TextEditingController _search = TextEditingController();
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
+  bool _directoryMutation = false;
+  DesktopNavigationHistory? _history;
   final Set<String> _collapsedFolders = {};
   List<String>? _treeFolders;
   FolderHierarchy? _hierarchy;
@@ -117,7 +123,50 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _changed() {
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {});
+      _recordDirectory(replaceSearch: _searchOpen);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _history = DesktopHistoryScope.of(context);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _recordDirectory();
+    });
+  }
+
+  void _recordDirectory({bool replaceSearch = false}) {
+    final library = _library, route = ModalRoute.of(context);
+    if (_directoryMutation ||
+        library == null ||
+        route == null ||
+        !route.isCurrent) {
+      return;
+    }
+    final state = (
+      library.selectedSourceId,
+      library.currentFolder,
+      library.query,
+      library.searchCurrentFolder,
+      _searchOpen,
+    );
+    _history?.directory(route, state, () {
+      if (!mounted) return;
+      _directoryMutation = true;
+      library.setSource(state.$1);
+      library.setFolder(state.$2);
+      library.setSearchScope(state.$4);
+      library.setQuery(state.$3);
+      setState(() {
+        _searchOpen = state.$5;
+        _search.text = state.$3;
+      });
+      _searchFocus.unfocus();
+      _directoryMutation = false;
+    }, replace: replaceSearch);
   }
 
   @override
@@ -146,6 +195,7 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _openSearch() {
     setState(() => _searchOpen = true);
+    _recordDirectory();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _searchFocus.requestFocus();
     });
@@ -263,11 +313,14 @@ class _LibraryScreenState extends State<LibraryScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   void _folder(String folder) {
+    _directoryMutation = true;
     _searchOpen = false;
     _searchFocus.unfocus();
     _search.clear();
     _library!.setQuery('');
     _library!.setFolder(folder);
+    _directoryMutation = false;
+    _recordDirectory();
   }
 
   Future<void> _openEntry(LibraryEntry entry) async {
@@ -327,13 +380,18 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (resolved == null || resolved.revisionId != target.revisionId) {
       throw StateError('Source changed while preparing the selected score.');
     }
-    return loadScore(
+    final loaded = await loadScore(
       resolved,
       cacheDirectory: p.join(
         p.dirname(_workspace!.store.statePath),
         'reading-cache',
       ),
     );
+    _sync?.pageCounts.remember(
+      PageMetadataKey(resolved.entryId, resolved.revisionId),
+      loaded.pageCount,
+    );
+    return loaded;
   }
 
   List<ScoreTarget> _targets() => [
@@ -525,39 +583,68 @@ class _LibraryScreenState extends State<LibraryScreen>
         final wide = constraints.maxWidth >= 850;
         return Scaffold(
           appBar: AppBar(
-            title: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: _searchOpen
-                      ? DirectorySearchField(
-                          controller: _search,
-                          focusNode: _searchFocus,
-                          onChanged: (text) => library?.setQuery(text),
-                        )
-                      : const Text(
+            title: wide
+                ? Row(
+                    children: [
+                      const SizedBox(
+                        width: 261,
+                        child: Text(
                           '曲谱库',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(fontWeight: FontWeight.w600),
                         ),
-                ),
-                if (defaultTargetPlatform == TargetPlatform.windows)
-                  Visibility(
-                    visible: !_searchOpen,
-                    maintainState: true,
-                    child: Padding(
-                      padding: const EdgeInsets.only(left: 8),
-                      child: SigningExpiryChip(
-                        pairedDevice: true,
-                        pairedStatus: _sync?.signingStatus,
                       ),
-                    ),
+                      if (_searchOpen)
+                        Expanded(
+                          child: DirectorySearchField(
+                            controller: _search,
+                            focusNode: _searchFocus,
+                            onChanged: (text) => library?.setQuery(text),
+                          ),
+                        ),
+                    ],
+                  )
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: _searchOpen
+                            ? DirectorySearchField(
+                                controller: _search,
+                                focusNode: _searchFocus,
+                                onChanged: (text) => library?.setQuery(text),
+                              )
+                            : const Text(
+                                '曲谱库',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                      ),
+                      if (!wide &&
+                          defaultTargetPlatform == TargetPlatform.windows)
+                        Visibility(
+                          visible: !_searchOpen,
+                          maintainState: true,
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: SigningExpiryChip(
+                              pairedDevice: true,
+                              pairedStatus: _sync?.signingStatus,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-              ],
-            ),
             backgroundColor: const Color(0xfffaf9f5),
             actions: [
+              if (wide && defaultTargetPlatform == TargetPlatform.windows)
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: SigningExpiryChip(
+                    pairedDevice: true,
+                    pairedStatus: _sync?.signingStatus,
+                  ),
+                ),
               IconButton(
                 tooltip: _searchOpen ? '关闭搜索' : '搜索',
                 icon: Icon(_searchOpen ? Icons.close : Icons.search),
@@ -641,7 +728,13 @@ class _LibraryScreenState extends State<LibraryScreen>
                   children: [
                     if (wide) SizedBox(width: 260, child: _sidebar(library)),
                     if (wide) const VerticalDivider(width: 1),
-                    Expanded(child: _content(library)),
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _searchOpen ? _closeSearch : null,
+                        child: _content(library),
+                      ),
+                    ),
                   ],
                 ),
         );
@@ -759,8 +852,12 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ),
                   subtitle: source.online ? null : const Text('文件夹暂未连接'),
                   onTap: () {
+                    _directoryMutation = true;
                     _search.clear();
+                    _searchOpen = false;
                     library.setSource(source.id);
+                    _directoryMutation = false;
+                    _recordDirectory();
                   },
                 );
               },
@@ -772,8 +869,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               message:
                   library.selectedSource?.catalog.rootPath ?? library.rootPath!,
               child: Text(
-                library.selectedSource?.catalog.rootPath ?? library.rootPath!,
-                maxLines: 3,
+                library.selectedSource?.name ?? p.basename(library.rootPath!),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 11, color: Color(0xff65736b)),
               ),
@@ -932,9 +1029,15 @@ class _LibraryScreenState extends State<LibraryScreen>
       );
     }
     return ListView.separated(
+      key: PageStorageKey((
+        library.selectedSourceId,
+        library.currentFolder,
+        library.query,
+      )),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
       itemCount: subfolders.length + entries.length,
-      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
+      separatorBuilder: (_, _) =>
+          const Divider(height: 1, indent: 56, color: Color(0xffdfe4df)),
       itemBuilder: (context, index) {
         if (index < subfolders.length) {
           final folder = subfolders[index];
@@ -950,24 +1053,21 @@ class _LibraryScreenState extends State<LibraryScreen>
           );
         }
         final entry = entries[index - subfolders.length];
-        final image =
-            p.posix.extension(entry.relativePath).toLowerCase() != '.pdf';
+        final appearance = scoreFileAppearance(entry.relativePath);
         return ListTile(
+          minTileHeight: 72,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 12,
-            vertical: 6,
+            vertical: 0,
           ),
           leading: Container(
             width: 38,
             height: 46,
             decoration: BoxDecoration(
-              color: const Color(0xffe1e9e0),
+              color: appearance.background,
               borderRadius: BorderRadius.circular(6),
             ),
-            child: Icon(
-              image ? Icons.image_outlined : Icons.description_outlined,
-              color: const Color(0xff236459),
-            ),
+            child: Icon(appearance.icon, color: appearance.foreground),
           ),
           title: Text(
             p.posix.basenameWithoutExtension(entry.relativePath),
@@ -979,15 +1079,28 @@ class _LibraryScreenState extends State<LibraryScreen>
                 '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
             child: Text(
               '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
-              maxLines: 2,
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),
             ),
           ),
-          trailing: IconButton(
-            tooltip: '查看完整路径',
-            icon: const Icon(Icons.info_outline, size: 19),
-            onPressed: () => _pathDetails(entry),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ScoreFileMetadata(
+                key: ValueKey((entry.id, entry.currentRevisionId)),
+                entryId: entry.id,
+                revisionId: entry.currentRevisionId,
+                path: entry.relativePath,
+                service: _sync?.pageCounts,
+              ),
+              const SizedBox(width: 12),
+              IconButton(
+                tooltip: '查看完整路径',
+                icon: const Icon(Icons.info_outline, size: 19),
+                onPressed: () => _pathDetails(entry),
+              ),
+            ],
           ),
           onTap: () => unawaited(_openEntry(entry)),
         );

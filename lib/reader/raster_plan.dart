@@ -44,16 +44,25 @@ PageRasterPlan planPageRaster({
   required double zoom,
   Rect? visible,
   bool neighbour = false,
+  int? previewPixels,
 }) {
   final whole = Offset.zero & paper;
   final region = visible == null ? whole : visible.intersect(whole);
   assert(paper.width > 0 && paper.height > 0 && !region.isEmpty);
-  final limit = neighbour
+  final normalLimit = neighbour
       ? neighbourPixels
       : visible == null
       ? activeBasePixels
       : detailPixels;
-  final maxEdge = neighbour ? 1600 : 4096;
+  final limit = previewPixels == null
+      ? normalLimit
+      : math.min(previewPixels, normalLimit);
+  assert(limit > 0);
+  final maxEdge = previewPixels != null
+      ? 1024
+      : neighbour
+      ? 1600
+      : 4096;
   final requested = devicePixelRatio * (neighbour ? 1 : zoom * 1.2);
   final density = math.min(
     requested,

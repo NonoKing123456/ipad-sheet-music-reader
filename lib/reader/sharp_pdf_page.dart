@@ -50,6 +50,7 @@ class SharpPdfPage extends StatefulWidget {
     required this.transform,
     required this.viewportKey,
     this.onRendered,
+    this.previewPixels,
     this.onError,
     this.colorSampler,
     this.colorKey,
@@ -60,6 +61,7 @@ class SharpPdfPage extends StatefulWidget {
   final TransformationController transform;
   final GlobalKey viewportKey;
   final VoidCallback? onRendered;
+  final int? previewPixels;
   final ValueChanged<String?>? onError;
   final PaperColorSampler? colorSampler;
   final Object? colorKey;
@@ -127,6 +129,12 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
     if (oldWidget.transform != widget.transform) {
       oldWidget.transform.removeListener(_transformed);
       widget.transform.addListener(_transformed);
+    }
+    if (oldWidget.previewPixels != widget.previewPixels) {
+      _baseEpoch++;
+      _baseToken?.cancel();
+      _basePlan = null;
+      _clearDetail();
     }
     if (oldWidget.page != widget.page) {
       _baseEpoch++;
@@ -264,6 +272,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       devicePixelRatio: _dpr,
       zoom: 1,
       neighbour: !widget.active,
+      previewPixels: widget.previewPixels,
     );
     if (_basePlan == null ||
         _basePlan!.width < base.width ||
@@ -271,7 +280,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       unawaited(_render(base, detail: false));
     }
     final zoom = widget.transform.value.getMaxScaleOnAxis();
-    if (!widget.active || zoom <= 1.02) {
+    if (widget.previewPixels != null || !widget.active || zoom <= 1.02) {
       if (_detail != null || _requestedDetail != null) setState(_clearDetail);
       return;
     }

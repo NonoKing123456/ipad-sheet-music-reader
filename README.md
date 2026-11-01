@@ -1,6 +1,6 @@
 # iPad Sheet Music Reader
 
-Source-only application repository for **0.8.6+19**. Personal scores, annotations, set lists, credentials, actual provisioning profiles, private probes, preview fonts and build outputs are excluded.
+Source-only application repository for **0.8.7+20**. Personal scores, annotations, set lists, credentials, actual provisioning profiles, private probes, preview fonts and build outputs are excluded.
 
 The iPad home shows the expiration from its installed bundle's embedded profile. A bounded Foundation parser extracts the CMS-contained XML/binary plist date; missing, malformed or unsupported formats show unknown. This is best-effort display metadata, not CMS signature or revocation verification. Only status and UTC milliseconds cross to Dart or the paired computer. No profile, certificate, Apple account or device identifier is transmitted or stored.
 

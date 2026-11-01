@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'reader/reader_stage.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
+import 'library/desktop_navigation_history.dart';
 
 void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
@@ -46,7 +47,7 @@ class LaunchOptions {
   }
 }
 
-class ScoreReaderApp extends StatelessWidget {
+class ScoreReaderApp extends StatefulWidget {
   const ScoreReaderApp({
     super.key,
     this.initialPath,
@@ -59,27 +60,48 @@ class ScoreReaderApp extends StatelessWidget {
   final Directory? dataDirectory;
 
   @override
+  State<ScoreReaderApp> createState() => _ScoreReaderAppState();
+}
+
+class _ScoreReaderAppState extends State<ScoreReaderApp> {
+  final _history = DesktopNavigationHistory();
+  @override
+  void initState() {
+    super.initState();
+    _history.attach();
+  }
+
+  @override
+  void dispose() {
+    _history.detach();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '曲谱阅读器',
-      navigatorObservers: [readerRouteVisibility],
-      debugShowCheckedModeBanner: false,
-      locale: const Locale('zh', 'CN'),
-      supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
-      localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff236459),
-          surface: const Color(0xfffaf9f5),
+    return DesktopHistoryScope(
+      history: _history,
+      child: MaterialApp(
+        title: '曲谱阅读器',
+        navigatorObservers: [readerRouteVisibility, _history],
+        debugShowCheckedModeBanner: false,
+        locale: const Locale('zh', 'CN'),
+        supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
+        theme: ThemeData(
+          useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: const Color(0xff236459),
+            surface: const Color(0xfffaf9f5),
+          ),
+          scaffoldBackgroundColor: const Color(0xffeeede7),
+          visualDensity: VisualDensity.standard,
         ),
-        scaffoldBackgroundColor: const Color(0xffeeede7),
-        visualDensity: VisualDensity.standard,
-      ),
-      home: LibraryScreen(
-        controller: libraryController,
-        dataDirectory: dataDirectory,
-        initialPath: initialPath,
+        home: LibraryScreen(
+          controller: widget.libraryController,
+          dataDirectory: widget.dataDirectory,
+          initialPath: widget.initialPath,
+        ),
       ),
     );
   }

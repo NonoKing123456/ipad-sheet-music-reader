@@ -12,6 +12,7 @@ import 'package:path/path.dart' as p;
 
 import '../library/library_controller.dart';
 import '../library/score_path_label.dart';
+import '../library/page_count_service.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import 'pairing_qr.dart';
@@ -103,6 +104,17 @@ class SyncController extends ChangeNotifier {
   Map<String, dynamic> _settings = {'version': 1, 'roots': <String, dynamic>{}};
   SyncServer? _server;
   SyncClient? _client;
+  late final pageCounts = PageCountService(
+    cacheDirectory: p.join(directory.path, 'page-counts'),
+    resolve: (key) {
+      final local = library.pageCountFile(key);
+      if (local != null) return local;
+      final target = locateOffline(key.entryId);
+      if (target == null || target.revisionId != key.revisionId) return null;
+      return PageCountFile(target.filePath, p.dirname(target.filePath));
+    },
+    remote: (keys) async => await _client?.pageMetadata(keys) ?? {},
+  );
   final signingStatus = ValueNotifier<SigningStatusReceipt?>(null);
   SigningStatusStore? _signingStore;
   int _signingAuthEpoch = 0;
@@ -682,7 +694,10 @@ class SyncController extends ChangeNotifier {
   bool get hasUnsavedEdits => workspace.unsavedCount > 0 || workspace.saving;
 
   void _changed() {
-    if (!_disposed) notifyListeners();
+    if (!_disposed) {
+      pageCounts.refreshVisible();
+      notifyListeners();
+    }
   }
 
   Future<void> initialize() async {
@@ -797,6 +812,7 @@ class SyncController extends ChangeNotifier {
   }
 
   void _libraryChanged() {
+    pageCounts.refreshVisible();
     if (_lastSelectedRoot != library.rootPath) {
       _lastSelectedRoot = library.rootPath;
       _autoStartAttemptedRoot = null;
@@ -950,6 +966,26 @@ class SyncController extends ChangeNotifier {
         return;
       }
       final statusStore = _signingStore;
+      started.onPageMetadata = (keys) async {
+        final result = <PageMetadataKey, int>{};
+        for (final key in keys) {
+          if (_disposed || library.rootPath != root) break;
+          final input = library.pageCountFile(key);
+          if (input == null) continue;
+          final extension = p.extension(input.path).toLowerCase();
+          if (extension != '.pdf') {
+            if (['.png', '.jpg', '.jpeg', '.webp'].contains(extension)) {
+              result[key] = 1;
+            }
+          } else {
+            final count = await pageCounts.lookup(key);
+            if (count != null && input.same(library.pageCountFile(key))) {
+              result[key] = count;
+            }
+          }
+        }
+        return result;
+      };
       if (statusStore != null) {
         final server = started;
         _signingAuthEpoch++;
@@ -1153,6 +1189,7 @@ class SyncController extends ChangeNotifier {
       );
       await _saveSettings({..._settings, 'clientFolder': folder});
       _client = client;
+      pageCounts.connectionChanged();
       _retrySigningReport();
       phase = SyncPhase.idle;
       message = '已记住这台电脑，以后点击“立即同步”即可。';
@@ -1231,6 +1268,7 @@ class SyncController extends ChangeNotifier {
       }
       _retrySigningReport();
       phase = SyncPhase.merging;
+      pageCounts.connectionChanged();
       final contentPartial = result.status != LibrarySyncStatus.complete;
       message = '正在交换已保存的批注和曲单…';
       _changed();
@@ -1364,6 +1402,7 @@ class SyncController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    pageCounts.dispose();
     signingStatus.dispose();
     final signingStore = _signingStore;
     if (signingStore != null) unawaited(signingStore.close());

@@ -24,6 +24,9 @@ class DesktopReaderShell extends StatefulWidget {
     required this.onJump,
     required this.contentBuilder,
     this.onAnnotate,
+    this.onAnnotatePage,
+    this.annotationPages = const [],
+    this.onMenuChanged,
     this.onFinishEditing,
     this.editing = false,
     this.writing = false,
@@ -42,6 +45,9 @@ class DesktopReaderShell extends StatefulWidget {
   final VoidCallback onPrevious, onNext, onBack, onFit, onJump;
   final ValueChanged<double> onZoom;
   final VoidCallback? onAnnotate, onFinishEditing;
+  final ValueChanged<int>? onAnnotatePage;
+  final List<int> annotationPages;
+  final ValueChanged<bool>? onMenuChanged;
   final Widget? annotationTools;
   final Widget bottom;
   final List<Widget> notices;
@@ -66,6 +72,10 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     _hoverAnimation,
   ]);
   final _barKey = GlobalKey();
+  final _arrangementMenu = MenuController(), _annotationMenu = MenuController();
+  ValueChanged<int>? _openAnnotationChoice;
+  final _arrangementFocus = FocusNode(debugLabel: 'spread arrangement');
+  final _annotationFocus = FocusNode(debugLabel: 'annotation page picker');
   bool _pinned = true, _hover = false, _menu = false, _measureScheduled = false;
   double _height = 56;
   void _pin(bool value) {
@@ -91,6 +101,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       if (hover != null) _hover = hover;
       if (menu != null) _menu = menu;
     });
+    if (menu != null) widget.onMenuChanged?.call(menu);
     final show = _hover || _menu || widget.editing;
     if (MediaQuery.disableAnimationsOf(context)) {
       _hoverAnimation.value = show ? 1 : 0;
@@ -132,6 +143,8 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
   void dispose() {
     _animation.dispose();
     _hoverAnimation.dispose();
+    _arrangementFocus.dispose();
+    _annotationFocus.dispose();
     super.dispose();
   }
 
@@ -232,132 +245,367 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     );
   }
 
+  Widget _group(BuildContext context, List<Widget> children) => DecoratedBox(
+    decoration: BoxDecoration(
+      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.all(2),
+      child: Row(mainAxisSize: MainAxisSize.min, children: children),
+    ),
+  );
+
   Widget _toolbar(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final labels = constraints.maxWidth >= 1000;
-      Widget icon(IconData icon, String tooltip, VoidCallback action) =>
-          IconButton(
-            tooltip: tooltip,
-            onPressed: widget.writing ? null : action,
-            icon: Icon(icon, size: 21),
-          );
-      return SizedBox(
-        key: const ValueKey('desktop-reader-toolbar'),
-        height: 56,
-        child: Row(
-          children: [
-            const SizedBox(width: 8),
-            icon(Icons.arrow_back, '返回目录', widget.onBack),
-            Expanded(
-              child: Text(
-                widget.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            icon(Icons.chevron_left, '上一页', widget.onPrevious),
-            TextButton(
-              onPressed: widget.writing ? null : widget.onJump,
-              child: Text(widget.pageLabel),
-            ),
-            icon(Icons.chevron_right, '下一页', widget.onNext),
-            const SizedBox(width: 8),
-            IconButton(
-              tooltip: '单页',
-              isSelected: widget.mode == ReaderViewMode.single,
-              onPressed: widget.writing || widget.editing
-                  ? null
-                  : () => widget.onMode(ReaderViewMode.single),
-              icon: const Icon(Icons.description_outlined),
-            ),
-            if (labels) const Text('单页', style: TextStyle(fontSize: 13)),
-            IconButton(
-              tooltip: '双页',
-              isSelected: widget.mode == ReaderViewMode.spread,
-              onPressed: widget.writing || widget.editing
-                  ? null
-                  : () => widget.onMode(ReaderViewMode.spread),
-              icon: const Icon(Icons.menu_book_outlined),
-            ),
-            if (labels) const Text('双页', style: TextStyle(fontSize: 13)),
-            PopupMenuButton<FirstPageArrangement>(
-              tooltip: '双页排列',
-              enabled: !widget.writing && !widget.editing,
-              onOpened: () => _overlayChanged(menu: true),
-              onCanceled: () => _overlayChanged(menu: false),
-              onSelected: (value) {
-                _overlayChanged(menu: false);
+      final disabled = widget.writing;
+      final navigation = _group(context, [
+        _ReaderBarButton(
+          icon: Icons.chevron_left,
+          tooltip: '上一页',
+          onPressed: disabled ? null : widget.onPrevious,
+        ),
+        _ReaderBarButton(
+          label: widget.pageLabel,
+          tooltip: '跳到页码',
+          onPressed: disabled ? null : widget.onJump,
+        ),
+        _ReaderBarButton(
+          icon: Icons.chevron_right,
+          tooltip: '下一页',
+          onPressed: disabled ? null : widget.onNext,
+        ),
+      ]);
+      final modes = SegmentedButton<ReaderViewMode>(
+        segments: const [
+          ButtonSegment(
+            value: ReaderViewMode.single,
+            icon: Icon(Icons.description_outlined, size: 18),
+            label: Text('单页'),
+          ),
+          ButtonSegment(
+            value: ReaderViewMode.spread,
+            icon: Icon(Icons.menu_book_outlined, size: 18),
+            label: Text('双页'),
+          ),
+          ButtonSegment(
+            value: ReaderViewMode.continuous,
+            icon: Icon(Icons.view_agenda_outlined, size: 18),
+            label: Text('连续'),
+          ),
+        ],
+        selected: {widget.mode},
+        showSelectedIcon: false,
+        style: SegmentedButton.styleFrom(
+          minimumSize: const Size(76, 44),
+          visualDensity: VisualDensity.standard,
+          textStyle: Theme.of(context).textTheme.labelLarge
+              ?.copyWith(fontSize: 13),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        onSelectionChanged: disabled || widget.editing
+            ? null
+            : (values) => widget.onMode(values.single),
+      );
+      final arrangement = MenuAnchor(
+        controller: _arrangementMenu,
+        childFocusNode: _arrangementFocus,
+        reservedPadding: const EdgeInsets.all(12),
+        style: MenuStyle(
+          backgroundColor: WidgetStatePropertyAll(
+            Theme.of(context).colorScheme.surface,
+          ),
+          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+          side: const WidgetStatePropertyAll(
+            BorderSide(color: Color(0xffd7dedb)),
+          ),
+          shape: WidgetStatePropertyAll(
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          ),
+          elevation: const WidgetStatePropertyAll(6),
+          shadowColor: const WidgetStatePropertyAll(Color(0x24000000)),
+          padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
+        ),
+        consumeOutsideTap: true,
+        alignmentOffset: const Offset(0, 8),
+        onOpen: () => _overlayChanged(menu: true),
+        onClose: () => _overlayChanged(menu: false),
+        menuChildren: [
+          for (final value in FirstPageArrangement.values)
+            MenuItemButton(
+              onPressed: () {
+                _arrangementMenu.close();
                 widget.onArrangement(value);
               },
-              icon: const Icon(Icons.arrow_drop_down, size: 19),
-              itemBuilder: (_) => [
-                for (final value in FirstPageArrangement.values)
-                  PopupMenuItem(
-                    value: value,
-                    child: Row(
-                      children: [
-                        Icon(
-                          widget.arrangement == value
-                              ? Icons.radio_button_checked
-                              : Icons.radio_button_unchecked,
-                          size: 19,
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          value == FirstPageArrangement.alone
-                              ? '第一页单独'
-                              : '第1、2页并排',
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
+              leadingIcon: Icon(
+                value == FirstPageArrangement.alone
+                    ? Icons.first_page
+                    : Icons.menu_book_outlined,
+                size: 20,
+              ),
+              trailingIcon: widget.arrangement == value
+                  ? const Icon(Icons.check, size: 18)
+                  : null,
+              child: Text(
+                value == FirstPageArrangement.alone ? '首页独立' : '首页并排',
+              ),
             ),
-            const SizedBox(width: 8),
-            IconButton(
-              tooltip: '连续',
-              isSelected: widget.mode == ReaderViewMode.continuous,
-              onPressed: widget.writing || widget.editing
-                  ? null
-                  : () => widget.onMode(ReaderViewMode.continuous),
-              icon: const Icon(Icons.view_agenda_outlined),
-            ),
-            if (labels) const Text('连续', style: TextStyle(fontSize: 13)),
-            icon(Icons.remove, '缩小', () => widget.onZoom(1 / 1.25)),
-            icon(Icons.fit_screen, '恢复整页', widget.onFit),
-            icon(Icons.add, '放大', () => widget.onZoom(1.25)),
-            if (widget.onAnnotate != null) ...[
-              const SizedBox(width: 8),
-              if (labels)
-                OutlinedButton.icon(
-                  onPressed: widget.writing ? null : widget.onAnnotate,
-                  icon: Icon(
-                    widget.editing ? Icons.check : Icons.edit_outlined,
-                    size: 18,
-                  ),
-                  label: Text(widget.editing ? '完成' : '批注'),
-                )
-              else
-                icon(
-                  widget.editing ? Icons.check : Icons.edit_outlined,
-                  widget.editing ? '完成批注' : '批注',
-                  widget.onAnnotate!,
-                ),
-            ],
-            icon(Icons.keyboard_arrow_up, '收起工具栏', () {
-              widget.onFinishEditing?.call();
-              _pin(false);
-            }),
-            const SizedBox(width: 8),
-          ],
+        ],
+        builder: (context, controller, _) => _ReaderBarButton(
+          label: widget.arrangement == FirstPageArrangement.alone
+              ? '首页独立'
+              : '首页并排',
+          icon: Icons.expand_more,
+          trailingIcon: true,
+          tooltip: '双页排列',
+          focusNode: _arrangementFocus,
+          onPressed: disabled || widget.editing
+              ? null
+              : () =>
+                    controller.isOpen ? controller.close() : controller.open(),
         ),
+      );
+      final zoom = _group(context, [
+        _ReaderBarButton(
+          icon: Icons.remove,
+          tooltip: '缩小',
+          onPressed: disabled ? null : () => widget.onZoom(1 / 1.25),
+        ),
+        _ReaderBarButton(
+          icon: Icons.fit_screen,
+          label: widget.mode == ReaderViewMode.continuous ? '适宽' : '整页',
+          tooltip: '恢复整页',
+          onPressed: disabled ? null : widget.onFit,
+        ),
+        _ReaderBarButton(
+          icon: Icons.add,
+          tooltip: '放大',
+          onPressed: disabled ? null : () => widget.onZoom(1.25),
+        ),
+      ]);
+      final annotate = MenuAnchor(
+        controller: _annotationMenu,
+        childFocusNode: _annotationFocus,
+        reservedPadding: const EdgeInsets.all(12),
+        style: MenuStyle(
+          backgroundColor: WidgetStatePropertyAll(
+            Theme.of(context).colorScheme.surface,
+          ),
+          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
+          side: const WidgetStatePropertyAll(
+            BorderSide(color: Color(0xffd7dedb)),
+          ),
+          shape: WidgetStatePropertyAll(
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          ),
+          elevation: const WidgetStatePropertyAll(6),
+          shadowColor: const WidgetStatePropertyAll(Color(0x24000000)),
+          padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
+        ),
+        consumeOutsideTap: true,
+        alignmentOffset: const Offset(0, 8),
+        onOpen: () {
+          _openAnnotationChoice = widget.onAnnotatePage;
+          _overlayChanged(menu: true);
+        },
+        onClose: () => _overlayChanged(menu: false),
+        menuChildren: [
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: SizedBox(
+              width: 300,
+              child: Row(
+                children: [
+                  for (var i = 0; i < widget.annotationPages.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 8),
+                    Expanded(
+                      child: MenuItemButton(
+                        key: ValueKey(
+                          'annotate-page-${widget.annotationPages[i]}',
+                        ),
+                        style: ButtonStyle(
+                          minimumSize: const WidgetStatePropertyAll(
+                            Size(0, 88),
+                          ),
+                          backgroundColor: WidgetStatePropertyAll(
+                            Theme.of(context).colorScheme.surfaceContainerLow,
+                          ),
+                          shape: WidgetStatePropertyAll(
+                            RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                        ),
+                        onPressed: () {
+                          final choose = _openAnnotationChoice;
+                          _annotationMenu.close();
+                          choose?.call(widget.annotationPages[i]);
+                        },
+                        child: SizedBox(
+                          width: double.infinity,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.description_outlined, size: 26),
+                              const SizedBox(height: 8),
+                              Text(
+                                '${i == 0 ? '左页' : '右页'} · 第${widget.annotationPages[i]}页',
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+        builder: (context, controller, _) => _ReaderBarButton(
+          icon: widget.editing ? Icons.check : Icons.edit_outlined,
+          label: widget.editing ? '完成' : '批注',
+          focusNode: _annotationFocus,
+          tooltip: widget.editing ? '完成批注' : '批注',
+          filled: true,
+          onPressed: disabled
+              ? null
+              : () {
+                  if (!widget.editing &&
+                      widget.annotationPages.length == 2 &&
+                      widget.onAnnotatePage != null) {
+                    controller.isOpen ? controller.close() : controller.open();
+                  } else {
+                    widget.onAnnotate?.call();
+                  }
+                },
+        ),
+      );
+      final back = _ReaderBarButton(
+        icon: Icons.arrow_back,
+        tooltip: '返回目录',
+        onPressed: widget.onBack,
+      );
+      final collapse = _ReaderBarButton(
+        icon: Icons.keyboard_arrow_up,
+        tooltip: '收起工具栏',
+        onPressed: () {
+          _arrangementMenu.close();
+          _annotationMenu.close();
+          widget.onFinishEditing?.call();
+          _pin(false);
+        },
+      );
+      final title = Text(
+        widget.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      );
+      final controls = [
+        navigation,
+        modes,
+        if (widget.mode == ReaderViewMode.spread) arrangement,
+        zoom,
+      ];
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: constraints.maxWidth >= 1120
+            ? Row(
+                children: [
+                  back,
+                  const SizedBox(width: 8),
+                  Expanded(child: title),
+                  const SizedBox(width: 16),
+                  for (final group in controls) ...[
+                    group,
+                    const SizedBox(width: 10),
+                  ],
+                  if (widget.onAnnotate != null) annotate,
+                  collapse,
+                ],
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      back,
+                      const SizedBox(width: 8),
+                      Expanded(child: title),
+                      if (widget.onAnnotate != null) annotate,
+                      collapse,
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: controls,
+                  ),
+                ],
+              ),
       );
     },
   );
+}
+
+class _ReaderBarButton extends StatelessWidget {
+  const _ReaderBarButton({
+    this.icon,
+    this.label,
+    required this.tooltip,
+    this.onPressed,
+    this.filled = false,
+    this.trailingIcon = false,
+    this.focusNode,
+  });
+  final IconData? icon;
+  final String? label;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final bool filled, trailingIcon;
+  final FocusNode? focusNode;
+  @override
+  Widget build(BuildContext context) {
+    final contents = <Widget>[
+      if (icon != null && !trailingIcon) Icon(icon, size: 19),
+      if (icon != null && label != null && !trailingIcon)
+        const SizedBox(width: 6),
+      if (label != null) Text(label!),
+      if (icon != null && trailingIcon) ...[
+        const SizedBox(width: 5),
+        Icon(icon, size: 18),
+      ],
+    ];
+    final style = TextButton.styleFrom(
+      minimumSize: const Size(44, 44),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: EdgeInsets.symmetric(horizontal: label == null ? 10 : 12),
+      textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 13),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    );
+    return Tooltip(
+      message: tooltip,
+      child: filled
+          ? FilledButton.tonal(
+              focusNode: focusNode,
+              onPressed: onPressed,
+              style: style,
+              child: Row(mainAxisSize: MainAxisSize.min, children: contents),
+            )
+          : TextButton(
+              focusNode: focusNode,
+              onPressed: onPressed,
+              style: style,
+              child: Row(mainAxisSize: MainAxisSize.min, children: contents),
+            ),
+    );
+  }
 }
 
 /// A spread has one readiness boundary, while each real page retains its own

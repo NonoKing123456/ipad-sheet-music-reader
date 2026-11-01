@@ -12,6 +12,7 @@ import 'storage.dart';
 import 'collection.dart';
 import 'collection_replica.dart';
 import 'signing_status.dart';
+import 'page_metadata.dart';
 
 class SyncProtocolException implements Exception {
   const SyncProtocolException(this.message, [this.status, this.code]);
@@ -294,6 +295,7 @@ class SyncServer {
   final _catalogTransfers = <String, _CatalogTransfer>{};
   int get activeCatalogSnapshots => _catalogTransfers.length;
   Future<void> Function(String peerId, SigningDeviceStatus status, DateTime receivedAt)? onSigningStatus;
+  Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)? onPageMetadata;
   Set<String> get authenticatedPeerIds => _peerIds(_state);
   static Set<String> _peerIds(Map<String, dynamic> state) => {
     for (final entry in asMap(state['peers']).entries)
@@ -454,6 +456,15 @@ class SyncServer {
       } else if (request.method == 'GET' && path == '/state-capabilities') {
         await _reply(request.response,
             {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
+      } else if (request.method == 'POST' && path == '/collection/page-metadata' && onPageMetadata != null) {
+        if (request.contentLength > 8192) throw const SyncProtocolException('Metadata request too large.', 413);
+        final body = await _readBody(request, ioTimeout, 8192);
+        final raw = body['items'];
+        if (raw is! List || raw.isEmpty || raw.length > 16) throw const FormatException('Invalid metadata batch.');
+        final keys = raw.map((e) => PageMetadataKey.fromJson(asMap(e))).toSet().toList();
+        final result = await onPageMetadata!(keys);
+        await _reply(request.response, {'items': [for (final key in keys)
+          {...key.toJson(), 'pages': result[key]}]});
       } else if (collection != null &&
           request.method == 'GET' &&
           path == '/v2/catalog-page') {
@@ -835,6 +846,29 @@ class SyncClient {
       return body['accepted'] == true;
     } on SyncProtocolException catch (error) {
       if (error.status == 404) return false;
+      rethrow;
+    } finally { http.close(force: true); }
+  }
+
+  /// Optional page counts only; a legacy peer's 404 means unknown.
+  Future<Map<PageMetadataKey, int>> pageMetadata(List<PageMetadataKey> keys) async {
+    if (keys.isEmpty || keys.length > 16) throw ArgumentError('Metadata batch size.');
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    try {
+      final response = await _request(http, 'POST', '/collection/page-metadata',
+          body: {'items': keys.map((key) => key.toJson()).toList()});
+      final body = await _readBody(response, ioTimeout, 16384);
+      final raw = body['items'];
+      if (raw is! List || raw.length > keys.length) throw const FormatException('Invalid metadata reply.');
+      final allowed = keys.toSet(), result = <PageMetadataKey, int>{};
+      for (final item in raw) {
+        final value = asMap(item), key = PageMetadataKey.fromJson(value), count = value['pages'];
+        if (!allowed.contains(key)) throw const FormatException('Unexpected metadata item.');
+        if (count is int && count > 0 && count <= 100000) result[key] = count;
+      }
+      return result;
+    } on SyncProtocolException catch (error) {
+      if (error.status == 404) return {};
       rethrow;
     } finally { http.close(force: true); }
   }

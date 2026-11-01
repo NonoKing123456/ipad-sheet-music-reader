@@ -1,6 +1,8 @@
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
+
 final class _FileIdInfo extends Struct {
   @Uint64()
   external int volume;
@@ -39,6 +41,42 @@ final _info = _kernel
     >('GetFileInformationByHandleEx');
 final _close = _kernel
     .lookupFunction<Int32 Function(IntPtr), int Function(int)>('CloseHandle');
+final _attributes = _kernel
+    .lookupFunction<
+      Uint32 Function(Pointer<Uint16>),
+      int Function(Pointer<Uint16>)
+    >('GetFileAttributesW');
+
+/// Metadata-only check before optional PDF inspection; never hydrate a cloud
+/// placeholder merely to decorate a directory row.
+bool attributesAllowLocalMetadata(int value) =>
+    value != 0xffffffff && value & (0x10 | 0x1000 | 0x40000 | 0x400000) == 0;
+
+Future<bool> isLocallyReadableFile(String path) async {
+  if (!Platform.isWindows) {
+    return await FileSystemEntity.type(path, followLinks: false) ==
+        FileSystemEntityType.file;
+  }
+  final native = path.length < 248 || path.startsWith('\\\\?\\')
+      ? path
+      : path.startsWith('\\\\')
+      ? '\\\\?\\UNC\\${path.substring(2)}'
+      : '\\\\?\\$path';
+  if (native.length > 32767) return false;
+  final name = _allocate(0x40, (native.length + 1) * 2).cast<Uint16>();
+  if (name == nullptr) return false;
+  try {
+    name.asTypedList(native.length + 1).setAll(0, native.codeUnits);
+    final value = _attributes(name);
+    if (!attributesAllowLocalMetadata(value)) return false;
+    // REPARSE_POINT also covers fully hydrated cloud files. Dart's no-follow
+    // type labels every reparse tag as a link; compare the resolved path instead
+    // so name-surrogate links/junction escapes remain excluded.
+    return p.equals(p.absolute(path), await File(path).resolveSymbolicLinks());
+  } finally {
+    _free(name.cast());
+  }
+}
 
 /// Attribute/ID access only: never hashes or hydrates content. Unsupported
 /// volumes return null instead of guessing identity from names or size/mtime.
