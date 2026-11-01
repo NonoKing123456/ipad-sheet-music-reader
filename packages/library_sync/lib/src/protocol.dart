@@ -83,7 +83,8 @@ const _catalogMaxBytes = 128 * 1024 * 1024;
 class _CatalogTransfer {
   _CatalogTransfer(this.peerId, CollectionIndex current)
       : token = randomId(),
-        index = CollectionIndex(id: current.id,
+        index = CollectionIndex(
+            id: current.id,
             legacyLibraryId: current.legacyLibraryId,
             sources: List.unmodifiable(current.sources),
             entries: List.unmodifiable(current.entries),
@@ -104,21 +105,29 @@ class _CatalogTransfer {
       1 + index.sources.length + folders.length + index.entries.length;
 
   Map<String, Object?> _record(int offset) {
-    if (offset == 0) return {
-      'kind': 'header', 'id': index.id,
-      'legacyLibraryId': index.legacyLibraryId,
-      'sources': index.sources.length, 'folders': folders.length,
-      'entries': index.entries.length,
-    };
+    if (offset == 0)
+      return {
+        'kind': 'header',
+        'id': index.id,
+        'legacyLibraryId': index.legacyLibraryId,
+        'sources': index.sources.length,
+        'folders': folders.length,
+        'entries': index.entries.length,
+      };
     var i = offset - 1;
-    if (i < index.sources.length) return {
-      'kind': 'source', 'value': index.sources[i].toJson(),
-      'hasFolders': index.folders.containsKey(index.sources[i].id),
-    };
+    if (i < index.sources.length)
+      return {
+        'kind': 'source',
+        'value': index.sources[i].toJson(),
+        'hasFolders': index.folders.containsKey(index.sources[i].id),
+      };
     i -= index.sources.length;
-    if (i < folders.length) return {
-      'kind': 'folder', 'sourceId': folders[i].$1, 'path': folders[i].$2,
-    };
+    if (i < folders.length)
+      return {
+        'kind': 'folder',
+        'sourceId': folders[i].$1,
+        'path': folders[i].$2,
+      };
     return {
       'kind': 'entry',
       'value': index.entries[i - folders.length].toJson(),
@@ -174,13 +183,21 @@ class _CatalogAccumulator {
     final declared = page['totalRecords'];
     final records = page['records'] as List;
     final next = page['nextOffset'];
-    if (page['protocol'] != 2 || receivedToken is! String ||
-        receivedToken.isEmpty || receivedToken.length > 128 ||
-        page['offset'] != offset || declared is! int || declared < 1 ||
-        declared > _catalogMaxRecords || records.isEmpty ||
-        next is! int || next != offset + records.length || next > declared ||
+    if (page['protocol'] != 2 ||
+        receivedToken is! String ||
+        receivedToken.isEmpty ||
+        receivedToken.length > 128 ||
+        page['offset'] != offset ||
+        declared is! int ||
+        declared < 1 ||
+        declared > _catalogMaxRecords ||
+        records.isEmpty ||
+        next is! int ||
+        next != offset + records.length ||
+        next > declared ||
         page['complete'] != (next == declared) ||
-        (token != null && (token != receivedToken || totalRecords != declared))) {
+        (token != null &&
+            (token != receivedToken || totalRecords != declared))) {
       throw const FormatException('Inconsistent catalogue page.');
     }
     token ??= receivedToken;
@@ -196,24 +213,32 @@ class _CatalogAccumulator {
         sourceCount = record['sources'] as int;
         folderCount = record['folders'] as int;
         entryCount = record['entries'] as int;
-        if (sourceCount < 0 || folderCount < 0 || entryCount < 0 ||
+        if (sourceCount < 0 ||
+            folderCount < 0 ||
+            entryCount < 0 ||
             1 + sourceCount + folderCount + entryCount != totalRecords) {
           throw const FormatException('Invalid catalogue record totals.');
         }
       } else if (offset <= sourceCount) {
-        if (record['kind'] != 'source') throw const FormatException('Expected source.');
+        if (record['kind'] != 'source')
+          throw const FormatException('Expected source.');
         final source = LibrarySourceInfo.fromJson(asMap(record['value']));
         sources.add(source);
         if (record['hasFolders'] == true) folders[source.id] = [];
       } else if (offset <= sourceCount + folderCount) {
-        if (record['kind'] != 'folder') throw const FormatException('Expected folder.');
-        final source = record['sourceId'] as String, path = record['path'] as String;
-        if (!folders.containsKey(source)) throw const FormatException('Unknown folder source.');
-        if (!folderKeys.add((source, path))) throw const FormatException('Duplicate folder.');
+        if (record['kind'] != 'folder')
+          throw const FormatException('Expected folder.');
+        final source = record['sourceId'] as String,
+            path = record['path'] as String;
+        if (!folders.containsKey(source))
+          throw const FormatException('Unknown folder source.');
+        if (!folderKeys.add((source, path)))
+          throw const FormatException('Duplicate folder.');
         validatePortablePath(path, folder: true);
         folders[source]!.add(path);
       } else {
-        if (record['kind'] != 'entry') throw const FormatException('Expected entry.');
+        if (record['kind'] != 'entry')
+          throw const FormatException('Expected entry.');
         entries.add(CatalogItem.fromJson(asMap(record['value'])));
       }
       offset++;
@@ -222,13 +247,19 @@ class _CatalogAccumulator {
   }
 
   CollectionIndex finish() {
-    if (offset != totalRecords || id == null ||
-        sources.length != sourceCount || folderKeys.length != folderCount ||
+    if (offset != totalRecords ||
+        id == null ||
+        sources.length != sourceCount ||
+        folderKeys.length != folderCount ||
         entries.length != entryCount) {
       throw const FormatException('Incomplete catalogue.');
     }
-    return CollectionIndex(id: id!, legacyLibraryId: legacyLibraryId,
-        sources: sources, entries: entries, folders: folders);
+    return CollectionIndex(
+        id: id!,
+        legacyLibraryId: legacyLibraryId,
+        sources: sources,
+        entries: entries,
+        folders: folders);
   }
 }
 
@@ -242,8 +273,15 @@ bool _constantEqual(String a, String b) {
 }
 
 class SyncServer {
-  SyncServer._(this.source, this.readerStore, this.stateDirectory, this._lease,
-      this._state, this.ioTimeout, this.maxJsonBytes, this.collectionSource,
+  SyncServer._(
+      this.source,
+      this.readerStore,
+      this.stateDirectory,
+      this._lease,
+      this._state,
+      this.ioTimeout,
+      this.maxJsonBytes,
+      this.collectionSource,
       this.catalogSnapshotTtl);
   final LibrarySource source;
   final CollectionLibrarySource? collectionSource;
@@ -276,7 +314,8 @@ class SyncServer {
       Duration ioTimeout = const Duration(seconds: 30),
       Duration catalogSnapshotTtl = const Duration(minutes: 2),
       int maxJsonBytes = 16 * 1024 * 1024}) async {
-    if (catalogSnapshotTtl <= Duration.zero) throw ArgumentError.value(catalogSnapshotTtl);
+    if (catalogSnapshotTtl <= Duration.zero)
+      throw ArgumentError.value(catalogSnapshotTtl);
     final dir = p.normalize(p.absolute(stateDirectory));
     if (source is CatalogLibrarySource &&
         (p.equals(source.catalog.rootPath, dir) ||
@@ -389,7 +428,8 @@ class SyncServer {
       final peerId = _authenticate(request);
       final collection = collectionSource;
       if (request.method == 'GET' && path == '/state-capabilities') {
-        await _reply(request.response, {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
+        await _reply(request.response,
+            {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
       } else if (collection != null &&
           request.method == 'GET' &&
           path == '/v2/catalog-page') {
@@ -410,7 +450,9 @@ class SyncServer {
           path == '/v2/object') {
         final id = request.uri.queryParameters['entryId'] ?? '';
         final revision = request.uri.queryParameters['revisionId'] ?? '';
-        final item = (await collection.index()).entry(id);
+        final item = collection is CollectionObjectLookup
+            ? await (collection as CollectionObjectLookup).itemForObject(id)
+            : (await collection.index()).entry(id);
         if (item == null ||
             item.missing ||
             item.hash == null ||
@@ -455,7 +497,8 @@ class SyncServer {
                   ? 'Source library is not ready for sync.'
                   : 'Sync operation failed.',
               if (error is LibrarySourceNotReady) 'code': 'source_not_ready',
-              if (error is SyncProtocolException && error.code == 'reader_upgrade_required')
+              if (error is SyncProtocolException &&
+                  error.code == 'reader_upgrade_required')
                 'code': 'reader_upgrade_required',
             },
             status: error is LibrarySourceNotReady
@@ -470,10 +513,13 @@ class SyncServer {
   }
 
   void _requireReaderCapability(HttpRequest request) {
-    final schema = int.tryParse(request.headers.value('x-reader-state-max-schema') ?? '');
+    final schema =
+        int.tryParse(request.headers.value('x-reader-state-max-schema') ?? '');
     if (schema == null || schema < ReaderSnapshot.schemaVersion) {
-      throw const SyncProtocolException('Update both readers before syncing annotations.',
-          426, 'reader_upgrade_required');
+      throw const SyncProtocolException(
+          'Update both readers before syncing annotations.',
+          426,
+          'reader_upgrade_required');
     }
   }
 
@@ -486,12 +532,16 @@ class SyncServer {
     }
     _CatalogTransfer? transfer;
     if (token == null) {
-      if (offset != 0) throw const SyncProtocolException('Missing snapshot.', 409);
+      if (offset != 0)
+        throw const SyncProtocolException('Missing snapshot.', 409);
       final index = await source.index();
-      final count = 1 + index.sources.length + index.entries.length +
+      final count = 1 +
+          index.sources.length +
+          index.entries.length +
           index.folders.values.fold<int>(0, (n, paths) => n + paths.length);
       if (count > _catalogMaxRecords) {
-        throw const SyncProtocolException('Catalogue exceeds record budget.', 413);
+        throw const SyncProtocolException(
+            'Catalogue exceeds record budget.', 413);
       }
       // At most one outstanding snapshot per peer and two for the server.
       for (final old in _catalogTransfers.values.toList()) {
@@ -519,7 +569,8 @@ class SyncServer {
     if (transfer.nextOffset == transfer.totalRecords) {
       _releaseCatalog(transfer);
     } else {
-      transfer.expiry = Timer(catalogSnapshotTtl, () => _releaseCatalog(transfer!));
+      transfer.expiry =
+          Timer(catalogSnapshotTtl, () => _releaseCatalog(transfer!));
     }
     request.response.headers.contentType = ContentType.json;
     request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
@@ -705,7 +756,8 @@ class SyncClient {
     request.followRedirects = false;
     request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
     if (path == '/state' || path == '/ack') {
-      request.headers.set('x-reader-state-max-schema', ReaderSnapshot.schemaVersion);
+      request.headers
+          .set('x-reader-state-max-schema', ReaderSnapshot.schemaVersion);
     }
     if (body != null) {
       final bytes = utf8.encode(jsonEncode(body));
@@ -718,11 +770,14 @@ class SyncClient {
     final response = await request.close().timeout(ioTimeout);
     if (response.statusCode != 200) {
       String? code;
-      if (response.statusCode == 426 || (readLibraryFailure && response.statusCode == 503)) {
+      if (response.statusCode == 426 ||
+          (readLibraryFailure && response.statusCode == 503)) {
         try {
           final error = await _readBody(response, ioTimeout, maxJsonBytes);
           if (error['code'] == 'source_not_ready') code = 'source_not_ready';
-          if (response.statusCode == 426 && error['code'] == 'reader_upgrade_required') code = 'reader_upgrade_required';
+          if (response.statusCode == 426 &&
+              error['code'] == 'reader_upgrade_required')
+            code = 'reader_upgrade_required';
         } on FormatException {
           // Malformed/unknown error bodies do not grant a typed source failure.
         } on TypeError {
@@ -746,8 +801,8 @@ class SyncClient {
           ioTimeout,
           maxJsonBytes);
 
-  Future<CollectionIndex> _collectionIndex(HttpClient http,
-      SyncCancellation? cancellation) async {
+  Future<CollectionIndex> _collectionIndex(
+      HttpClient http, SyncCancellation? cancellation) async {
     final received = _CatalogAccumulator();
     while (true) {
       cancellation?.check();
@@ -861,8 +916,12 @@ class SyncClient {
         if (e.status != 404) rethrow;
         // A v1 complete-manifest sync cannot promise a scoped download. Do not
         // turn one set-list request into an unexpected whole-library transfer.
-        if (onlyEntryIds != null) return const LibrarySyncResult(
-          LibrarySyncStatus.partial, 0, 'Scoped preparation requires a v2 computer', LibrarySyncFailure.sourceNotReady);
+        if (onlyEntryIds != null)
+          return const LibrarySyncResult(
+              LibrarySyncStatus.partial,
+              0,
+              'Scoped preparation requires a v2 computer',
+              LibrarySyncFailure.sourceNotReady);
         final result = await syncLibrary(replica.objects,
             cancellation: cancellation, onProgress: onProgress);
         if (result.status == LibrarySyncStatus.complete)
@@ -872,7 +931,10 @@ class SyncClient {
       cancellation?.check();
       await replica.updateIndex(index);
       final targets = index.entries
-          .where((e) => !e.missing && (onlyEntryIds == null || onlyEntryIds.contains(e.entryId)) && replica.selection.includes(e))
+          .where((e) =>
+              !e.missing &&
+              (onlyEntryIds == null || onlyEntryIds.contains(e.entryId)) &&
+              replica.selection.includes(e))
           .toList();
       final eligible = targets.map((item) => item.entryId).toSet();
       final unavailable = onlyEntryIds?.difference(eligible).length ?? 0;
@@ -987,13 +1049,18 @@ class SyncClient {
         capability = await _json(http, '/state-capabilities');
       } on SyncProtocolException catch (error) {
         if (error.status != 404) rethrow;
-        throw const SyncProtocolException('Update both readers before syncing annotations.',
-            426, 'reader_upgrade_required');
+        throw const SyncProtocolException(
+            'Update both readers before syncing annotations.',
+            426,
+            'reader_upgrade_required');
       }
       if (capability['readerStateMaxSchema'] is! int ||
-          (capability['readerStateMaxSchema'] as int) < ReaderSnapshot.schemaVersion) {
-        throw const SyncProtocolException('Update both readers before syncing annotations.',
-            426, 'reader_upgrade_required');
+          (capability['readerStateMaxSchema'] as int) <
+              ReaderSnapshot.schemaVersion) {
+        throw const SyncProtocolException(
+            'Update both readers before syncing annotations.',
+            426,
+            'reader_upgrade_required');
       }
       final state = (await readJson(_statePath))!;
       var pending = state['pending'] == null ? null : asMap(state['pending']);

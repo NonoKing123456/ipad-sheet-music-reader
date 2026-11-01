@@ -14,9 +14,38 @@ typedef FileAccessProbe = Future<FileAccess> Function(
 typedef FileIdentityResolver = Future<String?> Function(
     String absolutePath, FileStat stat);
 
+/// In-memory publication identity, never part of persisted or wire schemas.
+class CatalogPublication {
+  const CatalogPublication._(this.rootPath, this.statePath, this.generation,
+      this._primary, this._backup);
+  final String rootPath, statePath;
+  final int generation;
+  final (FileSystemEntityType, int, DateTime, DateTime, String?)? _primary,
+      _backup;
+  bool isSameAs(CatalogPublication other) =>
+      rootPath == other.rootPath &&
+      statePath == other.statePath &&
+      generation == other.generation &&
+      _primary == other._primary &&
+      _backup == other._backup;
+  bool _matches(CatalogPublication other) =>
+      _primary != null && isSameAs(other);
+}
+
+class CatalogMaterialization {
+  const CatalogMaterialization._(
+      this.entry, this.base, this.after, this.savedUtc, this.fallback);
+  final LibraryEntry entry;
+  final CatalogPublication base, after;
+  final DateTime savedUtc;
+
+  /// A different persisted base requires a complete validated refresh.
+  final LibraryCatalog? fallback;
+}
+
 class LibraryCatalog {
   LibraryCatalog._(this.rootPath, this.statePath, this.fileAccessProbe,
-      this.fileIdentityResolver)
+      this.fileIdentityResolver, this.stateIdentityResolver)
       : _snapshot = LibrarySnapshot(
           rootPath: rootPath,
           generation: 0,
@@ -40,7 +69,12 @@ class LibraryCatalog {
   final String statePath;
   final FileAccessProbe? fileAccessProbe;
   final FileIdentityResolver? fileIdentityResolver;
+  final FileIdentityResolver? stateIdentityResolver;
   LibrarySnapshot _snapshot;
+  (FileSystemEntityType, int, DateTime, DateTime, String?)? _stateStamp;
+  (FileSystemEntityType, int, DateTime, DateTime, String?)? _backupStamp;
+  LibrarySnapshot? _listedSnapshot;
+  final _folderListings = <String, FolderListing>{};
   final _storageWarnings = <String>[];
   int contentHashOperations = 0, contentHashBytesRead = 0;
 
@@ -56,6 +90,8 @@ class LibraryCatalog {
   }
 
   LibrarySnapshot get snapshot => _snapshot;
+  CatalogPublication get publication => CatalogPublication._(
+      rootPath, statePath, _snapshot.generation, _stateStamp, _backupStamp);
   List<String> get storageWarnings => List.unmodifiable(_storageWarnings);
 
   /// The source tree is read-only. All bookkeeping lives outside [rootPath].
@@ -64,6 +100,7 @@ class LibraryCatalog {
     required String statePath,
     FileAccessProbe? fileAccessProbe,
     FileIdentityResolver? fileIdentityResolver,
+    FileIdentityResolver? stateIdentityResolver,
   }) async {
     final root = await _canonicalize(rootPath);
     final state = await _canonicalize(statePath);
@@ -71,8 +108,8 @@ class LibraryCatalog {
       throw ArgumentError.value(statePath, 'statePath',
           'Catalogue state must be outside the source.');
     }
-    final catalog =
-        LibraryCatalog._(root, state, fileAccessProbe, fileIdentityResolver);
+    final catalog = LibraryCatalog._(root, state, fileAccessProbe,
+        fileIdentityResolver, stateIdentityResolver);
     await catalog.reload();
     return catalog;
   }
@@ -86,15 +123,27 @@ class LibraryCatalog {
   /// rechecks their bytes, including same-size/same-timestamp replacements.
   /// Known deferred files remain deferred even during full verification.
   Future<ScanResult> rescan(
-          {bool verifyAll = false, bool metadataOnly = false}) =>
+          {bool verifyAll = false,
+          bool metadataOnly = false,
+          bool Function()? shouldYield}) =>
       _withLock(() async {
-        final disk = await _loadSnapshot();
+        void checkpoint() {
+          if (shouldYield?.call() == true) throw const CatalogScanYielded();
+        }
+
+        checkpoint();
+        final disk = await matchesDisk() ? _snapshot : await _loadSnapshot();
         if (disk.generation != _snapshot.generation) {
           throw const ConcurrentCatalogWriteException(
               'The catalogue changed elsewhere; reload before rescanning.');
         }
-        final result =
-            await _scan(verifyAll: verifyAll, metadataOnly: metadataOnly);
+        _snapshot = disk;
+        checkpoint();
+        final result = await _scan(
+            verifyAll: verifyAll,
+            metadataOnly: metadataOnly,
+            checkpoint: checkpoint);
+        checkpoint();
         await _saveSnapshot(result.snapshot);
         _snapshot = result.snapshot;
         return result;
@@ -102,57 +151,142 @@ class LibraryCatalog {
 
   /// Materialize one selected file without enumerating or hashing its siblings.
   /// Filling an unchanged unknown revision preserves its identity and references.
-  Future<LibraryEntry> materialize(String entryId) => _withLock(() async {
-        final disk = await _loadSnapshot();
-        if (disk.generation != _snapshot.generation) {
-          _snapshot = disk;
-        }
-        final entry = _snapshot.entryById(entryId);
-        if (entry == null || entry.status != EntryStatus.available) {
-          throw StateError('Unknown or missing selected file.');
-        }
-        final path = await validatedPathFor(entry);
-        final file = File(path), before = await File(path).stat();
-        final current = entry.currentRevision;
-        if (current.contentHash != null &&
-            before.size == current.size &&
-            before.modified.toUtc() == current.modifiedUtc &&
-            entry.availability == ContentAvailability.ready) return entry;
-        if (await fileAccessProbe?.call(path, before) == FileAccess.deferred) {
-          throw StateError('Selected file is not available on this computer.');
-        }
-        final hash = await _hashFile(file);
-        final after = await file.stat();
-        if (after.type != FileSystemEntityType.file ||
-            after.size != before.size ||
-            after.modified != before.modified ||
-            await validatedPathFor(entry) != path) {
-          throw const FileSystemException(
-              'Selected file changed while hashing.');
-        }
-        final now = DateTime.now().toUtc();
-        final updated = _updateEntry(
-            entry,
-            _ObservedFile(
-                entry.relativePath,
-                after.size,
-                after.modified.toUtc(),
-                hash,
-                ContentAvailability.ready,
-                entry.platformFileId),
-            now);
-        final next = LibrarySnapshot(
-            rootPath: rootPath,
-            generation: _snapshot.generation + 1,
-            entries: [
-              for (final e in _snapshot.entries) e.id == entry.id ? updated : e
-            ],
-            folders: _snapshot.folders,
-            savedUtc: now);
-        await _saveSnapshot(next);
-        _snapshot = next;
-        return updated;
-      });
+  Future<LibraryEntry> materialize(String entryId) async {
+    return (await _materialize(entryId)).$1;
+  }
+
+  Future<(LibraryEntry, CatalogPublication)> _materialize(
+      String entryId) async {
+    final ready = await readyIfUnchanged(entryId);
+    if (ready != null) return (ready, publication);
+    return _withLock(() async {
+      final disk = await matchesDisk() ? _snapshot : await _loadSnapshot();
+      _snapshot = disk;
+      final base = publication;
+      final entry = _snapshot.entryById(entryId);
+      if (entry == null || entry.status != EntryStatus.available) {
+        throw StateError('Unknown or missing selected file.');
+      }
+      final path = await validatedPathFor(entry);
+      final file = File(path), before = await File(path).stat();
+      final current = entry.currentRevision;
+      if (current.contentHash != null &&
+          before.size == current.size &&
+          before.modified.toUtc() == current.modifiedUtc &&
+          entry.availability == ContentAvailability.ready) return (entry, base);
+      if (await fileAccessProbe?.call(path, before) == FileAccess.deferred) {
+        throw StateError('Selected file is not available on this computer.');
+      }
+      final hash = await _hashFile(file);
+      final after = await file.stat();
+      if (after.type != FileSystemEntityType.file ||
+          after.size != before.size ||
+          after.modified != before.modified ||
+          await validatedPathFor(entry) != path) {
+        throw const FileSystemException('Selected file changed while hashing.');
+      }
+      final now = DateTime.now().toUtc();
+      final updated = _updateEntry(
+          entry,
+          _ObservedFile(entry.relativePath, after.size, after.modified.toUtc(),
+              hash, ContentAvailability.ready, entry.platformFileId),
+          now);
+      final next = LibrarySnapshot(
+          rootPath: rootPath,
+          generation: _snapshot.generation + 1,
+          entries: [
+            for (final e in _snapshot.entries) e.id == entry.id ? updated : e
+          ],
+          folders: _snapshot.folders,
+          savedUtc: now);
+      await _saveSnapshot(next);
+      _snapshot = next;
+      return (updated, base);
+    });
+  }
+
+  Future<CatalogMaterialization> materializeForPublication(
+      String id, CatalogPublication expected) async {
+    final (entry, base) = await _materialize(id);
+    return CatalogMaterialization._(entry, base, publication,
+        _snapshot.savedUtc, base._matches(expected) ? null : this);
+  }
+
+  /// Apply only a worker-proven one-entry commit from our exact persisted base.
+  /// A newer disk generation makes the patch unusable, rather than rolling it
+  /// back or publishing a mixture of two catalogue generations.
+  Future<bool> applyMaterialization(CatalogMaterialization patch) async {
+    if (patch.fallback != null ||
+        !publication._matches(patch.base) ||
+        patch.after.generation < patch.base.generation ||
+        patch.after.generation > patch.base.generation + 1 ||
+        patch.after._primary != await _readStateStamp() ||
+        (patch.after._backup != null &&
+            patch.after._backup != await _readStateStamp('$statePath.backup')))
+      return false;
+    final old = _snapshot.entryById(patch.entry.id);
+    if (!publication._matches(patch.base)) return false;
+    if (old == null ||
+        old.relativePath != patch.entry.relativePath ||
+        old.status != EntryStatus.available ||
+        patch.entry.status != old.status) return false;
+    if (patch.after._matches(patch.base)) return true;
+    final before = _snapshot;
+    _snapshot = before.replacingEntry(patch.entry,
+        generation: patch.after.generation, savedUtc: patch.savedUtc);
+    if (identical(_listedSnapshot, before)) {
+      final parent = _relativeKey(_parentPath(old.relativePath));
+      final listing = _folderListings[parent];
+      if (listing != null) {
+        _folderListings[parent] =
+            FolderListing(folders: listing.folders, entries: [
+          for (final entry in listing.entries)
+            entry.id == patch.entry.id ? patch.entry : entry
+        ]);
+      }
+      _listedSnapshot = _snapshot;
+    }
+    _stateStamp = patch.after._primary;
+    _backupStamp = patch.after._backup;
+    return true;
+  }
+
+  /// A known revision needs no catalogue write. Check the actual source path
+  /// and metadata at each read boundary, and reject this cache if the persisted
+  /// catalogue was atomically replaced by a scan or another process.
+  Future<LibraryEntry?> readyIfUnchanged(String entryId) async {
+    final captured = _snapshot;
+    final entry = captured.entryById(entryId);
+    if (entry == null ||
+        entry.status != EntryStatus.available ||
+        entry.availability != ContentAvailability.ready ||
+        entry.currentRevision.contentHash == null ||
+        !await matchesDisk()) {
+      return null;
+    }
+    final path = await validatedPathFor(entry);
+    final stat = await File(path).stat();
+    final revision = entry.currentRevision;
+    if (stat.size != revision.size ||
+        stat.modified.toUtc() != revision.modifiedUtc ||
+        !identical(captured, _snapshot) ||
+        !await matchesDisk()) return null;
+    return entry;
+  }
+
+  Future<bool> matchesDisk() async =>
+      _stateStamp != null &&
+      _stateStamp == await _readStateStamp() &&
+      (_backupStamp == null ||
+          _backupStamp == await _readStateStamp('$statePath.backup'));
+
+  Future<(FileSystemEntityType, int, DateTime, DateTime, String?)>
+      _readStateStamp([String? path]) async {
+    path ??= statePath;
+    final stat = await File(path).stat();
+    final identity = await stateIdentityResolver?.call(path, stat);
+    return (stat.type, stat.size, stat.modified, stat.changed, identity);
+  }
 
   /// Revalidate the actual path at read boundaries; no links outside the source.
   Future<String> validatedPathFor(LibraryEntry entry) async {
@@ -195,19 +329,32 @@ class LibraryCatalog {
 
   FolderListing listFolder([String relativePath = '']) {
     final folder = _relativeScope(relativePath);
-    final folders = _snapshot.folders
-        .where((candidate) =>
-            candidate.isNotEmpty &&
-            _relativeKey(_parentPath(candidate)) == _relativeKey(folder))
-        .toList()
-      ..sort(_comparePaths);
-    final entries = _snapshot.availableEntries
-        .where((entry) =>
-            _relativeKey(_parentPath(entry.relativePath)) ==
-            _relativeKey(folder))
-        .toList()
-      ..sort((a, b) => _comparePaths(a.relativePath, b.relativePath));
-    return FolderListing(folders: folders, entries: entries);
+    if (!identical(_listedSnapshot, _snapshot)) {
+      final folders = <String, List<String>>{};
+      final entries = <String, List<LibraryEntry>>{};
+      for (final candidate in _snapshot.folders) {
+        if (candidate.isNotEmpty) {
+          (folders[_relativeKey(_parentPath(candidate))] ??= []).add(candidate);
+        }
+      }
+      for (final entry in _snapshot.availableEntries) {
+        (entries[_relativeKey(_parentPath(entry.relativePath))] ??= [])
+            .add(entry);
+      }
+      _folderListings.clear();
+      for (final key in {...folders.keys, ...entries.keys}) {
+        final childFolders = folders[key] ?? [];
+        final childEntries = entries[key] ?? [];
+        childFolders.sort(_comparePaths);
+        childEntries
+            .sort((a, b) => _comparePaths(a.relativePath, b.relativePath));
+        _folderListings[key] =
+            FolderListing(folders: childFolders, entries: childEntries);
+      }
+      _listedSnapshot = _snapshot;
+    }
+    return _folderListings[_relativeKey(folder)] ??
+        FolderListing(folders: [], entries: []);
   }
 
   String absolutePathFor(LibraryEntry entry) {
@@ -216,7 +363,9 @@ class LibraryCatalog {
   }
 
   Future<ScanResult> _scan(
-      {required bool verifyAll, required bool metadataOnly}) async {
+      {required bool verifyAll,
+      required bool metadataOnly,
+      required void Function() checkpoint}) async {
     final now = DateTime.now().toUtc();
     final previousByPath = <String, LibraryEntry>{};
     for (final entry in _snapshot.entries) {
@@ -238,6 +387,7 @@ class LibraryCatalog {
     final issues = <ScanIssue>[];
 
     Future<void> visit(Directory directory, String relativeDirectory) async {
+      checkpoint();
       folders.add(relativeDirectory);
       List<FileSystemEntity> children;
       try {
@@ -250,6 +400,7 @@ class LibraryCatalog {
       }
       children.sort((a, b) => a.path.compareTo(b.path));
       for (final entity in children) {
+        checkpoint();
         final relative = p
             .relative(entity.path, from: rootPath)
             .split(p.separator)
@@ -380,6 +531,7 @@ class LibraryCatalog {
     }
 
     for (final file in observed) {
+      checkpoint();
       final old = previousByPath[_relativeKey(file.relativePath)];
       if (old != null) match(old, file);
     }
@@ -588,16 +740,33 @@ class LibraryCatalog {
           savedUtc: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
     }
     Object? primaryFailure;
+    final primaryObserved = await _readStateStamp();
     if (hasPrimary) {
       try {
-        return await _decodeSnapshot(primary);
+        final before = await _readStateStamp();
+        final decoded = await _decodeSnapshot(primary);
+        final after = await _readStateStamp();
+        if (before != after)
+          throw const ConcurrentCatalogWriteException(
+              'The catalogue changed while it was being read.');
+        _stateStamp = after;
+        _backupStamp = null;
+        return decoded;
       } catch (error) {
         primaryFailure = error;
       }
     }
     if (hasBackup) {
       try {
+        final before = await _readStateStamp(backup.path);
         final recovered = await _decodeSnapshot(backup);
+        final after = await _readStateStamp(backup.path);
+        if (before != after || primaryObserved != await _readStateStamp()) {
+          throw const ConcurrentCatalogWriteException(
+              'Recovered catalogue changed while reading.');
+        }
+        _stateStamp = primaryObserved;
+        _backupStamp = after;
         final warning = 'Recovered catalogue generation '
             '${recovered.generation} from backup; primary was missing or invalid.';
         if (!_storageWarnings.contains(warning)) _storageWarnings.add(warning);
@@ -661,12 +830,14 @@ class LibraryCatalog {
     );
     try {
       if (await primary.exists()) {
-        var primaryValid = false;
-        try {
-          await _decodeSnapshot(primary);
-          primaryValid = true;
-        } catch (_) {
-          // Preserve the valid backup when replacing a corrupt primary.
+        var primaryValid = _backupStamp == null && await matchesDisk();
+        if (!primaryValid) {
+          try {
+            await _decodeSnapshot(primary);
+            primaryValid = true;
+          } catch (_) {
+            // Preserve the valid backup when replacing a corrupt primary.
+          }
         }
         if (primaryValid) {
           if (await backup.exists()) await backup.delete();
@@ -676,6 +847,8 @@ class LibraryCatalog {
         }
       }
       await temporary.rename(statePath);
+      _stateStamp = await _readStateStamp();
+      _backupStamp = null;
     } finally {
       if (await temporary.exists()) await temporary.delete();
     }

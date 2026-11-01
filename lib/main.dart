@@ -5,7 +5,6 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import 'reader/reader_screen.dart';
 import 'reader/reader_stage.dart';
 import 'library/library_controller.dart';
 import 'library/library_screen.dart';
@@ -77,12 +76,11 @@ class ScoreReaderApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xffeeede7),
         visualDensity: VisualDensity.standard,
       ),
-      home: initialPath == null
-          ? LibraryScreen(
-              controller: libraryController,
-              dataDirectory: dataDirectory,
-            )
-          : ReaderScreen(initialPath: initialPath),
+      home: LibraryScreen(
+        controller: libraryController,
+        dataDirectory: dataDirectory,
+        initialPath: initialPath,
+      ),
     );
   }
 }

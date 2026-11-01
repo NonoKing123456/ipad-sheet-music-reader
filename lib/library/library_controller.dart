@@ -13,10 +13,16 @@ import 'package:path/path.dart' as p;
 import 'windows_file_identity.dart';
 
 class LibraryScanPacket {
-  const LibraryScanPacket(this.result, this.storageWarnings, this.elapsed);
+  const LibraryScanPacket(
+    this.result,
+    this.storageWarnings,
+    this.elapsed, [
+    this.catalog,
+  ]);
   final ScanResult result;
   final List<String> storageWarnings;
   final Duration elapsed;
+  final LibraryCatalog? catalog;
 }
 
 typedef LibraryScanRunner = Future<LibraryScanPacket> Function(
@@ -24,39 +30,149 @@ typedef LibraryScanRunner = Future<LibraryScanPacket> Function(
   String statePath,
   bool verifyAll,
 );
+typedef LibraryCatalogLoader = Future<LibraryCatalog> Function(
+  String root,
+  String state,
+);
 
-Future<LibraryScanPacket> _scanFiles(
+Future<LibraryCatalog> _openCatalog(String root, String state) =>
+    LibraryCatalog.open(
+      rootPath: root,
+      statePath: state,
+      fileIdentityResolver: windowsFileIdentity,
+      stateIdentityResolver: windowsFileIdentity,
+    );
+
+Future<LibraryCatalog> _openInWorker(String root, String state) =>
+    Isolate.run(() async {
+      final catalog = await _openCatalog(root, state);
+      catalog.snapshot.entryById('');
+      catalog.snapshot.availableEntries;
+      catalog.listFolder();
+      return catalog;
+    });
+
+final _foregroundTasks = <String, Future<void>>{};
+final _scanJobs = <String, _ScanJob>{};
+String _catalogJobKey(String state) {
+  final key = p.normalize(p.absolute(state));
+  return Platform.isWindows ? key.toLowerCase() : key;
+}
+
+class _ScanJob {
+  final done = Completer<LibraryScanPacket>();
+  SendPort? commands;
+  bool yielded = false;
+  void requestYield() {
+    yielded = true;
+    commands?.send('yield');
+  }
+}
+
+Future<void> _scanWorker((String, String, bool, bool, SendPort) request) async {
+  final (root, state, verify, metadata, reply) = request;
+  final commands = ReceivePort();
+  var yieldRequested = false;
+  final subscription = commands.listen((_) => yieldRequested = true);
+  reply.send(commands.sendPort);
+  try {
+    final watch = Stopwatch()..start();
+    final catalog = await _openCatalog(root, state);
+    if (yieldRequested) throw const CatalogScanYielded();
+    final result = await catalog.rescan(
+      verifyAll: verify,
+      metadataOnly: metadata,
+      shouldYield: () => yieldRequested,
+    );
+    catalog.snapshot.entryById('');
+    catalog.snapshot.availableEntries;
+    catalog.listFolder();
+    reply.send(
+      LibraryScanPacket(
+        result,
+        catalog.storageWarnings,
+        watch.elapsed,
+        catalog,
+      ),
+    );
+  } catch (error, stack) {
+    reply.send((error, stack.toString()));
+  } finally {
+    await subscription.cancel();
+    commands.close();
+  }
+}
+
+Future<LibraryScanPacket> _cooperativeScan(
   String root,
   String state,
   bool verify,
+  bool metadata,
 ) async {
-  final watch = Stopwatch()..start();
-  final catalog = await LibraryCatalog.open(
-    rootPath: root,
-    statePath: state,
-    fileIdentityResolver: windowsFileIdentity,
-  );
-  final result = await catalog.rescan(verifyAll: verify);
-  return LibraryScanPacket(result, catalog.storageWarnings, watch.elapsed);
+  // A foreground job that was already queued runs before a new idle scan.
+  final key = _catalogJobKey(state);
+  await _foregroundTasks[key]?.catchError((Object _) {});
+  final job = _ScanJob();
+  _scanJobs[key] = job;
+  final replies = ReceivePort();
+  final subscription = replies.listen((message) {
+    if (message is SendPort) {
+      job.commands = message;
+      if (job.yielded) message.send('yield');
+    } else if (message is LibraryScanPacket) {
+      job.done.complete(message);
+    } else if (message is (Object, String)) {
+      job.done.completeError(message.$1, StackTrace.fromString(message.$2));
+    } else if (!job.done.isCompleted) {
+      job.done.completeError(StateError('Catalogue worker stopped: $message'));
+    }
+  });
+  try {
+    await Isolate.spawn(
+      _scanWorker,
+      (root, state, verify, metadata, replies.sendPort),
+      onError: replies.sendPort,
+      onExit: replies.sendPort,
+    );
+    return await job.done.future;
+  } finally {
+    if (identical(_scanJobs[key], job)) _scanJobs.remove(key);
+    await subscription.cancel();
+    replies.close();
+  }
 }
 
 Future<LibraryScanPacket> _scanInWorker(
   String root,
   String state,
   bool verify,
-) => Isolate.run(() => _scanFiles(root, state, verify));
+) => _cooperativeScan(root, state, verify, false);
 
 Future<LibraryScanPacket> _scanMetadata(String root, String state) =>
-    Isolate.run(() async {
-      final watch = Stopwatch()..start();
-      final catalog = await LibraryCatalog.open(
-        fileIdentityResolver: windowsFileIdentity,
-        rootPath: root,
-        statePath: state,
-      );
-      final result = await catalog.rescan(metadataOnly: true);
-      return LibraryScanPacket(result, catalog.storageWarnings, watch.elapsed);
-    });
+    _cooperativeScan(root, state, false, true);
+
+Future<CatalogMaterialization> _materializeInWorker(
+  String root,
+  String state,
+  String id,
+  CatalogPublication expected,
+) => Isolate.run(() async {
+  for (var attempt = 0; ; attempt++) {
+    try {
+      final catalog = await _openCatalog(root, state);
+      final patch = await catalog.materializeForPublication(id, expected);
+      if (patch.fallback != null) {
+        catalog.snapshot.availableEntries;
+        catalog.snapshot.entryById('');
+        catalog.listFolder();
+      }
+      return patch;
+    } on ConcurrentCatalogWriteException {
+      if (attempt == 3) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    }
+  }
+});
 
 class _AddedSource {
   _AddedSource(this.id, this.name, this.root, this.catalog);
@@ -64,6 +180,7 @@ class _AddedSource {
   LibraryCatalog catalog;
   bool online = true, running = false;
   bool verifyQueued = false;
+  Timer? retry;
   StreamSubscription<FileSystemEvent>? watcher;
 }
 
@@ -73,12 +190,15 @@ class LibraryController extends ChangeNotifier {
   LibraryController({
     required this.dataDirectory,
     LibraryScanRunner? scanRunner,
+    LibraryCatalogLoader? catalogLoader,
     this.watchSource = true,
-  }) : _scanRunner = scanRunner ?? _scanInWorker;
+  }) : _scanRunner = scanRunner ?? _scanInWorker,
+       _catalogLoader = catalogLoader ?? _openInWorker;
 
   final Directory dataDirectory;
   final bool watchSource;
   final LibraryScanRunner _scanRunner;
+  final LibraryCatalogLoader _catalogLoader;
   LibraryCatalog? _catalog;
   StreamSubscription<FileSystemEvent>? _watcher;
   Timer? _debounce;
@@ -93,6 +213,13 @@ class LibraryController extends ChangeNotifier {
   String? _browsingSource;
   LibrarySnapshot? _combined;
   final _owners = <String, (CatalogSourceBinding, LibraryEntry)>{};
+  List<(String, LibrarySnapshot, String, bool)> _indexedSources = const [];
+  final _externalEntries = <String, LibraryEntry>{};
+  final _searchText = <String, String>{};
+  (LibrarySnapshot, String, String)? _listingKey;
+  FolderListing? _listing;
+  (LibrarySnapshot, String, String, String, bool)? _searchKey;
+  List<LibraryEntry> _searchResults = const [];
   int _extraJobs = 0;
   Future<void>? _registryWrites;
 
@@ -142,72 +269,135 @@ class LibraryController extends ChangeNotifier {
           platformFileId: e.platformFileId,
         );
   LibrarySnapshot? get snapshot {
-    if (_catalog == null) return null;
-    if (_combined != null) return _combined;
+    if (_catalog == null) {
+      _combined = null;
+      _indexedSources = const [];
+      return null;
+    }
+    final currentSources = sources;
+    final keys = [
+      for (final s in currentSources)
+        (s.id, s.catalog.snapshot, s.name, s.online),
+    ];
+    if (_combined != null && listEquals(keys, _indexedSources)) {
+      return _combined;
+    }
+    _indexedSources = keys;
     _owners.clear();
+    _externalEntries.clear();
+    _searchText.clear();
     final entries = <LibraryEntry>[];
-    for (final source in sources) {
+    for (final source in currentSources) {
       for (final e in source.catalog.snapshot.entries) {
         final external = _external(source, e);
         _owners[external.id] = (source, e);
+        _externalEntries[external.id] = external;
+        _searchText[external.id] = '${source.name}/${e.relativePath}'
+            .toLowerCase();
         entries.add(external);
       }
     }
     return _combined = LibrarySnapshot(
       rootPath: rootPath!,
-      generation: sources.fold(0, (n, s) => n + s.catalog.snapshot.generation),
+      generation: currentSources.fold(
+        0,
+        (n, s) => n + s.catalog.snapshot.generation,
+      ),
       entries: entries,
-      folders: folders,
+      folders: _catalog!.snapshot.folders,
       savedUtc: _catalog!.snapshot.savedUtc,
     );
-  }
-
-  @override
-  void notifyListeners() {
-    _combined = null;
-    super.notifyListeners();
   }
 
   /// The sync adapter resolves this on every request after scans replace it.
   LibraryCatalog? get catalogForSync => _catalog;
   int get totalCount => snapshot?.availableEntries.length ?? 0;
+  int get selectedSourceCount =>
+      selectedSource?.catalog.snapshot.availableEntries.length ?? 0;
   bool get searching => query.trim().isNotEmpty;
   List<String> get folders =>
       selectedSource?.catalog.snapshot.folders ?? const [''];
 
-  FolderListing get listing => selectedSource == null
-      ? FolderListing(folders: [], entries: [])
-      : FolderListing(
-          folders: selectedSource!.catalog.listFolder(currentFolder).folders,
-          entries: selectedSource!.catalog
-              .listFolder(currentFolder)
-              .entries
-              .map((e) => _external(selectedSource!, e))
-              .toList(),
-        );
+  FolderListing get listing {
+    final combined = snapshot, source = selectedSource;
+    if (combined == null || source == null) {
+      return FolderListing(folders: [], entries: []);
+    }
+    final key = (combined, source.id, currentFolder);
+    if (key == _listingKey) return _listing!;
+    final local = source.catalog.listFolder(currentFolder);
+    _listingKey = key;
+    return _listing = FolderListing(
+      folders: local.folders,
+      entries: [
+        for (final e in local.entries)
+          _externalEntries[collectionEntryId(source.id, e.id)]!,
+      ],
+    );
+  }
 
-  List<LibraryEntry> get visibleEntries => searching
-      ? (snapshot?.availableEntries.where((entry) {
-              final owner = _owners[entry.id]!.$1;
-              if (searchCurrentFolder &&
-                  (owner.id != selectedSourceId ||
-                      !folderContains(currentFolder, entry.relativePath))) {
-                return false;
-              }
-              final text = '${owner.name}/${entry.relativePath}'.toLowerCase();
-              return query
-                  .toLowerCase()
-                  .trim()
-                  .split(RegExp(r'\s+'))
-                  .every(text.contains);
-            }).toList() ??
-            [])
-      : listing.entries;
+  List<LibraryEntry> get visibleEntries {
+    if (!searching) return listing.entries;
+    final combined = snapshot;
+    if (combined == null) return const [];
+    final key = (
+      combined,
+      query,
+      selectedSourceId,
+      currentFolder,
+      searchCurrentFolder,
+    );
+    if (key == _searchKey) return _searchResults;
+    final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+    _searchKey = key;
+    return _searchResults = combined.availableEntries
+        .where((entry) {
+          final owner = _owners[entry.id]!.$1;
+          if (searchCurrentFolder &&
+              (owner.id != selectedSourceId ||
+                  !folderContains(currentFolder, entry.relativePath))) {
+            return false;
+          }
+          return terms.every(_searchText[entry.id]!.contains);
+        })
+        .toList(growable: false);
+  }
 
   String absolutePathFor(LibraryEntry entry) {
     snapshot;
     final owner = _owners[entry.id]!;
     return owner.$1.catalog.absolutePathFor(owner.$2);
+  }
+
+  /// A chosen file inside a registered source reuses that source's identity.
+  /// Folder lookup is indexed; it never scans every catalogue entry per open.
+  Future<(bool, LibraryEntry?)> entryForFilePath(String path) async {
+    final actual = p.normalize(await File(path).resolveSymbolicLinks());
+    for (final source in sources) {
+      final root = source.catalog.rootPath;
+      if (!p.isWithin(root, actual)) continue;
+      final relative = p
+          .relative(actual, from: root)
+          .split(p.separator)
+          .join('/');
+      final parent = p.posix.dirname(relative);
+      final key = Platform.isWindows ? relative.toLowerCase() : relative;
+      for (final entry
+          in source.catalog.listFolder(parent == '.' ? '' : parent).entries) {
+        if ((Platform.isWindows
+                ? entry.relativePath.toLowerCase()
+                : entry.relativePath) ==
+            key) {
+          snapshot;
+          return (
+            true,
+            _externalEntries[collectionEntryId(source.id, entry.id)],
+          );
+        }
+      }
+      return (true, null);
+    }
+    return (false, null);
   }
 
   String sourceNameFor(LibraryEntry entry) {
@@ -221,13 +411,211 @@ class LibraryController extends ChangeNotifier {
   }
 
   Future<void> ensureReady(String id) async {
+    await prepareEntry(id);
+  }
+
+  Future<LibraryEntry> prepareForRead(String id, String revision) =>
+      prepareEntry(id, revision: revision);
+
+  Future<LibraryEntry> prepareEntry(String id, {String? revision}) async {
     snapshot;
     final owner = _owners[id];
     if (owner == null || !owner.$1.online) {
       throw StateError('Source is offline.');
     }
-    await owner.$1.catalog.materialize(owner.$2.id);
-    if (!_disposed) notifyListeners();
+    if (revision != null && owner.$2.currentRevisionId != revision) {
+      throw StateError('Source revision changed.');
+    }
+    final epoch = _epoch;
+    final ready = await owner.$1.catalog.readyIfUnchanged(owner.$2.id);
+    if (_disposed || epoch != _epoch) throw StateError('Source changed.');
+    if (ready != null) return ready;
+    final state = owner.$1.catalog.statePath;
+    final jobKey = _catalogJobKey(state);
+    final root = owner.$1.catalog.rootPath;
+    final result = Completer<LibraryEntry>();
+    final previous = _foregroundTasks[jobKey] ?? Future<void>.value();
+    late Future<void> task;
+    task = previous.catchError((Object _) {}).then((_) async {
+      try {
+        if (_disposed || epoch != _epoch) throw StateError('Source changed.');
+        final scan = _scanJobs[jobKey];
+        if (scan != null) {
+          scan.requestYield();
+          try {
+            await scan.done.future;
+          } catch (_) {
+            // The foreground job reloads the durable generation independently.
+          }
+        }
+        snapshot;
+        final freshOwner = _owners[id];
+        if (freshOwner == null || freshOwner.$1.catalog.rootPath != root) {
+          throw StateError('Source changed.');
+        }
+        final localCatalog = freshOwner.$1.catalog;
+        final before = localCatalog.snapshot;
+        final patch = await _materializeInWorker(
+          root,
+          state,
+          owner.$2.id,
+          localCatalog.publication,
+        );
+        if (_disposed || epoch != _epoch) throw StateError('Source changed.');
+        if (await localCatalog.applyMaterialization(patch)) {
+          if (!identical(before, localCatalog.snapshot)) {
+            _patchCombined(owner.$1.id, patch.entry, before);
+            notifyListeners();
+          }
+        } else {
+          await _adoptCatalog(
+            owner.$1.id,
+            patch.fallback ?? await _openInWorker(root, state),
+          );
+        }
+        snapshot;
+        final current = _owners[id];
+        final committed = current == null
+            ? null
+            : await current.$1.catalog.readyIfUnchanged(current.$2.id);
+        if (committed == null ||
+            (revision != null && committed.currentRevisionId != revision)) {
+          throw StateError('Source revision changed.');
+        }
+        result.complete(committed);
+      } catch (error, stack) {
+        result.completeError(error, stack);
+      }
+    });
+    _foregroundTasks[jobKey] = task;
+    unawaited(
+      task.whenComplete(() {
+        if (identical(_foregroundTasks[jobKey], task)) {
+          _foregroundTasks.remove(jobKey);
+        }
+      }),
+    );
+    return result.future;
+  }
+
+  void _patchCombined(
+    String sourceId,
+    LibraryEntry entry,
+    LibrarySnapshot base,
+  ) {
+    if (_combined == null) return;
+    final currentSources = sources;
+    final beforeKeys = [
+      for (final s in currentSources)
+        (s.id, s.id == sourceId ? base : s.catalog.snapshot, s.name, s.online),
+    ];
+    if (!listEquals(beforeKeys, _indexedSources)) {
+      _combined = null;
+      return;
+    }
+    final source = currentSources.firstWhere((s) => s.id == sourceId);
+    final external = _external(source, entry);
+    _owners[external.id] = (source, entry);
+    _externalEntries[external.id] = external;
+    _searchText[external.id] = '${source.name}/${entry.relativePath}'
+        .toLowerCase();
+    _combined = _combined!.replacingEntry(
+      external,
+      generation: currentSources.fold(
+        0,
+        (n, s) => n + s.catalog.snapshot.generation,
+      ),
+      savedUtc: _catalog!.snapshot.savedUtc,
+    );
+    _indexedSources = [
+      for (final s in currentSources)
+        (s.id, s.catalog.snapshot, s.name, s.online),
+    ];
+    final listingKey = _listingKey;
+    if (listingKey != null && _listing != null) {
+      _listingKey = (_combined!, listingKey.$2, listingKey.$3);
+      _listing = FolderListing(
+        folders: _listing!.folders,
+        entries: [
+          for (final e in _listing!.entries) e.id == external.id ? external : e,
+        ],
+      );
+    }
+    final searchKey = _searchKey;
+    if (searchKey != null) {
+      _searchKey = (
+        _combined!,
+        searchKey.$2,
+        searchKey.$3,
+        searchKey.$4,
+        searchKey.$5,
+      );
+      _searchResults = [
+        for (final e in _searchResults) e.id == external.id ? external : e,
+      ];
+    }
+  }
+
+  Future<bool> _adoptCatalog(String sourceId, LibraryCatalog candidate) async {
+    LibraryCatalog? currentCatalog() {
+      for (final source in sources) {
+        if (source.id == sourceId &&
+            p.equals(source.catalog.rootPath, candidate.rootPath)) {
+          return source.catalog;
+        }
+      }
+      return null;
+    }
+
+    for (var attempt = 0; ; attempt++) {
+      if (_disposed) return false;
+      final current = currentCatalog();
+      if (current == null) return false;
+      final captured = current.publication;
+      if (await candidate.matchesDisk()) {
+        final currentValid = await current.matchesDisk();
+        final candidateValid = await candidate.matchesDisk();
+        final live = currentCatalog();
+        if (_disposed || live == null) return false;
+        if (candidateValid && live.publication.isSameAs(captured)) {
+          if (currentValid &&
+              current.snapshot.generation > candidate.snapshot.generation) {
+            return false;
+          }
+          break;
+        }
+      }
+      if (attempt == 2) {
+        throw const ConcurrentCatalogWriteException(
+          'Catalogue is still updating.',
+        );
+      }
+      candidate = await _catalogLoader(candidate.rootPath, candidate.statePath);
+    }
+    if (_disposed) return false;
+    // The exact current token was checked after the final await. A valid lower
+    // backup may replace a damaged current publication, while a delayed scan
+    // cannot replace a still-valid newer foreground publication.
+    final latest = currentCatalog();
+    if (latest == null) return false;
+    if (latest.publication.isSameAs(candidate.publication)) return true;
+    if (sourceId == _primaryId && _catalog?.rootPath == candidate.rootPath) {
+      _catalog = candidate;
+    } else {
+      final matches = _added.where(
+        (s) =>
+            s.id == sourceId &&
+            p.equals(s.catalog.rootPath, candidate.rootPath),
+      );
+      if (matches.isEmpty) throw StateError('Source changed.');
+      matches.single.catalog = candidate;
+    }
+    storageWarnings = List.unmodifiable({
+      ...storageWarnings,
+      ...candidate.storageWarnings,
+    });
+    notifyListeners();
+    return true;
   }
 
   Future<void> validateForRead(String id, String revision) async {
@@ -324,10 +712,9 @@ class LibraryController extends ChangeNotifier {
               !p.isAbsolute(item['root'] as String)) {
             throw const FormatException('Invalid registered source.');
           }
-          final catalog = await LibraryCatalog.open(
-            fileIdentityResolver: windowsFileIdentity,
-            rootPath: item['root'] as String,
-            statePath: _stateFor(item['root'] as String),
+          final catalog = await _openInWorker(
+            item['root'] as String,
+            _stateFor(item['root'] as String),
           );
           final added = _AddedSource(
             item['id'] as String,
@@ -382,11 +769,7 @@ class LibraryController extends ChangeNotifier {
     notifyListeners();
     try {
       if (persist) await _saveRegistry();
-      final catalog = await LibraryCatalog.open(
-        fileIdentityResolver: windowsFileIdentity,
-        rootPath: rootPath!,
-        statePath: statePath,
-      );
+      final catalog = await _openInWorker(rootPath!, statePath);
       if (_disposed || epoch != _epoch) return;
       _catalog = catalog;
       storageWarnings = catalog.storageWarnings;
@@ -479,11 +862,7 @@ class LibraryController extends ChangeNotifier {
     while (sources.any((s) => s.name == name)) {
       name = '$base (${suffix++})';
     }
-    final catalog = await LibraryCatalog.open(
-      fileIdentityResolver: windowsFileIdentity,
-      rootPath: normalized,
-      statePath: _stateFor(normalized),
-    );
+    final catalog = await _openInWorker(normalized, _stateFor(normalized));
     final source = _AddedSource(_newSourceId(), name, normalized, catalog);
     final priorBrowse = _browsingSource;
     _added.add(source);
@@ -529,28 +908,43 @@ class LibraryController extends ChangeNotifier {
       return;
     }
     source.running = true;
+    source.retry?.cancel();
+    source.retry = null;
+    source.verifyQueued = false;
     _extraJobs++;
     notifyListeners();
     try {
       source.online = await Directory(source.root).exists();
       if (!source.online) return;
-      if (verifyAll) {
-        await _scanInWorker(source.root, _stateFor(source.root), true);
-      } else {
-        await _scanMetadata(source.root, _stateFor(source.root));
+      final packet = verifyAll
+          ? await _scanInWorker(
+              source.catalog.rootPath,
+              source.catalog.statePath,
+              true,
+            )
+          : await _scanMetadata(
+              source.catalog.rootPath,
+              source.catalog.statePath,
+            );
+      if (_disposed) return;
+      await _adoptCatalog(source.id, packet.catalog!);
+    } on CatalogScanYielded {
+      source.verifyQueued = source.verifyQueued || verifyAll;
+      if (!_disposed) {
+        source.retry = Timer(
+          const Duration(milliseconds: 250),
+          () =>
+              unawaited(_refreshAdded(source, verifyAll: source.verifyQueued)),
+        );
       }
-      source.catalog = await LibraryCatalog.open(
-        fileIdentityResolver: windowsFileIdentity,
-        rootPath: source.root,
-        statePath: _stateFor(source.root),
-      );
-    } catch (_) {
+    } catch (failure) {
+      debugPrint('LIBRARY added_scan_failed: $failure');
       error = '有谱库无法刷新，请检查连接后重试。';
     } finally {
       source.running = false;
       _extraJobs--;
       if (!_disposed) notifyListeners();
-      if (source.verifyQueued && !_disposed) {
+      if (source.verifyQueued && source.retry == null && !_disposed) {
         source.verifyQueued = false;
         unawaited(_refreshAdded(source, verifyAll: true));
       }
@@ -606,8 +1000,8 @@ class LibraryController extends ChangeNotifier {
       return;
     }
     final epoch = _epoch;
-    final root = rootPath!;
-    final state = statePath;
+    final root = _catalog!.rootPath;
+    final state = _catalog!.statePath;
     _scanningEpoch = epoch;
     error = null;
     notifyListeners();
@@ -626,13 +1020,12 @@ class LibraryController extends ChangeNotifier {
         packet = await _scanRunner(root, state, verifyAll);
       }
       if (_disposed || epoch != _epoch) return;
-      final refreshed = await LibraryCatalog.open(
-        fileIdentityResolver: windowsFileIdentity,
-        rootPath: root,
-        statePath: state,
-      );
+      final refreshed = packet.catalog ?? await _openInWorker(root, state);
       if (_disposed || epoch != _epoch) return;
-      _catalog = refreshed;
+      if (!await _adoptCatalog(_primaryId, refreshed)) return;
+      if (_catalog!.snapshot.generation != packet.result.snapshot.generation) {
+        return;
+      }
       lastScan = packet.result;
       lastScanDuration = packet.elapsed;
       storageWarnings = List.unmodifiable({
@@ -652,6 +1045,9 @@ class LibraryController extends ChangeNotifier {
       debugPrint(
         'LIBRARY scanned files=$totalCount folders=${folders.length - 1} elapsed_ms=${packet.elapsed.inMilliseconds} issues=${packet.result.issues.length}',
       );
+    } on CatalogScanYielded {
+      _scanQueued = true;
+      _verifyQueued = _verifyQueued || verifyAll;
     } catch (failure) {
       debugPrint('LIBRARY scan_failed: $failure');
       if (!_disposed && epoch == _epoch) {
@@ -697,7 +1093,12 @@ class LibraryController extends ChangeNotifier {
     _debounce?.cancel();
     unawaited(_watcher?.cancel());
     for (final s in _added) {
+      s.retry?.cancel();
+      _scanJobs[_catalogJobKey(s.catalog.statePath)]?.requestYield();
       unawaited(s.watcher?.cancel());
+    }
+    if (_catalog != null) {
+      _scanJobs[_catalogJobKey(_catalog!.statePath)]?.requestYield();
     }
     super.dispose();
   }

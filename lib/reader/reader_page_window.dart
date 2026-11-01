@@ -50,6 +50,8 @@ class ReaderPageWindow extends StatefulWidget {
     this.prewarm,
     this.requestedAt,
     this.presentationClock,
+    this.forwardWindowOnly = false,
+    this.surfaceBackground = Colors.white,
   });
   final int pageNumber, pageCount, direction;
   final Object documentKey;
@@ -62,6 +64,10 @@ class ReaderPageWindow extends StatefulWidget {
   final ReaderPrewarmPage? prewarm;
   final Duration? requestedAt;
   final Duration Function()? presentationClock;
+
+  /// Desktop spreads use at most two groups (four actual paper surfaces).
+  final bool forwardWindowOnly;
+  final Color surfaceBackground;
   @override
   State<ReaderPageWindow> createState() => _ReaderPageWindowState();
 }
@@ -121,12 +127,22 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   }
 
   void _capture() {
+    if (widget.forwardWindowOnly &&
+        _incoming != null &&
+        _requested != _incoming &&
+        _requested != _displayed) {
+      return;
+    }
     _trim();
     for (
       var n = math.max(1, widget.pageNumber - 1);
       n <= math.min(widget.pageCount, widget.pageNumber + 1);
       n++
     ) {
+      if (widget.forwardWindowOnly &&
+          !_inWindow(_PageId(widget.documentKey, n))) {
+        continue;
+      }
       final id = _PageId(widget.documentKey, n);
       final surface = _surfaces[id];
       if (surface == null) {
@@ -159,6 +175,17 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     _trim();
   }
 
+  bool _inWindow(_PageId id) {
+    if (id.document != widget.documentKey) return false;
+    if (!widget.forwardWindowOnly) {
+      return (id.number - widget.pageNumber).abs() <= 1;
+    }
+    return id.number == widget.pageNumber ||
+        (_incoming == null &&
+            _requested == _displayed &&
+            id.number == widget.pageNumber + widget.direction);
+  }
+
   void _trim() {
     final remove = _surfaces.keys
         .where(
@@ -166,8 +193,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
               id != _displayed &&
               id != _incoming &&
               !(id.document == widget.prewarm?.documentKey && id.number == 1) &&
-              !(id.document == widget.documentKey &&
-                  (id.number - widget.pageNumber).abs() <= 1),
+              !_inWindow(id),
         )
         .toList();
     for (final id in remove) {
@@ -249,7 +275,8 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     _direction = _directionFor(_requested);
     _incoming = _requested;
     _reversing = false;
-    if (MediaQuery.disableAnimationsOf(context)) {
+    if (MediaQuery.disableAnimationsOf(context) ||
+        (widget.forwardWindowOnly && widget.direction == 0)) {
       _complete();
     } else {
       final requested = widget.requestedAt ?? _now();
@@ -299,7 +326,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       setState(() {
         _incoming = null;
         _reversing = false;
-        _trim();
+        widget.forwardWindowOnly ? _capture() : _trim();
         _tryPresent();
       });
     }
@@ -310,7 +337,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     _incoming = null;
     _initialPresented = true;
     _notifyPresented();
-    _trim();
+    widget.forwardWindowOnly ? _capture() : _trim();
     _tryPresent();
   }
 
@@ -369,7 +396,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                                   id.number,
                                 ),
                                 child: ColoredBox(
-                                  color: Colors.white,
+                                  color: _surfaces[id]!.owner.surfaceBackground,
                                   child: _buildSurface(id),
                                 ),
                               ),

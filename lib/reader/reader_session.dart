@@ -6,12 +6,15 @@ import 'dart:isolate';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:library_core/library_core.dart'
+    show ConcurrentCatalogWriteException;
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
 import 'package:reader_state/reader_state.dart';
 
 import 'reader_workspace.dart';
+import 'reader_spreads.dart';
 
 class ScoreTarget {
   const ScoreTarget({
@@ -553,7 +556,9 @@ class ReaderSession extends ChangeNotifier {
     } catch (failure, stack) {
       debugPrint('READER load_failed: $failure\n$stack');
       if (!_disposed && epoch == _epoch) {
-        message = '无法打开曲谱，请检查文件是否完整。';
+        message = failure is ConcurrentCatalogWriteException
+            ? '目录正在更新，请稍后重试。'
+            : '无法打开曲谱，请重试。';
       }
     } finally {
       if (!_disposed && epoch == _epoch) {
@@ -571,6 +576,19 @@ class ReaderSession extends ChangeNotifier {
       return _navigationTask ?? Future<void>.value();
     }
     _pendingActions.addLast(direction);
+    return _navigationTask ??= _drainTurns(_epoch);
+  }
+
+  Future<void> turnSpread(
+    NavigationDirection direction,
+    FirstPageArrangement Function(String entryId) arrangementFor,
+  ) {
+    if (_pendingActions.length >= ReaderNavigationQueue.maxPresses) {
+      message = '翻页处理中，请稍候。';
+      _changed();
+      return _navigationTask ?? Future.value();
+    }
+    _pendingActions.addLast(_SpreadStep(direction, arrangementFor));
     return _navigationTask ??= _drainTurns(_epoch);
   }
 
@@ -615,6 +633,44 @@ class ReaderSession extends ChangeNotifier {
         final action = _pendingActions.removeFirst();
         if (action is NavigationDirection) {
           await _turn(_pendingTurns.take()!, epoch);
+        } else if (action is _SpreadStep &&
+            current != null &&
+            position != null) {
+          final grouping = ReaderSpreads(
+            pageCount: current!.pageCount,
+            doublePage: true,
+            arrangement: action.arrangementFor(position!.entryId),
+          );
+          final next = grouping.adjacent(
+            page,
+            action.direction == NavigationDirection.forward ? 1 : -1,
+          );
+          if (next != null) {
+            final previous = position!;
+            position = ReadingPosition(
+              entryId: previous.entryId,
+              revisionId: previous.revisionId,
+              pageNumber: next,
+              setListItemId: previous.setListItemId,
+            );
+            cancelPrewarm();
+            _savePosition();
+            _changed();
+          } else {
+            final previous = position!;
+            await _turn(
+              action.direction,
+              epoch,
+              from: ReadingPosition(
+                entryId: previous.entryId,
+                revisionId: previous.revisionId,
+                setListItemId: previous.setListItemId,
+                pageNumber: action.direction == NavigationDirection.forward
+                    ? current!.pageCount
+                    : 1,
+              ),
+            );
+          }
         } else if (action is _PageSeek &&
             current?.target.key == action.document &&
             position?.setListItemId == action.itemId) {
@@ -658,11 +714,18 @@ class ReaderSession extends ChangeNotifier {
     return DocumentMetadata.unknown(id);
   }
 
-  Future<void> _turn(NavigationDirection direction, int epoch) async {
+  Future<void> _turn(
+    NavigationDirection direction,
+    int epoch, {
+    ReadingPosition? from,
+  }) async {
     if (_disposed || epoch != _epoch || position == null || current == null) {
       return;
     }
-    final request = NavigationRequest(current: position!, direction: direction);
+    final request = NavigationRequest(
+      current: from ?? position!,
+      direction: direction,
+    );
     var result = ReaderNavigator.resolve(
       request,
       queue: queue,
@@ -743,6 +806,29 @@ class ReaderSession extends ChangeNotifier {
     );
   }
 
+  /// Continuous scrolling follows an already painted page, rather than queuing
+  /// a seek that would pull a newer wheel/dots intent back to an old callback.
+  void followPresentedPage(PageKey visible) {
+    final currentPosition = position;
+    if (_disposed ||
+        loading ||
+        _navigationTask != null ||
+        _pendingActions.isNotEmpty ||
+        currentPosition == null ||
+        current?.target.key != visible.document ||
+        currentPosition.pageNumber == visible.pageNumber) {
+      return;
+    }
+    position = ReadingPosition(
+      entryId: visible.entryId,
+      revisionId: visible.revisionId,
+      pageNumber: visible.pageNumber,
+      setListItemId: currentPosition.setListItemId,
+    );
+    _savePosition();
+    _changed();
+  }
+
   void _trimCache() {
     while (_cache.length > 3) {
       final key = _cache.keys.firstWhere((key) => key != current!.target.key);
@@ -770,4 +856,10 @@ class _PageSeek {
   final String? itemId;
   final Object gesture;
   int page;
+}
+
+class _SpreadStep {
+  const _SpreadStep(this.direction, this.arrangementFor);
+  final NavigationDirection direction;
+  final FirstPageArrangement Function(String entryId) arrangementFor;
 }

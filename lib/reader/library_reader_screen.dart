@@ -16,6 +16,9 @@ import 'sharp_pdf_page.dart';
 import 'sharp_file_image.dart';
 import 'paper_color_sampler.dart';
 import 'reader_tool_button.dart';
+import 'reader_spreads.dart';
+import 'desktop_reader.dart';
+import 'reader_continuous.dart';
 
 class LibraryReaderScreen extends StatefulWidget {
   const LibraryReaderScreen({
@@ -29,6 +32,8 @@ class LibraryReaderScreen extends StatefulWidget {
     this.loader,
     this.colorSampler,
     this.presentationClock,
+    this.allowAnnotations = true,
+    this.onPresented,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -39,6 +44,8 @@ class LibraryReaderScreen extends StatefulWidget {
   final ScoreLoader? loader;
   final PaperColorSampler? colorSampler;
   final Duration Function()? presentationClock;
+  final bool allowAnnotations;
+  final ValueChanged<PageKey>? onPresented;
   @override
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
@@ -55,7 +62,18 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   late final PaperColorSampler _colorSampler =
       widget.colorSampler ?? PaperColorSampler();
   bool _picking = false, _sampling = false;
-  bool _editing = !isMobileReader;
+  bool _editing = false;
+  final _stageControls = ReaderStageController();
+  DesktopReaderPreferences? _desktopPreferences;
+  ReaderViewMode _desktopMode = ReaderViewMode.single;
+  FirstPageArrangement _externalArrangement = FirstPageArrangement.paired;
+  final _continuous = ReaderContinuousController();
+  ReaderScrollAnchor? _continuousRestore;
+  PageKey? _continuousAnchorFocus;
+  PageKey? _continuousEditStart;
+  int _continuousNavigation = 0;
+  bool _followingContinuous = false;
+  String? _viewPreferenceError;
   int _inputGeneration = 0;
   int? _lastSample;
   bool _usingSample = false, _sampleMenuOpen = false;
@@ -101,12 +119,28 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     widget.workspace.addListener(_changed);
     widget.sourceChanges?.addListener(_session.refreshSource);
     _transform.addListener(_transformChanged);
-    unawaited(
-      _session.open(
-        widget.initialTarget,
-        itemId: widget.itemId,
-        restore: widget.setListId == null,
-      ),
+    unawaited(_openInitial());
+  }
+
+  Future<void> _openInitial() async {
+    if (!isMobileReader) {
+      final preferences = await DesktopReaderPreferences.open(
+        p.join(
+          p.dirname(widget.workspace.store.statePath),
+          'desktop-reader-view.json',
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _desktopPreferences = preferences;
+        _desktopMode = preferences.mode;
+      });
+    }
+    if (!mounted) return;
+    await _session.open(
+      widget.initialTarget,
+      itemId: widget.itemId,
+      restore: widget.allowAnnotations && widget.setListId == null,
     );
   }
 
@@ -118,6 +152,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   void _changed() {
     if (!mounted) return;
     if (_shownPage != _session.pageKey) {
+      if (!_followingContinuous && !isMobileReader) _continuousNavigation++;
       _inputGeneration++;
       _cancelPick();
       _prewarmEpoch++;
@@ -186,7 +221,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _back() async {
-    if (!await _confirmLeaving()) return;
+    if (widget.allowAnnotations && !await _confirmLeaving()) return;
     await widget.workspace.flushPositions();
     if (mounted) Navigator.pop(context);
   }
@@ -279,6 +314,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _setEditing(bool editing) {
+    editing = editing && widget.allowAnnotations;
     setState(() {
       _editing = editing;
       if (!editing) {
@@ -357,8 +393,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _visibleDocument?.target.displayPath ??
         current?.target.displayPath ??
         widget.initialTarget.displayPath;
+    if (!isMobileReader) return _desktop(current, page, title);
     return Scaffold(
       body: ReaderStage(
+        controller: _stageControls,
         hasReadablePage: _visiblePage != null,
         statusLabel: workspace.unsavedCount > 0
             ? '${workspace.unsavedCount} 项未保存'
@@ -386,6 +424,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
+                  if (_editing)
+                    IconButton(
+                      tooltip: '完成批注',
+                      onPressed: _writing ? null : _stageControls.hideTools,
+                      icon: const Icon(Icons.check),
+                    ),
                   IconButton(
                     tooltip: '缩小',
                     onPressed: () => _zoom(1 / 1.25),
@@ -439,7 +483,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     ),
                 ],
               ),
-              if (page != null) _tools(_visiblePage ?? page),
+              if (page != null && widget.allowAnnotations)
+                _tools(_visiblePage ?? page),
             ],
           ),
         ),
@@ -491,12 +536,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   child: _session.loading
                       ? const CircularProgressIndicator()
                       : FilledButton(
-                          onPressed: () => unawaited(
-                            _session.open(
-                              widget.initialTarget,
-                              itemId: widget.itemId,
-                            ),
-                          ),
+                          onPressed: () {
+                            final latest = widget.locate(
+                              widget.initialTarget.entryId,
+                            );
+                            if (latest != null) {
+                              unawaited(
+                                _session.open(
+                                  latest,
+                                  itemId: widget.itemId,
+                                  restore: false,
+                                ),
+                              );
+                            }
+                          },
                           child: const Text('重新打开'),
                         ),
                 )
@@ -533,20 +586,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     releaseDocument: current.release,
                     holdPresentation: _writing,
                     onPresented: (document, number) {
-                      final visible = PageKey(
-                        entryId: current.target.entryId,
-                        revisionId: current.target.revisionId,
-                        pageNumber: number,
-                      );
-                      if (document != current.target.key) return;
-                      setState(() {
-                        if (_visiblePage != visible) _cancelPick();
-                        _visiblePage = visible;
-                        _visibleDocument = current;
-                      });
-                      _session.rememberPresented(visible, current.pageCount);
-                      if (number == current.pageCount) {
-                        unawaited(_prewarmNext());
+                      if (document == current.target.key) {
+                        _markPresented(current, number);
                       }
                     },
                     prewarm: _prewarmScore == null
@@ -565,6 +606,432 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         ),
       ),
     );
+  }
+
+  ReaderViewMode get _effectiveDesktopMode =>
+      _editing ? ReaderViewMode.single : _desktopMode;
+  FirstPageArrangement _arrangementFor(String entryId) =>
+      widget.allowAnnotations
+      ? _desktopPreferences?.arrangementFor(entryId) ??
+            FirstPageArrangement.paired
+      : _externalArrangement;
+
+  void _savePreference(Future<void>? operation) {
+    if (operation == null) return;
+    unawaited(
+      operation.catchError((Object _) {
+        if (mounted) setState(() => _viewPreferenceError = '阅读设置暂未保存。');
+      }),
+    );
+  }
+
+  void _changeView(ReaderViewMode mode) {
+    if (_writing || _editing || mode == _desktopMode) return;
+    if (_desktopMode == ReaderViewMode.continuous) {
+      _continuousRestore = _continuous.anchor;
+      _continuousAnchorFocus = _visiblePage;
+    } else if (mode == ReaderViewMode.continuous &&
+        _session.pageKey != _continuousAnchorFocus) {
+      _continuousRestore = null;
+    }
+    setState(() {
+      _desktopMode = mode;
+      _direction = 0;
+      _inputGeneration++;
+      _cancelPick();
+      _transform.value = Matrix4.identity();
+    });
+    _savePreference(_desktopPreferences?.setMode(mode));
+  }
+
+  void _changeArrangement(FirstPageArrangement value) {
+    if (_writing || _editing) return;
+    final id = _session.current?.target.entryId ?? widget.initialTarget.entryId;
+    setState(() {
+      _externalArrangement = value;
+      _direction = 0;
+      _inputGeneration++;
+      _transform.value = Matrix4.identity();
+    });
+    if (widget.allowAnnotations) {
+      _savePreference(_desktopPreferences?.setArrangement(id, value));
+    }
+  }
+
+  Future<void> _annotationAction() async {
+    if (_writing) return;
+    if (_editing) {
+      _finishAnnotation();
+      return;
+    }
+    final document = _visibleDocument, visible = _visiblePage;
+    if (!widget.allowAnnotations ||
+        document == null ||
+        visible == null ||
+        _session.sourceChanged) {
+      return;
+    }
+    var selected = visible.pageNumber;
+    if (_desktopMode == ReaderViewMode.spread) {
+      final spread = ReaderSpreads(
+        pageCount: document.pageCount,
+        doublePage: true,
+        arrangement: _arrangementFor(document.target.entryId),
+      ).forPage(selected);
+      if (spread.first != spread.last) {
+        final result = await showDialog<int>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('选择批注页'),
+            content: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton(
+                  onPressed: () => Navigator.pop(context, spread.first),
+                  child: Text('左页 · ${spread.first}'),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton(
+                  onPressed: () => Navigator.pop(context, spread.last),
+                  child: Text('右页 · ${spread.last}'),
+                ),
+              ],
+            ),
+          ),
+        );
+        if (result == null ||
+            !mounted ||
+            _writing ||
+            _visibleDocument?.target.key != document.target.key) {
+          return;
+        }
+        selected = result;
+      }
+    }
+    if (_desktopMode == ReaderViewMode.continuous) {
+      _continuousRestore = _continuous.anchor;
+      _continuousEditStart = visible;
+      _continuousAnchorFocus = visible;
+    }
+    if (_session.page != selected) {
+      await _session.seek(selected, gesture: Object());
+    }
+    if (!mounted || _session.current?.target.key != document.target.key) return;
+    _inputGeneration++;
+    _setEditing(true);
+  }
+
+  void _finishAnnotation() {
+    if (_writing || !_editing) return;
+    if (_desktopMode == ReaderViewMode.continuous &&
+        _session.pageKey != _continuousEditStart) {
+      _continuousRestore = null;
+    }
+    _setEditing(false);
+  }
+
+  Future<void> _jumpDialog() async {
+    final document = _session.current;
+    if (document == null || _writing) return;
+    final key = document.target.key;
+    var input = '${_visiblePage?.pageNumber ?? _session.page}';
+    final target = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('跳转到页'),
+        content: SizedBox(
+          width: 160,
+          child: TextFormField(
+            autofocus: true,
+            initialValue: input,
+            onChanged: (value) => input = value,
+            keyboardType: TextInputType.number,
+            onFieldSubmitted: (value) => Navigator.pop(context, int.tryParse(value)),
+            decoration: InputDecoration(suffixText: '/ ${document.pageCount}'),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, int.tryParse(input)),
+            child: const Text('前往'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || target == null || _session.current?.target.key != key) {
+      return;
+    }
+    await _session.seek(target, gesture: Object());
+  }
+
+  void _retryOpen() {
+    final latest = widget.locate(widget.initialTarget.entryId);
+    if (latest != null) {
+      unawaited(_session.open(latest, itemId: widget.itemId, restore: false));
+    }
+  }
+
+  List<Widget> _desktopNotices() => [
+    if (widget.allowAnnotations &&
+        widget.workspace.store.storageWarnings.isNotEmpty)
+      _notice('已从备份恢复，请检查最近修改。'),
+    if (widget.allowAnnotations && widget.workspace.error != null)
+      _notice(widget.workspace.error!),
+    if (widget.allowAnnotations && widget.workspace.textConflictNotice != null)
+      _notice(widget.workspace.textConflictNotice!),
+    if (widget.allowAnnotations && widget.workspace.unsavedCount > 0)
+      Material(
+        color: const Color(0xffffedcf),
+        child: ListTile(
+          dense: true,
+          title: Text('${widget.workspace.unsavedCount} 项批注未保存'),
+          trailing: TextButton(
+            onPressed: () => unawaited(widget.workspace.retryStrokes()),
+            child: const Text('重试保存'),
+          ),
+        ),
+      ),
+    if (_session.message != null) _notice(_session.message!),
+    if (_navigationWarning != null) _notice(_navigationWarning!),
+    if (_pickMessage != null) _notice(_pickMessage!),
+    if (_viewPreferenceError != null) _notice(_viewPreferenceError!),
+    if (_session.sourceChanged) _notice('源曲谱已变更，当前为旧版。'),
+  ];
+
+  Widget _desktop(LoadedScore? current, PageKey? page, String title) {
+    final document = _visibleDocument ?? current;
+    final focus = _visiblePage?.pageNumber ?? _session.page;
+    final grouping = ReaderSpreads(
+      pageCount: document?.pageCount ?? 1,
+      doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
+      arrangement: _arrangementFor(
+        document?.target.entryId ?? widget.initialTarget.entryId,
+      ),
+    );
+    final shown = grouping.forPage(focus);
+    final pageLabel =
+        '${shown.first == shown.last ? focus : '${shown.first}–${shown.last}'} / ${document?.pageCount ?? 1}';
+    return Scaffold(
+      body: ReaderStage(
+        top: const SizedBox.shrink(),
+        bottom: const SizedBox.shrink(),
+        hasReadablePage: _visiblePage != null,
+        onViewportChanged: _resetViewport,
+        onPrevious: () => _navigate(NavigationDirection.backward),
+        onNext: () => _navigate(NavigationDirection.forward),
+        allowOverlayPageKeys: _sampleMenuOpen,
+        contentBuilder: (_) => DesktopReaderShell(
+          title: p.basename(title),
+          pageLabel: pageLabel,
+          mode: _effectiveDesktopMode,
+          arrangement: grouping.arrangement,
+          onMode: _changeView,
+          onArrangement: _changeArrangement,
+          onPrevious: () => _navigate(NavigationDirection.backward),
+          onNext: () => _navigate(NavigationDirection.forward),
+          onBack: () => unawaited(_back()),
+          onZoom: _zoom,
+          onFit: () {
+            if (_effectiveDesktopMode == ReaderViewMode.continuous) {
+              _continuous.fit();
+            } else {
+              _transform.value = Matrix4.identity();
+            }
+          },
+          onJump: () => unawaited(_jumpDialog()),
+          onAnnotate: widget.allowAnnotations
+              ? () => unawaited(_annotationAction())
+              : null,
+          onFinishEditing: _finishAnnotation,
+          editing: _editing,
+          writing: _writing,
+          annotationTools: page == null
+              ? null
+              : IgnorePointer(
+                  ignoring: _visiblePage != page,
+                  child: _tools(_visiblePage ?? page),
+                ),
+          bottom: _footer(),
+          notices: _desktopNotices(),
+          statusLabel: widget.workspace.unsavedCount > 0
+              ? '${widget.workspace.unsavedCount} 项未保存'
+              : '阅读状态',
+          loading: _session.loading && _visiblePage != null,
+          contentBuilder: (toggleBar) {
+            if (current == null || page == null) {
+              return Center(
+                child: _session.loading
+                    ? const CircularProgressIndicator()
+                    : FilledButton(
+                        onPressed: _retryOpen,
+                        child: const Text('重新打开'),
+                      ),
+              );
+            }
+            if (_effectiveDesktopMode == ReaderViewMode.continuous) {
+              return ReaderContinuousView(
+                key: ValueKey(current.target.key),
+                documentKey: current.target.key,
+                pageCount: current.pageCount,
+                aspectFor: current.aspectFor,
+                controller: _continuous,
+                requestedPage: _session.page,
+                navigationToken: _continuousNavigation,
+                initialAnchor: _continuousRestore,
+                controlKey: _seekRegionKey,
+                viewportKey: _viewportKey,
+                retainDocument: current.retain,
+                releaseDocument: current.release,
+                onCenterTap: toggleBar,
+                onPrevious: () => _navigate(NavigationDirection.backward),
+                onNext: () => _navigate(NavigationDirection.forward),
+                pageBuilder: (number, active, ready, failed) =>
+                    _surface(current, number, active, ready, failed),
+                onPresented: (number) {
+                  if (_effectiveDesktopMode != ReaderViewMode.continuous ||
+                      _session.current?.target.key != current.target.key) {
+                    return;
+                  }
+                  _followingContinuous = true;
+                  try {
+                    _session.followPresentedPage(
+                      PageKey(
+                        entryId: current.target.entryId,
+                        revisionId: current.target.revisionId,
+                        pageNumber: number,
+                      ),
+                    );
+                  } finally {
+                    _followingContinuous = false;
+                  }
+                  _markPresented(current, number);
+                },
+              );
+            }
+            final groups = ReaderSpreads(
+              pageCount: current.pageCount,
+              doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
+              arrangement: _arrangementFor(current.target.entryId),
+            );
+            final mode = _effectiveDesktopMode;
+            final viewKey = (current.target.key, mode, groups.arrangement);
+            double aspect(int index) {
+              final group = groups.at(index);
+              if (!groups.doublePage) return current.aspectFor(group.first);
+              return current.aspectFor(group.first) +
+                  current.aspectFor(
+                    group.last == group.first ? group.first : group.last,
+                  ) +
+                  .025;
+            }
+
+            return ReaderInput(
+              onPrevious: () => _navigate(NavigationDirection.backward),
+              onNext: () => _navigate(NavigationDirection.forward),
+              onCenterTap: _editing || _picking ? null : toggleBar,
+              allowPointerPageTurns: !_editing && !_picking && _scale <= 1.01,
+              pageAspect: aspect(
+                groups
+                    .forPage(
+                      _visiblePage?.document == current.target.key
+                          ? _visiblePage!.pageNumber
+                          : _session.page,
+                    )
+                    .index,
+              ),
+              mouseInk: _editing,
+              mouseWheel: true,
+              editing: _editing,
+              gestureGeneration: _inputGeneration,
+              transform: _transform,
+              viewportKey: _viewportKey,
+              touchControlKey: _seekRegionKey,
+              textTool: _textTool,
+              textSelectionKey: _textSelectionKey,
+              onTransformGestureChanged: (active) =>
+                  setState(() => _touchTransforming = active),
+              child: ReaderPageWindow(
+                documentKey: viewKey,
+                pageNumber: groups.forPage(_session.page).index,
+                pageCount: groups.count,
+                aspectFor: aspect,
+                direction: _direction,
+                requestedAt: _requestedAt,
+                presentationClock: widget.presentationClock,
+                forwardWindowOnly: true,
+                surfaceBackground: Colors.transparent,
+                retainDocument: current.retain,
+                releaseDocument: current.release,
+                holdPresentation: _writing,
+                onPresented: (key, index) {
+                  if (key != viewKey ||
+                      _effectiveDesktopMode != mode ||
+                      _session.current?.target.key != current.target.key ||
+                      _arrangementFor(current.target.entryId) !=
+                          groups.arrangement) {
+                    return;
+                  }
+                  final group = groups.at(index);
+                  _markPresented(
+                    current,
+                    group.contains(_session.page) ? _session.page : group.first,
+                  );
+                },
+                readyPageBuilder: (index, active, ready, failed) =>
+                    ReaderSpreadSurface(
+                      spread: groups.at(index),
+                      aspectFor: current.aspectFor,
+                      onReady: ready,
+                      onError: failed,
+                      pageBuilder: (number, pageReady, pageFailed) => _surface(
+                        current,
+                        number,
+                        active,
+                        pageReady,
+                        pageFailed,
+                      ),
+                    ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _markPresented(LoadedScore document, int number) {
+    if (!mounted || _session.current?.target.key != document.target.key) return;
+    final visible = PageKey(
+      entryId: document.target.entryId,
+      revisionId: document.target.revisionId,
+      pageNumber: number,
+    );
+    final changed = _visiblePage != visible || _visibleDocument != document;
+    if (changed) {
+      setState(() {
+        _cancelPick();
+        _visiblePage = visible;
+        _visibleDocument = document;
+      });
+    }
+    if (changed && widget.allowAnnotations) {
+      _session.rememberPresented(visible, document.pageCount);
+    }
+    widget.onPresented?.call(visible);
+    if (visible == _shownPage && !_presented) {
+      _presented = true;
+      debugPrint(
+        'READER page_presented page=$number elapsed_ms=${_pageWatch?.elapsedMilliseconds ?? 0}',
+      );
+    }
+    if (number == document.pageCount &&
+        (isMobileReader || _effectiveDesktopMode != ReaderViewMode.continuous)) {
+      unawaited(_prewarmNext());
+    }
   }
 
   Widget _surface(
@@ -618,29 +1085,36 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               }
             },
           ),
-        AnnotationTextLayer(
-          selectionKey: surfacePage == _visiblePage ? _textSelectionKey : null,
-          mouseControlKey: _seekRegionKey,
-          workspace: widget.workspace,
-          page: surfacePage,
-          enabled:
-              active &&
-              !_session.sourceChanged &&
-              !_picking &&
-              (!_textTool || (_editing && surfacePage == _visiblePage)),
-          textTool: _textTool,
-          style: _textTool
-              ? StrokeStyle(
-                  tool: AnnotationTool.pen,
-                  argb: _color,
-                  widthFraction: _style.widthFraction,
-                )
-              : _style,
-          eraser: _tool == ReaderTool.eraser,
-          eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
-          suspended: _touchTransforming,
-          onWritingChanged: _writingChanged,
-        ),
+        if (widget.allowAnnotations)
+          AnnotationTextLayer(
+            selectionKey: surfacePage == _visiblePage
+                ? _textSelectionKey
+                : null,
+            mouseControlKey: _seekRegionKey,
+            workspace: widget.workspace,
+            page: surfacePage,
+            enabled:
+                active &&
+                (isMobileReader ||
+                    (_editing &&
+                        surfacePage == _visiblePage &&
+                        surfacePage == _session.pageKey)) &&
+                !_session.sourceChanged &&
+                !_picking &&
+                (!_textTool || (_editing && surfacePage == _visiblePage)),
+            textTool: _textTool,
+            style: _textTool
+                ? StrokeStyle(
+                    tool: AnnotationTool.pen,
+                    argb: _color,
+                    widthFraction: _style.widthFraction,
+                  )
+                : _style,
+            eraser: _tool == ReaderTool.eraser,
+            eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
+            suspended: _touchTransforming,
+            onWritingChanged: _writingChanged,
+          ),
         if (_picking && surfacePage == _visiblePage)
           PaperColorPickLayer(
             onPick: (point) => unawaited(_pickColor(surfacePage, point)),
@@ -686,12 +1160,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (_renderedPages.add(page)) {
       debugPrint(
         'READER page_rendered page=$number window_size=${_renderedPages.length}',
-      );
-    }
-    if (page == _shownPage && !_presented) {
-      _presented = true;
-      debugPrint(
-        'READER page_presented page=$number elapsed_ms=${_pageWatch?.elapsedMilliseconds ?? 0}',
       );
     }
   }
@@ -830,7 +1298,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return;
     }
     _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
-    unawaited(_session.turn(direction));
+    if (!isMobileReader && !_editing && _desktopMode == ReaderViewMode.spread) {
+      final arrangements =
+          _desktopPreferences?.arrangements ??
+          const <String, FirstPageArrangement>{};
+      final external = _externalArrangement;
+      unawaited(
+        _session.turnSpread(
+          direction,
+          (id) => widget.allowAnnotations
+              ? arrangements[id] ?? FirstPageArrangement.paired
+              : external,
+        ),
+      );
+    } else {
+      unawaited(_session.turn(direction));
+    }
   }
 
   void _writingChanged(bool writing) {
@@ -845,7 +1328,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Widget _footer() {
-    if (!_editing || _writing || _visiblePage == null) {
+    final continuous =
+        !isMobileReader && _effectiveDesktopMode == ReaderViewMode.continuous;
+    if ((!_editing && !continuous) || _writing || _visiblePage == null) {
       return const SizedBox.shrink();
     }
     return ReaderPageSeekBar(
@@ -857,7 +1342,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       onCancel: _session.cancelSeek,
       onSeek: (number, gesture) {
         if (_writing ||
-            !_editing ||
+            (!_editing && !continuous) ||
             _session.current?.target.key != _visibleDocument?.target.key) {
           return;
         }
@@ -871,6 +1356,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _zoom(double factor) {
+    if (!isMobileReader && _effectiveDesktopMode == ReaderViewMode.continuous) {
+      _continuous.zoom(factor);
+      return;
+    }
     final next = (_scale * factor).clamp(1.0, 4.0);
     final viewport =
         _viewportKey.currentContext?.findRenderObject() as RenderBox?;

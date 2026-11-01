@@ -55,6 +55,11 @@ final readerRouteVisibility = ReaderRouteVisibilityObserver();
 const _readerActivityChannel = MethodChannel('score_reader/reader_activity');
 int _readerWakeSerial = 0;
 
+class ReaderStageController {
+  VoidCallback? _hide;
+  void hideTools() => _hide?.call();
+}
+
 /// Controls float above the unchanged full viewport. They never resize paper.
 class ReaderStage extends StatefulWidget {
   const ReaderStage({
@@ -73,6 +78,7 @@ class ReaderStage extends StatefulWidget {
     this.hasReadablePage = false,
     this.statusLabel = '阅读状态',
     this.loading = false,
+    this.controller,
   });
   final Widget Function(VoidCallback toggleTools) contentBuilder;
   final Widget top, bottom;
@@ -85,6 +91,7 @@ class ReaderStage extends StatefulWidget {
   final ValueChanged<bool>? onToolsVisibilityChanged;
   final bool hasReadablePage, loading;
   final String statusLabel;
+  final ReaderStageController? controller;
   @override
   State<ReaderStage> createState() => _ReaderStageState();
 }
@@ -105,6 +112,8 @@ class _ReaderStageState extends State<ReaderStage>
   bool _foreground =
       (WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed) ==
       AppLifecycleState.resumed;
+  late final VoidCallback _hideFromButton = _hideTools;
+  void _hideTools() => _show(false);
 
   void _setWake(bool value) {
     if (defaultTargetPlatform != TargetPlatform.iOS || value == _wakeHeld) {
@@ -132,6 +141,12 @@ class _ReaderStageState extends State<ReaderStage>
   @override
   void didUpdateWidget(covariant ReaderStage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      if (identical(oldWidget.controller?._hide, _hideFromButton)) {
+        oldWidget.controller?._hide = null;
+      }
+      widget.controller?._hide = _hideFromButton;
+    }
     _updateWake();
   }
 
@@ -158,6 +173,7 @@ class _ReaderStageState extends State<ReaderStage>
   @override
   void initState() {
     super.initState();
+    widget.controller?._hide = _hideFromButton;
     _animation = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
@@ -224,6 +240,9 @@ class _ReaderStageState extends State<ReaderStage>
 
   @override
   void dispose() {
+    if (identical(widget.controller?._hide, _hideFromButton)) {
+      widget.controller?._hide = null;
+    }
     _setWake(false);
     readerRouteVisibility.removeListener(_updateWake);
     WidgetsBinding.instance.removeObserver(this);

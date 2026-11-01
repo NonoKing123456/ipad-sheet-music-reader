@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math';
 
@@ -62,6 +63,21 @@ class _LiveLibrarySource implements LibrarySource {
       _current.openObject(entryId, revisionId);
 }
 
+class _OfflineEntryList extends ListBase<LibraryEntry> {
+  _OfflineEntryList(this.view, this.ids);
+  final ReplicaCollectionView view;
+  final List<String> ids;
+  @override
+  int get length => ids.length;
+  @override
+  set length(int value) => throw UnsupportedError('Read-only directory view');
+  @override
+  LibraryEntry operator [](int index) => view.entryForDisplay(ids[index])!;
+  @override
+  void operator []=(int index, LibraryEntry value) =>
+      throw UnsupportedError('Read-only directory view');
+}
+
 /// App-private orchestration. The protocol and domain stores own durable data.
 class SyncController extends ChangeNotifier {
   SyncController({
@@ -116,18 +132,31 @@ class SyncController extends ChangeNotifier {
           ? []
           : const [LibrarySourceInfo('legacy', '原谱库', online: false)]);
   LibrarySnapshot? _scoreCatalogSnapshot;
+  Object? _scoreCatalogToken;
   final _scoreCatalog = <String, ScoreCatalogEntry>{};
   List<ScoreCatalogEntry> _scoreCatalogValues = const [];
+  final _offlineByFolder = <(String, String), List<LibraryEntry>>{};
+  final _offlineSearchText = <String, String>{};
+  List<LibraryEntry> _offlineMissing = const [];
+  (LibrarySnapshot?, String?, String, String, bool)? _offlineSearchKey;
+  List<LibraryEntry> _offlineSearchResults = const [];
+  (CollectionDirectoryIndex, String?, String, String, bool)?
+  _directorySearchKey;
+  List<String> _directorySearchIds = const [];
   void _indexScoreCatalog() {
-    final snapshot = offlineSnapshot;
-    if (identical(snapshot, _scoreCatalogSnapshot)) return;
+    final selected = activeCollection;
+    final snapshot = selected == null ? offlineSnapshot : null;
+    final token = selected == null
+        ? snapshot
+        : (selected, selected.index, selected.contentRevision);
+    if (token == _scoreCatalogToken) return;
+    _scoreCatalogToken = token;
     _scoreCatalogSnapshot = snapshot;
     _scoreCatalog.clear();
     final names = {for (final source in offlineSources) source.id: source.name};
     final online = {
       for (final source in offlineSources) source.id: source.online,
     };
-    final selected = activeCollection;
     if (selected != null) {
       for (final item in selected.currentItems) {
         final old = selected.readableItemFor(item.entryId);
@@ -171,6 +200,84 @@ class SyncController extends ChangeNotifier {
       }
     }
     _scoreCatalogValues = List.unmodifiable(_scoreCatalog.values);
+    _offlineByFolder.clear();
+    _offlineSearchText.clear();
+    _offlineMissing = List.unmodifiable(
+      snapshot?.entries.where((entry) => entry.status == EntryStatus.missing) ??
+          <LibraryEntry>[],
+    );
+    for (final entry in snapshot?.availableEntries ?? <LibraryEntry>[]) {
+      final metadata = _scoreCatalog[entry.id];
+      final folder = p.posix.dirname(entry.relativePath);
+      (_offlineByFolder[(
+                metadata?.sourceId ?? 'legacy',
+                folder == '.' ? '' : folder,
+              )] ??=
+              [])
+          .add(entry);
+      _offlineSearchText[entry.id] =
+          '${metadata?.sourceName ?? ''}/${entry.relativePath}'.toLowerCase();
+    }
+  }
+
+  List<LibraryEntry> get offlineMissingEntries {
+    final selected = activeCollection;
+    if (selected != null) {
+      return _OfflineEntryList(selected, selected.directory.missingIds);
+    }
+    _indexScoreCatalog();
+    return _offlineMissing;
+  }
+
+  List<LibraryEntry> offlineEntries({
+    required String? sourceId,
+    required String folder,
+    required String query,
+    required bool withinFolder,
+  }) {
+    final selected = activeCollection;
+    if (selected != null) {
+      final directory = selected.directory;
+      List<String> ids;
+      if (query.trim().isEmpty) {
+        ids = directory.idsInFolder(sourceId, folder);
+      } else {
+        final key = (directory, sourceId, folder, query, withinFolder);
+        if (key != _directorySearchKey) {
+          final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+          _directorySearchIds = [
+            for (final id in directory.availableIds)
+              if ((!withinFolder ||
+                      (directory.sourceForId(id) == sourceId &&
+                          folderContains(
+                            folder,
+                            selected.itemFor(id)!.relativePath,
+                          ))) &&
+                  terms.every(directory.searchText[id]!.contains))
+                id,
+          ];
+          _directorySearchKey = key;
+        }
+        ids = _directorySearchIds;
+      }
+      return _OfflineEntryList(selected, ids);
+    }
+    _indexScoreCatalog();
+    if (query.trim().isEmpty) {
+      return _offlineByFolder[(sourceId, folder)] ?? const [];
+    }
+    final key = (_scoreCatalogSnapshot, sourceId, folder, query, withinFolder);
+    if (key == _offlineSearchKey) return _offlineSearchResults;
+    final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+    _offlineSearchKey = key;
+    return _offlineSearchResults = [
+      for (final entry in offlineSnapshot?.availableEntries ?? <LibraryEntry>[])
+        if ((!withinFolder ||
+                (_scoreCatalog[entry.id]?.sourceId == sourceId &&
+                    folderContains(folder, entry.relativePath))) &&
+            terms.every(_offlineSearchText[entry.id]!.contains))
+          entry,
+    ];
   }
 
   List<ScoreCatalogEntry> get offlineScoreCatalog {
@@ -179,16 +286,33 @@ class SyncController extends ChangeNotifier {
   }
 
   String sourceNameFor(String entryId) {
+    final selected = activeCollection;
+    if (selected != null) {
+      return selected.directory.sourceNames[selected.directory.sourceForId(
+            entryId,
+          )] ??
+          '谱库';
+    }
     _indexScoreCatalog();
     return _scoreCatalog[entryId]?.sourceName ?? '谱库';
   }
 
   String? sourceIdFor(String entryId) {
+    final selected = activeCollection;
+    if (selected != null) return selected.directory.sourceForId(entryId);
     _indexScoreCatalog();
     return _scoreCatalog[entryId]?.sourceId;
   }
 
   bool hasPendingVersion(String id) {
+    final selected = activeCollection;
+    if (selected != null) {
+      final current = selected.itemFor(id), old = selected.readableItemFor(id);
+      return current != null &&
+          old != null &&
+          selected.isReady(old) &&
+          old.revisionId != current.revisionId;
+    }
     _indexScoreCatalog();
     return _scoreCatalog[id]?.state == ScoreContentState.readableOld;
   }
@@ -196,9 +320,8 @@ class SyncController extends ChangeNotifier {
   Future<String> prepareOfflineScores(Set<String> entryIds) async {
     if (busy) return '正在更新，请完成后再准备曲单。';
     if (hasUnsavedEdits) return '请先保存或重试未保存的批注，再准备曲单。';
-    _indexScoreCatalog();
     final selected = entryIds
-        .map((id) => _scoreCatalog[id])
+        .map(_catalogEntry)
         .whereType<ScoreCatalogEntry>()
         .where((entry) => entry.needsPreparation && entry.sourceId != null)
         .toList();
@@ -216,12 +339,46 @@ class SyncController extends ChangeNotifier {
     final scope = entryIds
         .where(
           (id) =>
-              _scoreCatalog[id]?.needsPreparation == true ||
-              _scoreCatalog[id]?.readable != true,
+              _catalogEntry(id)?.needsPreparation == true ||
+              _catalogEntry(id)?.readable != true,
         )
         .toSet();
     await synchronize(onlyEntryIds: scope);
     return message ?? '准备尚未完成，请检查电脑连接后重试。';
+  }
+
+  ScoreCatalogEntry? _catalogEntry(String id) {
+    final selected = activeCollection;
+    if (selected == null) {
+      _indexScoreCatalog();
+      return _scoreCatalog[id];
+    }
+    final item = selected.itemFor(id);
+    if (item == null) return null;
+    final old = selected.readableItemFor(id);
+    final readable = old != null && selected.isReady(old);
+    final online = selected.index!.sources
+        .firstWhere((s) => s.id == item.sourceId)
+        .online;
+    final state = item.missing
+        ? ScoreContentState.missing
+        : !readable
+        ? (online
+              ? ScoreContentState.notDownloaded
+              : ScoreContentState.sourceOffline)
+        : old.revisionId != item.revisionId
+        ? ScoreContentState.readableOld
+        : ScoreContentState.ready;
+    final name = selected.directory.sourceNames[item.sourceId] ?? '谱库';
+    return ScoreCatalogEntry(
+      entryId: id,
+      displayPath: item.relativePath,
+      parentFolderLabel: '$name · ${scoreParentFolder(item.relativePath)}',
+      state: state,
+      sourceId: item.sourceId,
+      sourceName: name,
+      bytes: item.length,
+    );
   }
 
   LibrarySnapshot? _downloadFolderSnapshot;
@@ -232,6 +389,16 @@ class SyncController extends ChangeNotifier {
     required String sourceId,
     String folder = '',
   }) {
+    final collection = activeCollection;
+    if (collection != null) {
+      final counts = collection.directory.folderStatus(sourceId, folder);
+      return OfflineFolderStatus(
+        total: counts.$1,
+        currentReady: counts.$2,
+        readable: counts.$3,
+        pendingUpdate: counts.$4,
+      );
+    }
     final snapshot = offlineSnapshot;
     if (!identical(snapshot, _downloadFolderSnapshot)) {
       _downloadFolderSnapshot = snapshot;
@@ -338,6 +505,7 @@ class SyncController extends ChangeNotifier {
   }
 
   LibrarySnapshot? _targetSnapshot;
+  Object? _targetCollectionToken;
   final Map<String, ScoreTarget> _offlineTargets = {};
   List<ScoreTarget> _readyTargets = const [];
   List<ScoreTarget> get offlineTargets {
@@ -348,6 +516,15 @@ class SyncController extends ChangeNotifier {
   void _indexOfflineTargets() {
     final view = replica;
     final selected = activeCollection;
+    if (selected != null) {
+      final token = (selected, selected.contentRevision, selected.directory);
+      if (_targetCollectionToken == token) return;
+      _targetCollectionToken = token;
+      _readyTargets = [
+        for (final id in selected.directory.availableIds) ?locateOffline(id),
+      ];
+      return;
+    }
     final snapshot = offlineSnapshot;
     if (identical(snapshot, _targetSnapshot)) return;
     _targetSnapshot = snapshot;
@@ -400,6 +577,7 @@ class SyncController extends ChangeNotifier {
   bool get hasOfflineLibrary =>
       collection?.index != null || replica?.manifest != null;
   int get offlineCount =>
+      activeCollection?.directory.readableCount ??
       offlineSnapshot?.availableEntries
           .where((e) => e.availability == ContentAvailability.ready)
           .length ??
@@ -647,7 +825,7 @@ class SyncController extends ChangeNotifier {
               ? identity['id'] as String
               : null,
           bindings: () => library.sources,
-          onMaterialized: library.refreshSourceMetadata,
+          prepareEntry: library.prepareForRead,
         ),
         readerStore: workspace.store,
         stateDirectory: p.join(
@@ -897,8 +1075,11 @@ class SyncController extends ChangeNotifier {
         phase = result.status == LibrarySyncStatus.cancelled
             ? SyncPhase.cancelled
             : SyncPhase.partial;
-        message = onlyEntryIds != null && result.error == 'Scoped preparation requires a v2 computer'
-            ? '请先更新电脑端，再按曲单准备。' : _libraryFailureMessage(result.failure);
+        message =
+            onlyEntryIds != null &&
+                result.error == 'Scoped preparation requires a v2 computer'
+            ? '请先更新电脑端，再按曲单准备。'
+            : _libraryFailureMessage(result.failure);
         if (result.status == LibrarySyncStatus.cancelled ||
             (onlyEntryIds != null &&
                 result.error == 'Scoped preparation requires a v2 computer') ||
@@ -1018,6 +1199,28 @@ class SyncController extends ChangeNotifier {
   }
 
   ScoreTarget? locateOffline(String entryId) {
+    final selected = activeCollection;
+    if (selected != null) {
+      final readable = selected.readableItemFor(entryId);
+      if (readable == null ||
+          !selected.isReady(readable) ||
+          selected.itemFor(entryId)?.missing != false) {
+        return null;
+      }
+      final entry = selected.entryForDisplay(entryId)!;
+      return ScoreTarget(
+        entryId: entry.id,
+        revisionId: entry.currentRevisionId,
+        filePath: selected.presentationPathFor(entry.id),
+        displayPath: entry.relativePath,
+        parentFolderLabel:
+            '${sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}',
+        contentHash: entry.currentRevision.contentHash,
+        verifiedImmutable: true,
+        validateBeforeRead: () =>
+            selected.validateForRead(entry.id, entry.currentRevisionId),
+      );
+    }
     _indexOfflineTargets();
     return _offlineTargets[entryId];
   }

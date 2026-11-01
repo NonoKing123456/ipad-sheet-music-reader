@@ -133,21 +133,112 @@ class LibrarySnapshot {
   })  : entries = List.unmodifiable(entries),
         folders = List.unmodifiable(folders);
 
+  LibrarySnapshot._replacement(
+      {required this.rootPath,
+      required this.generation,
+      required this.entries,
+      required this.folders,
+      required this.savedUtc});
+
   final String rootPath;
   final int generation;
   final List<LibraryEntry> entries;
   final List<String> folders;
   final DateTime savedUtc;
 
-  Iterable<LibraryEntry> get availableEntries =>
-      entries.where((entry) => entry.status == EntryStatus.available);
+  List<LibraryEntry>? _availableEntries;
+  Map<String, LibraryEntry>? _entriesById;
+  List<LibraryEntry> get availableEntries =>
+      _availableEntries ??= List.unmodifiable(
+          entries.where((entry) => entry.status == EntryStatus.available));
 
-  LibraryEntry? entryById(String id) {
+  Map<String, LibraryEntry> _indexEntries() {
+    final result = <String, LibraryEntry>{};
     for (final entry in entries) {
-      if (entry.id == id) return entry;
+      result.putIfAbsent(entry.id, () => entry);
     }
-    return null;
+    return result;
   }
+
+  LibraryEntry? entryById(String id) => (_entriesById ??= _indexEntries())[id];
+
+  LibrarySnapshot withGeneration(int generation) {
+    final next = LibrarySnapshot._replacement(
+        rootPath: rootPath,
+        generation: generation,
+        entries: entries,
+        folders: folders,
+        savedUtc: savedUtc);
+    next._entriesById = _entriesById;
+    next._availableEntries = _availableEntries;
+    return next;
+  }
+
+  /// Replacing one ready/deferred revision preserves sibling object identities
+  /// and lookup caches. Old immutable snapshots keep their own maps/lists.
+  LibrarySnapshot replacingEntry(LibraryEntry replacement,
+      {required int generation, required DateTime savedUtc}) {
+    final previous = entryById(replacement.id);
+    if (previous == null) throw StateError('Unknown replacement entry.');
+    final next = LibrarySnapshot._replacement(
+        rootPath: rootPath,
+        generation: generation,
+        entries: List.unmodifiable([
+          for (final entry in entries)
+            entry.id == replacement.id ? replacement : entry
+        ]),
+        folders: folders,
+        savedUtc: savedUtc);
+    next._entriesById = Map.of(_entriesById!)..[replacement.id] = replacement;
+    if (_availableEntries != null && previous.status == replacement.status) {
+      next._availableEntries = List.unmodifiable([
+        for (final entry in _availableEntries!)
+          entry.id == replacement.id ? replacement : entry,
+      ]);
+    }
+    return next;
+  }
+}
+
+/// Immutable hierarchy shared by both directory views. Building visible row
+/// metadata is linear in folders; widget creation can stay viewport-limited.
+class FolderHierarchy {
+  FolderHierarchy(Iterable<String> folders) {
+    for (final folder in folders) {
+      if (folder.isEmpty) continue;
+      final slash = folder.lastIndexOf('/');
+      final parent = slash < 0 ? '' : folder.substring(0, slash);
+      (_children[parent] ??= []).add(folder);
+    }
+    for (final children in _children.values) {
+      children.sort();
+    }
+  }
+  final _children = <String, List<String>>{};
+  List<String> childrenOf(String folder) => _children[folder] ?? const [];
+
+  List<FolderTreeRow> visibleRows(Set<String> collapsed) {
+    final result = <FolderTreeRow>[];
+    final pending = <FolderTreeRow>[
+      for (final root in childrenOf('').reversed) FolderTreeRow(root, 1),
+    ];
+    while (pending.isNotEmpty) {
+      final row = pending.removeLast();
+      result.add(row);
+      if (!collapsed.contains(row.path)) {
+        for (final child in childrenOf(row.path).reversed) {
+          pending.add(FolderTreeRow(child, row.depth + 1));
+        }
+      }
+    }
+    return result;
+  }
+}
+
+class FolderTreeRow {
+  const FolderTreeRow(this.path, this.depth);
+  final String path;
+  final int depth;
 }
 
 class InferredMove {
@@ -230,4 +321,10 @@ class ConcurrentCatalogWriteException implements Exception {
   final String message;
   @override
   String toString() => 'ConcurrentCatalogWriteException: $message';
+}
+
+/// Cooperative cancellation before a background scan commits. No snapshot was
+/// published; the caller may coalesce and reschedule the scan while idle.
+class CatalogScanYielded implements Exception {
+  const CatalogScanYielded();
 }

@@ -2,9 +2,12 @@ import 'score_path_label.dart';
 import 'directory_navigation.dart';
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
@@ -13,7 +16,6 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:reader_state/reader_state.dart';
 
-import '../reader/reader_screen.dart';
 import '../reader/library_reader_screen.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
@@ -23,16 +25,27 @@ import '../sync/sync_controller.dart';
 import '../sync/sync_screen.dart';
 import '../sync/offline_library_screen.dart';
 
+Future<String> _hashExternalFile(String path) async =>
+    (await sha256.bind(File(path).openRead()).first).toString();
+
+class _ExternalHashRequest {
+  const _ExternalHashRequest(this.path);
+  final String path;
+  Future<String> call() => _hashExternalFile(path);
+}
+
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({
     super.key,
     this.controller,
     this.dataDirectory,
     this.readerWorkspace,
+    this.initialPath,
   });
   final LibraryController? controller;
   final Directory? dataDirectory;
   final ReaderWorkspace? readerWorkspace;
+  final String? initialPath;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -45,6 +58,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
   final Set<String> _collapsedFolders = {};
+  List<String>? _treeFolders;
+  FolderHierarchy? _hierarchy;
+  List<FolderTreeRow>? _treeRows;
   String? _initializationError;
   ReaderWorkspace? _workspace;
   Future<ReaderWorkspace>? _workspaceFuture;
@@ -88,6 +104,9 @@ class _LibraryScreenState extends State<LibraryScreen>
       setState(() {});
       if (!controller.initialized) await controller.initialize();
       await _prepareSync();
+      if (widget.initialPath != null && mounted) {
+        unawaited(_openPath(widget.initialPath!));
+      }
     } catch (failure) {
       debugPrint('LIBRARY data_directory_failed: $failure');
       if (mounted) {
@@ -178,11 +197,64 @@ class _LibraryScreenState extends State<LibraryScreen>
       ],
     );
     if (file != null && mounted) {
+      await _openPath(file.path);
+    }
+  }
+
+  Future<void> _openPath(String path) async {
+    final library = _library;
+    if (library == null || _openingReader) return;
+    try {
+      final (registered, entry) = await library.entryForFilePath(path);
+      if (!mounted) return;
+      if (entry != null) {
+        await _openEntry(entry);
+        return;
+      }
+      if (registered) {
+        library.scheduleRescan();
+        _message('目录正在更新，请刷新后重试。');
+        return;
+      }
+      _openingReader = true;
+      final workspace = await _prepareReader();
+      final actual = p.normalize(await File(path).resolveSymbolicLinks());
+      final stat = await File(actual).stat();
+      final contentHash = await Isolate.run(_ExternalHashRequest(actual).call);
+      final after = await File(actual).stat();
+      if (after.size != stat.size || after.modified != stat.modified) {
+        throw const FileSystemException('Selected file changed.');
+      }
+      final revision = sha256
+          .convert(
+            utf8.encode(
+              '$actual/${stat.size}/${stat.modified.microsecondsSinceEpoch}',
+            ),
+          )
+          .toString();
+      final target = ScoreTarget(
+        entryId: 'external-view',
+        revisionId: revision,
+        filePath: actual,
+        contentHash: contentHash,
+        displayPath: actual,
+      );
+      if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => ReaderScreen(initialPath: file.path),
+          builder: (_) => LibraryReaderScreen(
+            workspace: workspace,
+            initialTarget: target,
+            locate: (id) => id == target.entryId ? target : null,
+            allowAnnotations: false,
+          ),
         ),
       );
+    } catch (failure) {
+      if (mounted) _message('无法打开曲谱，请重试。');
+      debugPrint('READER selected_path_failed: $failure');
+    } finally {
+      _openingReader = false;
     }
   }
 
@@ -220,7 +292,6 @@ class _LibraryScreenState extends State<LibraryScreen>
           ),
         ),
       );
-      if (mounted) library.scheduleRescan();
     } catch (failure, stack) {
       debugPrint('READER workspace_failed: $failure\n$stack');
       if (mounted) _message('无法打开批注数据，请检查应用存储。');
@@ -232,20 +303,19 @@ class _LibraryScreenState extends State<LibraryScreen>
   ScoreTarget? _locate(String id) {
     final library = _library;
     if (library?.snapshot == null) return null;
-    for (final entry in library!.snapshot!.availableEntries) {
-      if (entry.id == id) {
-        return ScoreTarget(
-          entryId: entry.id,
-          revisionId: entry.currentRevisionId,
-          filePath: library.absolutePathFor(entry),
-          displayPath: library.absolutePathFor(entry),
-          parentFolderLabel:
-              '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
-          contentHash: entry.currentRevision.contentHash,
-          validateBeforeRead: () =>
-              library.validateForRead(entry.id, entry.currentRevisionId),
-        );
-      }
+    final entry = library!.snapshot!.entryById(id);
+    if (entry != null && entry.status == EntryStatus.available) {
+      return ScoreTarget(
+        entryId: entry.id,
+        revisionId: entry.currentRevisionId,
+        filePath: library.absolutePathFor(entry),
+        displayPath: library.absolutePathFor(entry),
+        parentFolderLabel:
+            '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
+        contentHash: entry.currentRevision.contentHash,
+        validateBeforeRead: () =>
+            library.validateForRead(entry.id, entry.currentRevisionId),
+      );
     }
     return null;
   }
@@ -605,33 +675,56 @@ class _LibraryScreenState extends State<LibraryScreen>
     ),
   );
 
-  Widget _sidebar(LibraryController library) => Material(
-    color: const Color(0xfff6f5ef),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(18, 20, 18, 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '文件夹',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${library.totalCount} 份曲谱 · ${library.folders.length - 1} 个文件夹',
-                style: const TextStyle(color: Color(0xff65736b), fontSize: 12),
-              ),
-            ],
+  Widget _sidebar(LibraryController library) {
+    final folders = library.folders;
+    if (!identical(folders, _treeFolders)) {
+      _treeFolders = folders;
+      _hierarchy = FolderHierarchy(folders);
+      _treeRows = null;
+    }
+    final visible = _treeRows ??= _hierarchy!.visibleRows(_collapsedFolders);
+    final rows = [
+      for (final source in library.sources) ...[
+        (source, null as FolderTreeRow?),
+        if (source.id == library.selectedSourceId)
+          for (final row in visible) (source, row),
+      ],
+    ];
+    return Material(
+      color: const Color(0xfff6f5ef),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 20, 18, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '文件夹',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${library.selectedSourceCount} 份曲谱 · ${library.folders.length - 1} 个文件夹',
+                  style: const TextStyle(
+                    color: Color(0xff65736b),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-        Expanded(
-          child: ListView(
-            children: [
-              for (final source in library.sources) ...[
-                ListTile(
+          Expanded(
+            child: ListView.builder(
+              key: const PageStorageKey('library-folder-tree'),
+              itemCount: rows.length,
+              itemBuilder: (context, index) {
+                final (source, row) = rows[index];
+                if (row != null) {
+                  return _folderNode(library, row.path, row.depth);
+                }
+                return ListTile(
                   key: ValueKey('source-${source.id}'),
                   leading: const Icon(Icons.library_music_outlined),
                   selected:
@@ -647,32 +740,27 @@ class _LibraryScreenState extends State<LibraryScreen>
                     _search.clear();
                     library.setSource(source.id);
                   },
-                ),
-                if (source.id == library.selectedSourceId)
-                  for (final folder in library.folders.where(
-                    (f) => f.isNotEmpty && _parent(f).isEmpty,
-                  ))
-                    _folderNode(library, folder, 1),
-              ],
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Tooltip(
-            message:
-                library.selectedSource?.catalog.rootPath ?? library.rootPath!,
-            child: Text(
-              library.selectedSource?.catalog.rootPath ?? library.rootPath!,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: Color(0xff65736b)),
+                );
+              },
             ),
           ),
-        ),
-      ],
-    ),
-  );
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Tooltip(
+              message:
+                  library.selectedSource?.catalog.rootPath ?? library.rootPath!,
+              child: Text(
+                library.selectedSource?.catalog.rootPath ?? library.rootPath!,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Color(0xff65736b)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   String _parent(String folder) {
     final index = folder.lastIndexOf('/');
@@ -680,60 +768,47 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Widget _folderNode(LibraryController library, String folder, int depth) {
-    final children =
-        library.folders
-            .where(
-              (candidate) =>
-                  candidate.isNotEmpty && _parent(candidate) == folder,
-            )
-            .toList()
-          ..sort();
+    final children = _hierarchy!.childrenOf(folder);
     final expanded = !_collapsedFolders.contains(folder);
     final selected = library.currentFolder == folder;
-    return Column(
-      children: [
-        Padding(
-          padding: EdgeInsets.only(left: mathIndent(depth)),
-          child: ListTile(
-            dense: true,
-            selected: selected,
-            selectedTileColor: const Color(0xffdfe8df),
-            leading: Icon(
-              folder.isEmpty
-                  ? Icons.library_music_outlined
-                  : Icons.folder_outlined,
-              size: 20,
-            ),
-            title: Tooltip(
-              message: folder.isEmpty ? library.rootPath! : folder,
-              child: Text(
-                folder.isEmpty
-                    ? p.basename(library.rootPath!)
-                    : p.posix.basename(folder),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            trailing: children.isEmpty
-                ? null
-                : IconButton(
-                    tooltip: expanded ? '收起文件夹' : '展开文件夹',
-                    icon: Icon(
-                      expanded ? Icons.expand_less : Icons.expand_more,
-                      size: 18,
-                    ),
-                    onPressed: () => setState(() {
-                      expanded
-                          ? _collapsedFolders.add(folder)
-                          : _collapsedFolders.remove(folder);
-                    }),
-                  ),
-            onTap: () => _folder(folder),
+    return Padding(
+      key: ValueKey('folder-$folder'),
+      padding: EdgeInsets.only(left: mathIndent(depth)),
+      child: ListTile(
+        dense: true,
+        selected: selected,
+        selectedTileColor: const Color(0xffdfe8df),
+        leading: Icon(
+          folder.isEmpty ? Icons.library_music_outlined : Icons.folder_outlined,
+          size: 20,
+        ),
+        title: Tooltip(
+          message: folder.isEmpty ? library.rootPath! : folder,
+          child: Text(
+            folder.isEmpty
+                ? p.basename(library.rootPath!)
+                : p.posix.basename(folder),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
         ),
-        if (expanded)
-          for (final child in children) _folderNode(library, child, depth + 1),
-      ],
+        trailing: children.isEmpty
+            ? null
+            : IconButton(
+                tooltip: expanded ? '收起文件夹' : '展开文件夹',
+                icon: Icon(
+                  expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                onPressed: () => setState(() {
+                  expanded
+                      ? _collapsedFolders.add(folder)
+                      : _collapsedFolders.remove(folder);
+                  _treeRows = null;
+                }),
+              ),
+        onTap: () => _folder(folder),
+      ),
     );
   }
 

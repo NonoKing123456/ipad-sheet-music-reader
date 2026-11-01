@@ -63,6 +63,7 @@ class ReaderInput extends StatefulWidget {
     this.gestureGeneration = 0,
     this.textTool = false,
     this.textSelectionKey,
+    this.mouseWheel = false,
   });
 
   final Widget child;
@@ -82,6 +83,7 @@ class ReaderInput extends StatefulWidget {
   final int gestureGeneration;
   final bool textTool;
   final GlobalKey? textSelectionKey;
+  final bool mouseWheel;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -100,6 +102,7 @@ class _ReaderInputState extends State<ReaderInput> {
   bool _pinching = false;
   Axis? _singleAxis;
   int _touchGeneration = 0;
+  double _wheelTravel = 0;
 
   @override
   void didUpdateWidget(covariant ReaderInput oldWidget) {
@@ -126,6 +129,7 @@ class _ReaderInputState extends State<ReaderInput> {
       final transforming = _touches.length >= 2;
       final generation = ++_touchGeneration;
       _pointers.clear();
+      _wheelTravel = 0;
       _textMoves.clear();
       _touches.clear();
       _origin = null;
@@ -368,6 +372,50 @@ class _ReaderInputState extends State<ReaderInput> {
     }
   }
 
+  void _signal(PointerSignalEvent event) {
+    if (!widget.mouseWheel ||
+        !widget.enabled ||
+        event is! PointerScrollEvent ||
+        _pointers.isNotEmpty ||
+        _inkPointers.isNotEmpty ||
+        _insideControl(event.position)) {
+      return;
+    }
+    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+      final controller = widget.transform;
+      if (controller == null) return;
+      final matrix = controller.value;
+      final scale = matrix.getMaxScaleOnAxis();
+      if (HardwareKeyboard.instance.isControlPressed) {
+        final next = (scale * math.exp(-event.scrollDelta.dy / 360)).clamp(
+          1.0,
+          4.0,
+        );
+        final scene = controller.toScene(event.localPosition);
+        _matrix(next, event.localPosition - scene * next);
+      } else if (scale > 1.000001) {
+        _matrix(
+          scale,
+          Offset(matrix.storage[12], matrix.storage[13]) - event.scrollDelta,
+        );
+      } else if (widget.allowPointerPageTurns) {
+        if (_wheelTravel.sign != event.scrollDelta.dy.sign) _wheelTravel = 0;
+        _wheelTravel += event.scrollDelta.dy;
+        if (_wheelTravel.abs() >= 48) {
+          _wheelTravel > 0 ? widget.onNext() : widget.onPrevious();
+          _wheelTravel = 0;
+        }
+      }
+    });
+  }
+
+  bool _insideControl(Offset position) {
+    final box = widget.touchControlKey?.currentContext?.findRenderObject();
+    return box is RenderBox &&
+        box.hasSize &&
+        (Offset.zero & box.size).contains(box.globalToLocal(position));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Focus(
@@ -394,6 +442,7 @@ class _ReaderInputState extends State<ReaderInput> {
           return Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: _down,
+            onPointerSignal: _signal,
             onPointerMove: _move,
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {

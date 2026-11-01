@@ -101,6 +101,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
   final Set<String> _collapsed = {};
+  Object? _treeStructure;
+  FolderHierarchy? _hierarchy;
+  List<FolderTreeRow>? _treeRows;
   String _folder = '';
   bool _withinFolder = false;
   bool _opening = false;
@@ -321,33 +324,15 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           const [''];
       final folder = folders.contains(_folder) ? _folder : '';
       final searching = _search.text.trim().isNotEmpty;
-      final terms = _search.text.toLowerCase().trim().split(RegExp(r'\s+'));
-      final entries =
-          (sync.offlineSnapshot?.availableEntries ?? <LibraryEntry>[]).where((
-            entry,
-          ) {
-            final sourceId = sync.sourceIdFor(entry.id);
-            if (!searching) {
-              return sourceId == _activeSourceId &&
-                  _parent(entry.relativePath) == folder;
-            }
-            if (_withinFolder &&
-                (sourceId != _activeSourceId ||
-                    !folderContains(folder, entry.relativePath))) {
-              return false;
-            }
-            final text = '${sync.sourceNameFor(entry.id)}/${entry.relativePath}'
-                .toLowerCase();
-            return terms.every(text.contains);
-          }).toList();
-      final children = searching
-          ? <String>[]
-          : folders.where((f) => f.isNotEmpty && _parent(f) == folder).toList();
-      final missing =
-          sync.offlineSnapshot?.entries
-              .where((e) => e.status == EntryStatus.missing)
-              .toList() ??
-          <LibraryEntry>[];
+      final entries = sync.offlineEntries(
+        sourceId: _activeSourceId,
+        folder: folder,
+        query: _search.text,
+        withinFolder: _withinFolder,
+      );
+      _ensureHierarchy(folders);
+      final children = searching ? <String>[] : _hierarchy!.childrenOf(folder);
+      final missing = sync.offlineMissingEntries;
       return LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 850;
@@ -674,17 +659,47 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       );
     },
   );
-  Widget _tree(List<String> folders) => Material(
-    color: const Color(0xfff6f5ef),
-    child: ListView(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      children: [
-        const Padding(
-          padding: EdgeInsets.all(16),
-          child: Text('离线文件夹', style: TextStyle(fontWeight: FontWeight.w600)),
-        ),
-        for (final source in widget.controller.offlineSources) ...[
-          ListTile(
+  void _ensureHierarchy(List<String> folders) {
+    final key = (
+      widget.controller.activeCollection?.directory ?? folders,
+      _activeSourceId,
+    );
+    if (key != _treeStructure) {
+      _treeStructure = key;
+      _hierarchy = FolderHierarchy(folders);
+      _treeRows = null;
+    }
+  }
+
+  Widget _tree(List<String> folders) {
+    _ensureHierarchy(folders);
+    final visible = _treeRows ??= _hierarchy!.visibleRows(_collapsed);
+    final rows = [
+      for (final source in widget.controller.offlineSources) ...[
+        (source, null as FolderTreeRow?),
+        if (_activeSourceId == source.id)
+          for (final row in visible) (source, row),
+      ],
+    ];
+    return Material(
+      color: const Color(0xfff6f5ef),
+      child: ListView.builder(
+        key: const PageStorageKey('offline-folder-tree'),
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        itemCount: rows.length + 1,
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            return const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                '离线文件夹',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+            );
+          }
+          final (source, row) = rows[index - 1];
+          if (row != null) return _node(row.path, row.depth);
+          return ListTile(
             title: Text(
               source.name,
               maxLines: 1,
@@ -707,63 +722,44 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                         unawaited(_download(sourceId: source.id, folder: '')),
                   )
                 : null,
-          ),
-          if (_activeSourceId == source.id)
-            for (final folder in folders.where(
-              (f) => f.isNotEmpty && _parent(f).isEmpty,
-            ))
-              _node(folder, folders, 1),
-        ],
-      ],
-    ),
-  );
-  Widget _node(String folder, List<String> folders, int depth) {
-    final children =
-        folders
-            .where(
-              (candidate) =>
-                  candidate.isNotEmpty && _parent(candidate) == folder,
-            )
-            .toList()
-          ..sort();
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _node(String folder, int depth) {
+    final children = _hierarchy!.childrenOf(folder);
     final expanded = !_collapsed.contains(folder);
-    return Column(
-      children: [
-        Padding(
-          padding: EdgeInsets.only(left: (depth * 12.0).clamp(0, 132)),
-          child: ListTile(
-            dense: true,
-            selected: _folder == folder,
-            leading: _OfflineFolderIcon(
-              status: widget.controller.folderOfflineStatus(
-                sourceId: _activeSourceId!,
-                folder: folder,
-              ),
-            ),
-            title: Text(
-              folder.isEmpty ? '全部离线谱库' : p.posix.basename(folder),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            onTap: () => _selectFolder(folder),
-            trailing: children.isEmpty
-                ? null
-                : IconButton(
-                    tooltip: expanded ? '收起文件夹' : '展开文件夹',
-                    icon: Icon(
-                      expanded ? Icons.expand_less : Icons.expand_more,
-                    ),
-                    onPressed: () => setState(() {
-                      expanded
-                          ? _collapsed.add(folder)
-                          : _collapsed.remove(folder);
-                    }),
-                  ),
+    return Padding(
+      key: ValueKey('offline-folder-$folder'),
+      padding: EdgeInsets.only(left: (depth * 12.0).clamp(0, 132)),
+      child: ListTile(
+        dense: true,
+        selected: _folder == folder,
+        leading: _OfflineFolderIcon(
+          status: widget.controller.folderOfflineStatus(
+            sourceId: _activeSourceId!,
+            folder: folder,
           ),
         ),
-        if (expanded)
-          for (final child in children) _node(child, folders, depth + 1),
-      ],
+        title: Text(
+          folder.isEmpty ? '全部离线谱库' : p.posix.basename(folder),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        onTap: () => _selectFolder(folder),
+        trailing: children.isEmpty
+            ? null
+            : IconButton(
+                tooltip: expanded ? '收起文件夹' : '展开文件夹',
+                icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+                onPressed: () => setState(() {
+                  expanded ? _collapsed.add(folder) : _collapsed.remove(folder);
+                  _treeRows = null;
+                }),
+              ),
+      ),
     );
   }
 }

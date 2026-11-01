@@ -94,3 +94,6 @@
 !/packages/library_sync/lib/src/collection_replica.dart
 !/lib/library/directory_navigation.dart
 !/lib/reader/annotation_text_layer.dart
+!/lib/reader/desktop_reader.dart
+!/lib/reader/reader_continuous.dart
+!/lib/reader/reader_spreads.dart

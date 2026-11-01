@@ -71,10 +71,16 @@ class CatalogItem {
 class CollectionIndex {
   CollectionIndex(
       {required this.id,
-      required this.sources,
-      required this.entries,
-      required this.folders,
-      this.legacyLibraryId}) {
+      required List<LibrarySourceInfo> sources,
+      required List<CatalogItem> entries,
+      required Map<String, List<String>> folders,
+      this.legacyLibraryId})
+      : sources = List.unmodifiable(sources),
+        entries = List.unmodifiable(entries),
+        folders = Map.unmodifiable({
+          for (final e in folders.entries)
+            e.key: List<String>.unmodifiable(e.value)
+        }) {
     if (id.isEmpty ||
         sources.map((s) => s.id).toSet().length != sources.length ||
         entries.map((e) => e.entryId).toSet().length != entries.length) {
@@ -98,12 +104,10 @@ class CollectionIndex {
   final List<LibrarySourceInfo> sources;
   final List<CatalogItem> entries;
   final Map<String, List<String>> folders;
-  CatalogItem? entry(String id) {
-    for (final item in entries) {
-      if (item.entryId == id) return item;
-    }
-    return null;
-  }
+  late final Map<String, CatalogItem> _byId = {
+    for (final item in entries) item.entryId: item
+  };
+  CatalogItem? entry(String id) => _byId[id];
 
   CollectionIndex replacing(CatalogItem item) => CollectionIndex(
       id: id,
@@ -135,6 +139,88 @@ class CollectionIndex {
             .toList(),
         folders: (j['folders'] as Map)
             .map((k, v) => MapEntry(k as String, (v as List).cast<String>())));
+  }
+}
+
+/// Directory structure survives readiness changes. Built in a worker when full
+/// metadata changes; one download updates only this entry's ancestor counters.
+class CollectionDirectoryIndex {
+  CollectionDirectoryIndex(
+      List<LibrarySourceInfo> sources,
+      List<CatalogItem> items,
+      Map<String, CatalogItem> readable,
+      Set<String> ready)
+      : sourceNames = {for (final s in sources) s.id: s.name} {
+    for (final item in items) {
+      _descriptors[item.entryId] =
+          (item.sourceId, item.relativePath, item.missing);
+      if (item.missing) {
+        missingIds.add(item.entryId);
+        continue;
+      }
+      availableIds.add(item.entryId);
+      final folder = p.posix.dirname(item.relativePath);
+      (_byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= [])
+          .add(item.entryId);
+      searchText[item.entryId] =
+          '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}'
+              .toLowerCase();
+      update(item, readable[item.entryId], ready);
+    }
+  }
+  final Map<String, String> sourceNames;
+  final availableIds = <String>[];
+  final missingIds = <String>[];
+  final searchText = <String, String>{};
+  final _byFolder = <(String, String), List<String>>{};
+  final _descriptors = <String, (String, String, bool)>{};
+  final _contributions = <String, (bool, bool, bool)>{};
+  final _counts = <(String, String), (int, int, int, int)>{};
+  int contentRevision = 0;
+  int readableCount = 0;
+  List<String> idsInFolder(String? source, String folder) =>
+      _byFolder[(source, folder)] ?? const [];
+  String? sourceForId(String id) => _descriptors[id]?.$1;
+  (int, int, int, int) folderStatus(String source, String folder) =>
+      _counts[(source, folder)] ?? (0, 0, 0, 0);
+
+  bool update(CatalogItem item, CatalogItem? old, Set<String> ready) {
+    if (_descriptors[item.entryId] !=
+        (item.sourceId, item.relativePath, item.missing)) return false;
+    if (item.missing) return true;
+    bool isReady(CatalogItem value) =>
+        ready.contains('${value.entryId}/${value.revisionId}/${value.hash}');
+    final readable = old != null && isReady(old);
+    final next = (
+      isReady(item) || (readable && old.revisionId == item.revisionId),
+      readable,
+      readable && old.revisionId != item.revisionId
+    );
+    final prior = _contributions[item.entryId];
+    if (prior == next) return true;
+    _contributions[item.entryId] = next;
+    final totalDelta = prior == null ? 1 : 0;
+    final currentDelta = (next.$1 ? 1 : 0) - (prior?.$1 == true ? 1 : 0);
+    final readableDelta = (next.$2 ? 1 : 0) - (prior?.$2 == true ? 1 : 0);
+    final pendingDelta = (next.$3 ? 1 : 0) - (prior?.$3 == true ? 1 : 0);
+    readableCount += readableDelta;
+    var folder = p.posix.dirname(item.relativePath);
+    if (folder == '.') folder = '';
+    while (true) {
+      final key = (item.sourceId, folder);
+      final before = _counts[key] ?? (0, 0, 0, 0);
+      _counts[key] = (
+        before.$1 + totalDelta,
+        before.$2 + currentDelta,
+        before.$3 + readableDelta,
+        before.$4 + pendingDelta
+      );
+      if (folder.isEmpty) break;
+      final slash = folder.lastIndexOf('/');
+      folder = slash < 0 ? '' : folder.substring(0, slash);
+    }
+    contentRevision++;
+    return true;
   }
 }
 
@@ -205,6 +291,12 @@ abstract interface class CollectionLibrarySource {
       String entryId, String revisionId);
 }
 
+/// Optional selected-object lookup; generic providers keep the complete-index
+/// fallback. The authenticated request and object checks remain unchanged.
+abstract interface class CollectionObjectLookup {
+  Future<CatalogItem?> itemForObject(String entryId);
+}
+
 String collectionEntryId(String sourceId, String localId) =>
     sourceId == 'legacy' ? localId : '$sourceId:$localId';
 
@@ -217,16 +309,23 @@ class CatalogSourceBinding {
 }
 
 /// Live bindings avoid retaining old catalog snapshots after background scans.
-class CatalogCollectionSource implements CollectionLibrarySource {
+class CatalogCollectionSource
+    implements CollectionLibrarySource, CollectionObjectLookup {
   const CatalogCollectionSource(
       {required this.id,
       required this.bindings,
       this.legacyLibraryId,
-      this.onMaterialized});
+      this.onMaterialized,
+      this.prepareEntry});
   final String id;
   final String? legacyLibraryId;
   final List<CatalogSourceBinding> Function() bindings;
   final void Function()? onMaterialized;
+
+  /// App hosts can coordinate foreground disk work with their background scan.
+  /// The wire contract and the selected entry/revision checks stay unchanged.
+  final Future<LibraryEntry> Function(String entryId, String revisionId)?
+      prepareEntry;
 
   CatalogItem _item(CatalogSourceBinding source, LibraryEntry entry) =>
       CatalogItem(
@@ -274,9 +373,28 @@ class CatalogCollectionSource implements CollectionLibrarySource {
     if (!source.online || entry.currentRevisionId != revisionId) {
       throw StateError('Selected source changed or is offline.');
     }
-    final ready = await source.catalog.materialize(entry.id);
+    final ready = prepareEntry == null
+        ? await source.catalog.materialize(entry.id)
+        : await prepareEntry!(entryId, revisionId);
+    if (ready.id != entry.id ||
+        ready.currentRevisionId != revisionId ||
+        ready.availability != ContentAvailability.ready ||
+        ready.currentRevision.contentHash == null) {
+      throw StateError('Selected source changed while preparing.');
+    }
     onMaterialized?.call();
     return _item(source, ready);
+  }
+
+  @override
+  Future<CatalogItem?> itemForObject(String entryId) async {
+    try {
+      final (source, entry) = _resolve(entryId);
+      if (!source.online) return null;
+      return _item(source, entry);
+    } on StateError {
+      return null;
+    }
   }
 
   @override

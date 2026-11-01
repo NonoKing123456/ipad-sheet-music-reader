@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:library_core/library_core.dart';
@@ -6,6 +7,47 @@ import 'package:path/path.dart' as p;
 import 'collection.dart';
 import 'replica.dart';
 import 'storage.dart';
+
+class _CollectionPersistRequest {
+  const _CollectionPersistRequest(this.path, this.index, this.resolved,
+      this.selection, this.verified, this.readable);
+  final String path;
+  final CollectionIndex index;
+  final Map<String, CatalogItem> resolved;
+  final OfflineSelection selection;
+  final Map<String, dynamic> verified;
+  final List<CatalogItem> readable;
+  Future<CollectionIndex> call() async {
+    final next = resolved.isEmpty
+        ? index
+        : CollectionIndex(
+            id: index.id,
+            legacyLibraryId: index.legacyLibraryId,
+            sources: index.sources,
+            folders: index.folders,
+            entries: [for (final e in index.entries) resolved[e.entryId] ?? e]);
+    await writeJson(path, {
+      'schema': 2,
+      'index': next.toJson(),
+      'selection': selection.toJson(),
+      'verified': verified,
+      'readable': readable.map((e) => e.toJson()).toList()
+    });
+    next.entry(''); // Build the immutable lookup before transferring it back.
+    return next;
+  }
+}
+
+class _CollectionDirectoryRequest {
+  const _CollectionDirectoryRequest(
+      this.sources, this.items, this.readable, this.ready);
+  final List<LibrarySourceInfo> sources;
+  final List<CatalogItem> items;
+  final Map<String, CatalogItem> readable;
+  final Set<String> ready;
+  CollectionDirectoryIndex call() =>
+      CollectionDirectoryIndex(sources, items, readable, ready);
+}
 
 /// The v1 complete-manifest contract stays unchanged. This additive index can
 /// commit metadata while only a selected subset has verified local objects.
@@ -19,6 +61,22 @@ class ReplicaCollectionView {
   final _readable = <String, CatalogItem>{};
   bool _dirty = false;
   LibrarySnapshot? _snapshot;
+  CollectionDirectoryIndex? _directory;
+  final _displayEntries = <String, LibraryEntry>{};
+  int contentRevision = 0;
+  CollectionDirectoryIndex get directory =>
+      _directory ??= _directoryRequest().call();
+  _CollectionDirectoryRequest _directoryRequest() =>
+      _CollectionDirectoryRequest(
+          index?.sources ?? const [],
+          currentItems.toList(growable: false),
+          Map.of(_readable),
+          Set.of(_ready));
+  Future<void> _prepareDirectory() async {
+    final request = _directoryRequest();
+    _directory = await Isolate.run(request.call);
+  }
+
   int _generation = 0;
   int _journalBytes = 0;
   bool persistenceFailed = false;
@@ -35,6 +93,7 @@ class ReplicaCollectionView {
       yield _resolved[original.entryId] ?? original;
     }
   }
+
   static Future<ReplicaCollectionView> open(ReplicaLibraryView objects) async {
     final view = ReplicaCollectionView._(objects);
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
@@ -81,7 +140,6 @@ class ReplicaCollectionView {
             [OfflineRule(sourceId: 'legacy', folder: '', selected: true)]);
       }
       await view._replayJournal();
-      view._applyResolved();
       await view.refreshReady();
       if (view.index != null) {
         try {
@@ -100,7 +158,7 @@ class ReplicaCollectionView {
     _ready.clear();
     final prior = Map<String, CatalogItem>.from(_readable);
     _readable.clear();
-    for (final item in index?.entries ?? <CatalogItem>[]) {
+    for (final item in currentItems) {
       if (item.missing) {
         if (prior[item.entryId] case final old?) _readable[item.entryId] = old;
         continue;
@@ -124,19 +182,9 @@ class ReplicaCollectionView {
       }
     }
     _snapshot = null;
-  }
-
-  void _applyResolved() {
-    if (index != null && _resolved.isNotEmpty) {
-      final prior = index!;
-      index = CollectionIndex(
-          id: prior.id,
-          legacyLibraryId: prior.legacyLibraryId,
-          sources: prior.sources,
-          folders: prior.folders,
-          entries: [for (final e in prior.entries) _resolved[e.entryId] ?? e]);
-      _resolved.clear();
-    }
+    _displayEntries.clear();
+    contentRevision++;
+    await _prepareDirectory();
   }
 
   Future<void> _replayJournal() async {
@@ -197,21 +245,26 @@ class ReplicaCollectionView {
     }
     _resolved[item.entryId] = item;
     _dirty = true;
+    _contentChanged(item);
+    if (_directory == null) await _prepareDirectory();
   }
 
   Future<void> _persist() async {
-    _applyResolved();
     _generation++;
-    _snapshot = null;
     if (index == null) return;
-    await writeJson(_path, {
-      'schema': 2,
-      'index': index!.toJson(),
-      'selection': selection.toJson(),
-      'verified': objects.exportVerificationCache(),
-      'readable': _readable.values.map((e) => e.toJson()).toList(),
-    });
-    _dirty = false;
+    final request = _CollectionPersistRequest(
+        _path,
+        index!,
+        Map.of(_resolved),
+        selection,
+        objects.exportVerificationCache(),
+        _readable.values.toList());
+    index = await Isolate.run(request.call);
+    for (final e in request.resolved.entries) {
+      if (identical(_resolved[e.key], e.value)) _resolved.remove(e.key);
+    }
+    _snapshot = _snapshot?.withGeneration(_generation);
+    _dirty = _resolved.isNotEmpty;
     persistenceFailed = false;
     // The full snapshot is durable before retiring its small recovery journal.
     try {
@@ -239,7 +292,50 @@ class ReplicaCollectionView {
     _resolved[item.entryId] = item;
     _ready.add('${item.entryId}/${item.revisionId}/${item.hash}');
     _readable[item.entryId] = item;
-    _snapshot = null;
+    _contentChanged(item);
+  }
+
+  void _contentChanged(CatalogItem item) {
+    contentRevision++;
+    _displayEntries.remove(item.entryId);
+    if (_directory != null &&
+        !_directory!.update(item, _readable[item.entryId], _ready)) {
+      _directory = null;
+    }
+    if (_snapshot != null) {
+      final updated = entryForDisplay(item.entryId);
+      if (updated != null && _snapshot!.entryById(item.entryId) != null) {
+        _snapshot = _snapshot!.replacingEntry(updated,
+            generation: _generation, savedUtc: _snapshot!.savedUtc);
+      } else {
+        _snapshot = null;
+      }
+    }
+  }
+
+  LibraryEntry? entryForDisplay(String id) {
+    final cached = _displayEntries[id];
+    if (cached != null) return cached;
+    final current = itemFor(id);
+    if (current == null) return null;
+    final shown = current.missing ? current : _readable[id] ?? current;
+    return _displayEntries[id] = LibraryEntry(
+        id: id,
+        relativePath: current.relativePath,
+        status: current.missing ? EntryStatus.missing : EntryStatus.available,
+        availability: isReady(shown)
+            ? ContentAvailability.ready
+            : ContentAvailability.deferred,
+        revisions: [
+          ContentRevision(
+              id: shown.revisionId,
+              contentHash: shown.hash,
+              size: shown.length,
+              modifiedUtc: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+              observedUtc: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true))
+        ],
+        currentRevisionId: shown.revisionId,
+        lastSeenUtc: DateTime.fromMillisecondsSinceEpoch(0, isUtc: true));
   }
 
   Future<void> updateIndex(CollectionIndex next) async {
@@ -305,17 +401,21 @@ class ReplicaCollectionView {
     final updates = <(String, String?, String?), OfflineRule>{};
     for (final rule in rules) {
       final key = (rule.sourceId, rule.folder, rule.entryId);
-      updates.remove(key); updates[key] = rule;
+      updates.remove(key);
+      updates[key] = rule;
     }
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
     try {
       selection = OfflineSelection([
         for (final old in selection.rules)
-          if (!updates.containsKey((old.sourceId, old.folder, old.entryId))) old,
+          if (!updates.containsKey((old.sourceId, old.folder, old.entryId)))
+            old,
         ...updates.values,
       ]);
       await _persist();
-    } finally { await lease.close(); }
+    } finally {
+      await lease.close();
+    }
   }
 
   Future<void> receive(CatalogItem item, Stream<List<int>> bytes,
@@ -366,7 +466,8 @@ class ReplicaCollectionView {
     if (!await objects.hasVerifiedObject(item.object)) {
       _ready.remove('${item.entryId}/${item.revisionId}/${item.hash}');
       _readable.remove(id);
-      _snapshot = null;
+      final current = itemFor(id);
+      if (current != null) _contentChanged(current);
       throw StateError('Selected download is unavailable.');
     }
   }
