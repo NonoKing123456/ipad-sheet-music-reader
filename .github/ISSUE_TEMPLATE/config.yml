@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 使用与常见问题
+    url: https://github.com/NonoKing123456/ipad-sheet-music-reader/blob/main/docs/FAQ.md
+    about: 连接、下载、签名与构建问题的排查入口
+  - name: 安全问题
+    url: https://github.com/NonoKing123456/ipad-sheet-music-reader/blob/main/SECURITY.md
+    about: 请先阅读安全报告方式，不在公开反馈中附敏感资料

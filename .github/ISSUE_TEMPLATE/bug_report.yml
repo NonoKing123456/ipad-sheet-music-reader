@@ -1,0 +1,56 @@
+name: 问题反馈
+description: 报告阅读、谱库、同步或构建问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: 请先查看 docs/FAQ.md。不要附个人曲谱、真实配对二维码、账号、令牌或描述文件；优先使用合成样本。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 受影响平台
+      options:
+        - Windows
+        - iPad
+        - Windows 与 iPad 协作
+        - 构建或文档
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本或源码提交
+      placeholder: "例如 0.8.10+26，或 Git 提交；未知请注明"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 系统与设备
+      placeholder: "系统版本、设备型号；构建问题请补 Flutter / Xcode / Visual Studio 版本"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从哪个界面开始，按什么顺序操作，是否每次发生？
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 补充信息
+      description: 可填脱敏错误提示、合成样本、截图或最小日志。同步问题注明同网、权限、文件是否下载及是否可重试。

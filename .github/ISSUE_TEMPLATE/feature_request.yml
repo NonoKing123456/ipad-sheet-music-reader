@@ -1,0 +1,23 @@
+name: 功能建议
+description: 描述具体使用场景及希望改善的体验
+title: "[建议] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景与问题
+      description: 在练习、排练、演出或整理谱库时，哪一步遇到困难？请注明平台。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望的操作与结果
+      description: 给出一个具体例子，说明操作后应看到什么。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 目前如何处理
+      description: 现有办法、替代方案或相关反馈；不需要提供私人曲谱。

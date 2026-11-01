@@ -1111,15 +1111,43 @@ class _LibraryScreenState extends State<LibraryScreen>
               service: _sync?.pageCounts,
             ),
             menuAction: IconButton(
-              tooltip: '查看完整路径',
-              icon: const Icon(Icons.info_outline, size: 19),
-              onPressed: () => _pathDetails(entry),
+              tooltip: Platform.isWindows ? '打开文件所在目录' : '查看完整路径',
+              icon: Icon(
+                Platform.isWindows
+                    ? Icons.folder_open_outlined
+                    : Icons.info_outline,
+                size: 19,
+              ),
+              onPressed: () => Platform.isWindows
+                  ? unawaited(_revealFile(library, entry))
+                  : _pathDetails(entry),
             ),
           ),
           onTap: () => unawaited(_openEntry(entry)),
         );
       },
     );
+  }
+
+  Future<void> _revealFile(
+    LibraryController library,
+    LibraryEntry entry,
+  ) async {
+    try {
+      final path = library.absolutePathFor(entry);
+      if (!await File(path).exists()) {
+        if (mounted) _message('文件已移动或不存在，请刷新谱库后重试。');
+        return;
+      }
+      await Process.start(
+        'explorer.exe',
+        ['/select,', path],
+        runInShell: false,
+        mode: ProcessStartMode.detached,
+      );
+    } catch (_) {
+      if (mounted) _message('无法打开文件所在目录，请重试。');
+    }
   }
 
   void _pathDetails(LibraryEntry entry) => showDialog<void>(
