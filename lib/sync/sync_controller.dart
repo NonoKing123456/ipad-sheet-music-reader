@@ -19,6 +19,7 @@ import '../library/page_count_service.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import 'pairing_qr.dart';
+import 'ios_background_transfer.dart';
 
 enum SyncPhase {
   idle,
@@ -125,6 +126,84 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   Map<String, dynamic> _settings = {'version': 1, 'roots': <String, dynamic>{}};
   SyncServer? _server;
   SyncClient? _client;
+  IosBackgroundTransfer? _backgroundTransfer;
+  bool _backgroundObserver = false;
+  int backgroundPendingObjects = 0,
+      backgroundStagedObjects = 0,
+      backgroundFailedObjects = 0,
+      backgroundPausedObjects = 0;
+  bool backgroundImporting = false;
+  bool backgroundStorageBlocked = false;
+  bool _backgroundRecoveryPending = false;
+  bool get hasSyncActivity => busy || backgroundPendingObjects > 0;
+  Future<void> _refreshBackgroundActivity() async {
+    final transfer = _backgroundTransfer, client = _client;
+    if (transfer == null || client == null || _disposed) return;
+    try {
+      final activity = await transfer.activity(
+        client.backgroundTransferNamespace,
+      );
+      if (_disposed || !identical(client, _client)) return;
+      backgroundPendingObjects = activity['pending'] as int? ?? 0;
+      backgroundStagedObjects = activity['staged'] as int? ?? 0;
+      backgroundFailedObjects = activity['failed'] as int? ?? 0;
+      backgroundPausedObjects = activity['paused'] as int? ?? 0;
+      backgroundStorageBlocked = activity['storageBlocked'] == true;
+      _changed();
+    } catch (_) {
+      /* Import/sync reports any protected-storage failure. */
+    }
+  }
+
+  Future<void> _backgroundChanged() async {
+    await _refreshBackgroundActivity();
+    if (backgroundStagedObjects == 0) return;
+    if (busy) {
+      _backgroundRecoveryPending = true;
+    } else {
+      await _recoverBackgroundDownloads();
+    }
+  }
+
+  void _configureBackgroundClient() {
+    if (!Platform.isIOS || _client == null) return;
+    _backgroundTransfer?.dispose();
+    final transfer = IosBackgroundTransfer();
+    _backgroundTransfer = transfer;
+    _client!.backgroundTransfer = transfer;
+    transfer.onChanged = () => unawaited(_backgroundChanged());
+    if (!_backgroundObserver) {
+      WidgetsBinding.instance.addObserver(this);
+      _backgroundObserver = true;
+    }
+  }
+
+  Future<void> _recoverBackgroundDownloads() async {
+    if (_disposed ||
+        !initialized ||
+        busy ||
+        collection == null ||
+        _client == null) {
+      return;
+    }
+    busy = true;
+    backgroundImporting = true;
+    try {
+      final count = await _client!.recoverBackgroundCollection(collection!);
+      if (count > 0 && !_disposed) {
+        message = '后台下载的曲谱已校验并保存，可离线阅读。';
+        _tick();
+      }
+    } catch (_) {
+      if (!_disposed) message = '后台曲谱尚未导入，请检查空间后重试同步。';
+    } finally {
+      busy = false;
+      backgroundImporting = false;
+      await _refreshBackgroundActivity();
+      if (!_disposed) _changed();
+    }
+  }
+
   late final pageCounts = PageCountService(
     cacheDirectory: p.join(directory.path, 'page-counts'),
     resolve: (key) {
@@ -431,6 +510,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_backgroundObserver && state == AppLifecycleState.resumed) {
+      unawaited(_backgroundChanged());
+    }
     if (!_signingObserver) return;
     _signingForeground = state == AppLifecycleState.resumed;
     if (_signingForeground) {
@@ -972,6 +1054,13 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     if (!_disposed) {
       pageCounts.refreshVisible();
       notifyListeners();
+      // A completion received during metadata refresh/verification is drained
+      // once its existing operation releases busy. No stages means no import
+      // or busy spinner; native byte-progress callbacks never enter this path.
+      if (initialized && !busy && _backgroundRecoveryPending) {
+        _backgroundRecoveryPending = false;
+        scheduleMicrotask(() => unawaited(_backgroundChanged()));
+      }
     }
   }
 
@@ -1011,6 +1100,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
               stateDirectory: p.join(directory.path, 'clients', clientFolder),
               ioTimeout: ioTimeout,
             );
+            _configureBackgroundClient();
           }
         } catch (_) {
           message = '上次的电脑配对资料无法读取，请重新配对；已保存的离线谱库仍可使用。';
@@ -1024,6 +1114,14 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         rootDirectory: p.join(directory.path, 'replica'),
       );
       collection = await ReplicaCollectionView.open(replica!);
+      if (Platform.isIOS && _client != null) {
+        try {
+          await _client!.recoverBackgroundCollection(collection!);
+        } catch (_) {
+          phase = SyncPhase.partial;
+          message = '后台曲谱尚未导入，请检查空间后重试同步；已有离线曲谱仍可阅读。';
+        }
+      }
       if (collection!.persistenceFailed) {
         phase = SyncPhase.partial;
         message = '有些离线记录尚未写入，已验证的曲谱仍可阅读。请检查空间后重试。';
@@ -1035,6 +1133,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _seenReaderGeneration = workspace.store.snapshot.generation;
     _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _tick());
     initialized = true;
+    if (Platform.isIOS) unawaited(_backgroundChanged());
     _changed();
     _maybeAutoStart();
   }
@@ -1462,8 +1561,13 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         stateDirectory: p.join(directory.path, 'clients', folder),
         ioTimeout: ioTimeout,
       );
+      final oldClient = _client, oldTransfer = _backgroundTransfer;
+      if (oldClient != null && oldTransfer != null) {
+        await oldTransfer.discard(oldClient.backgroundTransferNamespace);
+      }
       await _saveSettings({..._settings, 'clientFolder': folder});
       _client = client;
+      _configureBackgroundClient();
       pageCounts.connectionChanged();
       _retrySigningReport();
       phase = SyncPhase.idle;
@@ -1487,6 +1591,39 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> synchronize({Set<String>? onlyEntryIds}) =>
       _syncTask ??= _synchronize(onlyEntryIds: onlyEntryIds)
           .whenComplete(() => _syncTask = null);
+
+  /// Refresh the directory without altering the system's selected download
+  /// queue or exchanging reader state. Safe while native transfers are active.
+  Future<void> refreshCatalog() async {
+    if (busy || _client == null || collection == null) return;
+    busy = true;
+    phase = SyncPhase.transferring;
+    processedObjects = 0;
+    totalObjects = null;
+    committingLibrary = false;
+    message = '正在更新曲谱目录…';
+    final cancellation = SyncCancellation();
+    _cancellation = cancellation;
+    _changed();
+    try {
+      await _client!.refreshCollectionIndex(
+        collection!,
+        cancellation: cancellation,
+      );
+      phase = SyncPhase.complete;
+      message = '目录已更新。';
+    } catch (_) {
+      phase = cancellation.isCancelled
+          ? SyncPhase.cancelled
+          : SyncPhase.partial;
+      message = cancellation.isCancelled ? '更新已取消。' : '目录更新未完成，请检查电脑与网络后重试。';
+    } finally {
+      _cancellation = null;
+      busy = false;
+      _tick();
+      _changed();
+    }
+  }
 
   Future<void> _synchronize({Set<String>? onlyEntryIds}) async {
     if (busy || _client == null || replica == null) return;
@@ -1608,6 +1745,32 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
 
   void cancel() {
     _cancellation?.cancel();
+    if (backgroundPendingObjects > 0) unawaited(pauseBackgroundDownloads());
+  }
+
+  Future<void> pauseBackgroundDownloads() async {
+    final transfer = _backgroundTransfer, client = _client;
+    if (transfer == null || client == null) return;
+    _cancellation?.cancel();
+    try {
+      await transfer.pause(client.backgroundTransferNamespace);
+      message = '下载已暂停，已保存的曲谱仍可阅读。';
+    } catch (_) {
+      message = '暂停状态尚未保存，请检查空间后重试。';
+    }
+    await _refreshBackgroundActivity();
+  }
+
+  Future<void> resumeBackgroundDownloads() async {
+    final transfer = _backgroundTransfer, client = _client;
+    if (transfer == null || client == null || busy) return;
+    try {
+      await transfer.resume(client.backgroundTransferNamespace);
+      message = '已继续后台下载。';
+    } catch (_) {
+      message = '下载尚未恢复，请检查空间后重试。';
+    }
+    await _backgroundChanged();
   }
 
   Future<void> verifyOfflineLibrary() async {
@@ -1678,7 +1841,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     _disposed = true;
     _signingAuthEpoch++;
-    if (_signingObserver) WidgetsBinding.instance.removeObserver(this);
+    if (_signingObserver || _backgroundObserver) {
+      WidgetsBinding.instance.removeObserver(this);
+    }
+    _backgroundTransfer?.dispose();
     unawaited(_stopSigningWatches());
     signingUnavailable.dispose();
     pageCounts.dispose();

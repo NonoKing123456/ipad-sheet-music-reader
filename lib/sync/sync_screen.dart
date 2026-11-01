@@ -262,7 +262,7 @@ class _SyncScreenState extends State<SyncScreen> {
                 runSpacing: 8,
                 children: [
                   FilledButton.icon(
-                    onPressed: sync.busy || !sync.paired
+                    onPressed: sync.hasSyncActivity || !sync.paired
                         ? null
                         : () => unawaited(sync.synchronize()),
                     icon: const Icon(Icons.sync),
@@ -275,15 +275,29 @@ class _SyncScreenState extends State<SyncScreen> {
                     child: const Text('打开离线谱库'),
                   ),
                   if (sync.busy &&
+                      sync.backgroundPendingObjects == 0 &&
                       (sync.phase == SyncPhase.transferring ||
                           sync.phase == SyncPhase.merging))
                     OutlinedButton(
                       onPressed: sync.cancel,
                       child: const Text('取消同步'),
                     ),
+                  if (sync.backgroundPendingObjects > 0)
+                    OutlinedButton(
+                      onPressed: () =>
+                          unawaited(sync.pauseBackgroundDownloads()),
+                      child: const Text('暂停下载'),
+                    ),
+                  if (sync.backgroundPausedObjects > 0)
+                    OutlinedButton(
+                      onPressed: sync.busy
+                          ? null
+                          : () => unawaited(sync.resumeBackgroundDownloads()),
+                      child: const Text('继续下载'),
+                    ),
                 ],
               ),
-              if (sync.busy)
+              if (sync.hasSyncActivity)
                 const Padding(
                   padding: EdgeInsets.only(top: 16),
                   child: LinearProgressIndicator(),
@@ -296,6 +310,21 @@ class _SyncScreenState extends State<SyncScreen> {
                         ? '正在取得电脑谱库清单…'
                         : '正在更新所选内容 · ${sync.processedObjects} / ${sync.totalObjects} 份',
                   ),
+                ),
+              if (sync.backgroundPendingObjects > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    '后台下载中 · 余 ${sync.backgroundPendingObjects} 份；切换应用或锁屏后由系统继续调度。',
+                  ),
+                ),
+              if (sync.backgroundPausedObjects > 0)
+                Text('已暂停 ${sync.backgroundPausedObjects} 份下载。'),
+              if (sync.backgroundFailedObjects > 0)
+                Text(
+                  sync.backgroundStorageBlocked
+                      ? '后台下载因存储空间或写入问题暂停，请释放空间后点击“继续下载”。'
+                      : '${sync.backgroundFailedObjects} 份后台下载未完成，请检查电脑与网络后重试同步。',
                 ),
               if (sync.message != null)
                 Padding(
@@ -329,7 +358,9 @@ class _SyncScreenState extends State<SyncScreen> {
             if (defaultTargetPlatform == TargetPlatform.iOS)
               const Padding(
                 padding: EdgeInsets.all(12),
-                child: Text('首次连接请允许本地网络访问。'),
+                child: Text(
+                  '首次连接请允许本地网络访问。锁屏或切换应用后可继续下载，完成时间由系统调度；从多任务界面强制关闭应用会中断，重新打开后可继续。',
+                ),
               ),
           ],
         ),

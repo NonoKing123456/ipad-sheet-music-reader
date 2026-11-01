@@ -208,7 +208,9 @@ class _LibraryScreenState extends State<LibraryScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _library?.scheduleRescan();
     if (state == AppLifecycleState.paused) {
-      _sync?.cancel();
+      // URLSession owns iPad transfers while Flutter is suspended/locked.
+      // Explicit user cancellation still pauses the persistent native queue.
+      if (defaultTargetPlatform != TargetPlatform.iOS) _sync?.cancel();
       unawaited(_workspace?.flushPositions());
     }
   }

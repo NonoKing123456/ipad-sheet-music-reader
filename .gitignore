@@ -207,3 +207,10 @@
 !/windows/runner/win32_window.cpp
 !/windows/runner/win32_window.h
 !/docs/VALIDATION.md
+!/ios/Runner/BackgroundDownloadBridge.swift
+!/lib/reader/reader_text_editing.dart
+!/lib/sync/ios_background_transfer.dart
+!/packages/library_sync/lib/src/background_transfer.dart
+!/test/ios_background_transfer_test.dart
+!/test/offline_header_sync_test.dart
+!/test/text_annotation_font_0810_test.dart

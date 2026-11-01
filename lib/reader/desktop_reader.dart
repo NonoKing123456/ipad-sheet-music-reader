@@ -30,6 +30,7 @@ class DesktopReaderShell extends StatefulWidget {
     this.onFinishEditing,
     this.editing = false,
     this.writing = false,
+    this.textEditing = false,
     this.annotationTools,
     this.bottom = const SizedBox.shrink(),
     this.notices = const [],
@@ -37,7 +38,7 @@ class DesktopReaderShell extends StatefulWidget {
     this.loading = false,
   });
   final String title, pageLabel, statusLabel;
-  final bool editing, writing, loading;
+  final bool editing, writing, loading, textEditing;
   final ReaderViewMode mode;
   final FirstPageArrangement arrangement;
   final ValueChanged<ReaderViewMode> onMode;
@@ -524,8 +525,9 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                     group,
                     const SizedBox(width: 10),
                   ],
-                  if (widget.onAnnotate != null) annotate,
-                  collapse,
+                  if (widget.onAnnotate != null && !widget.textEditing)
+                    annotate,
+                  if (!widget.textEditing) collapse,
                 ],
               )
             : Column(
@@ -536,8 +538,9 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                       back,
                       const SizedBox(width: 8),
                       Expanded(child: title),
-                      if (widget.onAnnotate != null) annotate,
-                      collapse,
+                      if (widget.onAnnotate != null && !widget.textEditing)
+                        annotate,
+                      if (!widget.textEditing) collapse,
                     ],
                   ),
                   const SizedBox(height: 4),

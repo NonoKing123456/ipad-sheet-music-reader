@@ -34,6 +34,17 @@ class SigningExpiry {
     return '签名不足1分钟';
   }
 
+  String compactLabel(DateTime now) {
+    final date = expiration;
+    if (date == null) return '待确认';
+    final remaining = date.difference(now);
+    if (remaining <= Duration.zero) return '已到期';
+    if (remaining.inDays >= 1) return '${remaining.inDays}天';
+    if (remaining.inHours >= 1) return '${remaining.inHours}小时';
+    if (remaining.inMinutes >= 1) return '${remaining.inMinutes}分';
+    return '不足1分';
+  }
+
   bool nearExpiry(DateTime now) =>
       expiration != null &&
       expiration!.difference(now) < const Duration(days: 1);
@@ -60,12 +71,14 @@ class SigningExpiryChip extends StatefulWidget {
     this.pairedStatus,
     this.unavailable,
     this.onRefresh,
+    this.compact = false,
   });
   final ValueChanged<SigningExpiry>? onRead;
   final bool pairedDevice;
   final ValueListenable<SigningStatusReceipt?>? pairedStatus;
   final ValueListenable<bool>? unavailable;
   final Future<void> Function()? onRefresh;
+  final bool compact;
 
   @override
   State<SigningExpiryChip> createState() => _SigningExpiryChipState();
@@ -241,7 +254,9 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
     if (!_ios && !widget.pairedDevice) return const SizedBox.shrink();
     final now = DateTime.now();
     final receipt = widget.pairedStatus?.value;
-    final label = widget.pairedDevice
+    final label = widget.compact
+        ? _expiry.compactLabel(now)
+        : widget.pairedDevice
         ? receipt == null
               ? widget.unavailable?.value == true
                     ? 'iPad签名暂不可读'
@@ -264,19 +279,33 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
           backgroundColor: color.withValues(alpha: .07),
           minimumSize: const Size(0, 32),
           tapTargetSize: MaterialTapTargetSize.padded,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          textStyle: Theme.of(context).textTheme.labelLarge
-              ?.copyWith(fontSize: 12, fontWeight: FontWeight.w500),
+          padding: EdgeInsets.symmetric(horizontal: widget.compact ? 4 : 8),
+          textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+            fontSize: widget.compact ? 11 : 12,
+            fontWeight: FontWeight.w500,
+          ),
           shape: const StadiumBorder(),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (widget.pairedDevice) ...[
-              const Icon(Icons.history, size: 13),
-              const SizedBox(width: 4),
+            if (widget.pairedDevice || widget.compact) ...[
+              Icon(
+                widget.pairedDevice ? Icons.history : Icons.schedule,
+                size: 13,
+              ),
+              SizedBox(width: widget.compact ? 2 : 4),
             ],
-            Text(label),
+            if (widget.compact)
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              )
+            else
+              Text(label),
           ],
         ),
       ),

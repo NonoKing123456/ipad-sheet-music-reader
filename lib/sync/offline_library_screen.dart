@@ -131,15 +131,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   Future<void> _refresh() async {
     final sync = widget.controller;
-    if (!sync.paired) {
-      await _sync(immediate: true);
-      return;
-    }
-    await sync.synchronize();
-    if (mounted && sync.phase == SyncPhase.complete) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('已更新')));
-    }
+    if (sync.hasSyncActivity || !sync.paired) return;
+    await sync.refreshCatalog();
   }
 
   void _selectSource(String id) => setState(() {
@@ -249,17 +242,112 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   List<ScoreTarget> _targets() => widget.controller.offlineTargets;
-  Future<void> _sync({bool immediate = false}) => Navigator.push(
+  Future<void> _sync() => Navigator.push(
     context,
     MaterialPageRoute<void>(
       builder: (_) => SyncScreen(
         controller: widget.controller,
         openOffline: () => Navigator.pop(context),
-        scanOnOpen: immediate && !widget.controller.paired,
-        syncOnOpen: immediate && widget.controller.paired,
       ),
     ),
   );
+
+  String _activityLabel(SyncController sync) {
+    if (sync.backgroundImporting) return '正在保存下载内容';
+    if (!sync.busy && sync.backgroundPendingObjects > 0) {
+      return '后台下载中 · 余 ${sync.backgroundPendingObjects} 份';
+    }
+    if (sync.phase == SyncPhase.pairing) return '连接中';
+    if (sync.phase == SyncPhase.verifying) return '校验中';
+    if (sync.phase == SyncPhase.transferring) {
+      final total = sync.totalObjects;
+      if (total != null && sync.committingLibrary) return '正在保存下载内容';
+      if (total != null && total > 0) {
+        return '下载中 ${sync.processedObjects.clamp(0, total)}/$total';
+      }
+    }
+    return '同步中';
+  }
+
+  Widget _syncActions({
+    required bool compact,
+    required bool minimal,
+    required double maxWidth,
+  }) {
+    final sync = widget.controller;
+    final active = sync.hasSyncActivity;
+    final label = active
+        ? _activityLabel(sync)
+        : sync.paired
+        ? '同步管理'
+        : '连接电脑';
+    final shortLabel = minimal
+        ? active
+              ? sync.phase == SyncPhase.transferring &&
+                        (sync.totalObjects ?? 0) > 0
+                    ? '${(100 * sync.processedObjects / sync.totalObjects!).clamp(0, 100).floor()}%'
+                    : !sync.busy && sync.backgroundPendingObjects > 0
+                    ? '余${sync.backgroundPendingObjects}份'
+                    : '同步中'
+              : sync.paired
+              ? '管理'
+              : label
+        : label;
+    final manage = Tooltip(
+      message: active ? '$label，查看同步与连接' : label,
+      child: TextButton.icon(
+        key: const ValueKey('offline-sync-management'),
+        onPressed: () => unawaited(_sync()),
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          minimumSize: const Size(48, 48),
+          textStyle: minimal ? const TextStyle(fontSize: 12) : null,
+          iconSize: minimal ? 18 : null,
+        ),
+        icon: compact && !active
+            ? null
+            : active
+            ? const _SyncActivityIcon()
+            : Icon(sync.paired ? Icons.sync : Icons.computer),
+        label: Text(shortLabel, maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+    );
+    final refresh = Tooltip(
+      message: '更新电脑上的曲谱目录',
+      child: TextButton.icon(
+        key: const ValueKey('offline-refresh-catalog'),
+        onPressed: sync.paired && sync.initializationError == null
+            ? () => unawaited(_refresh())
+            : null,
+        icon: const Icon(Icons.refresh),
+        label: const Text('更新目录', maxLines: 1, overflow: TextOverflow.ellipsis),
+      ),
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        if (!active && !(compact && (_searchOpen || !sync.paired))) ...[
+          if (compact)
+            IconButton(
+              key: const ValueKey('offline-refresh-catalog'),
+              tooltip: '更新目录',
+              icon: const Icon(Icons.refresh),
+              onPressed: sync.paired && sync.initializationError == null
+                  ? () => unawaited(_refresh())
+                  : null,
+            )
+          else
+            refresh,
+        ],
+        ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth),
+          child: manage,
+        ),
+      ],
+    );
+  }
+
   Future<void> _open(LibraryEntry entry) async {
     if (_opening) return;
     _opening = true;
@@ -362,8 +450,31 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       return LayoutBuilder(
         builder: (context, constraints) {
           final wide = constraints.maxWidth >= 850;
+          // Keep connection/status text readable in phone and split-view widths.
+          final compactActions =
+              constraints.maxWidth < 700 ||
+              MediaQuery.textScalerOf(context).scale(14) > 18;
+          final otherActionsWidth =
+              48.0 + // Search.
+              (!_searchOpen ? 48 : 0) + // Set lists.
+              (!wide && !widget.isHome ? 48 : 0) + // Folders.
+              (!sync.hasSyncActivity &&
+                      !(compactActions && (_searchOpen || !sync.paired))
+                  ? compactActions
+                        ? 48
+                        : 124
+                  : 0);
+          final managementWidth =
+              (constraints.maxWidth -
+                      otherActionsWidth -
+                      (!wide || !widget.isHome ? 56 : 0) -
+                      (widget.isHome && !_searchOpen && compactActions
+                          ? 80
+                          : 16))
+                  .clamp(56.0, 240.0);
           return Scaffold(
             appBar: AppBar(
+              titleSpacing: compactActions ? 8 : null,
               title: wide && defaultTargetPlatform == TargetPlatform.windows
                   ? Row(
                       children: [
@@ -381,37 +492,50 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                           ),
                       ],
                     )
-                  : Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: _searchOpen
-                              ? DirectorySearchField(
-                                  controller: _search,
-                                  focusNode: _searchFocus,
-                                  onChanged: (_) => setState(() {}),
-                                )
-                              : Text(
-                                  widget.isHome ? '曲谱库' : '离线谱库',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                  : LayoutBuilder(
+                      builder: (context, titleConstraints) => Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_searchOpen ||
+                              !widget.isHome ||
+                              defaultTargetPlatform != TargetPlatform.iOS ||
+                              titleConstraints.maxWidth >= 160)
+                            Flexible(
+                              child: _searchOpen
+                                  ? DirectorySearchField(
+                                      controller: _search,
+                                      focusNode: _searchFocus,
+                                      onChanged: (_) => setState(() {}),
+                                    )
+                                  : Text(
+                                      widget.isHome ? '曲谱库' : '离线谱库',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                            ),
+                          if (widget.isHome &&
+                              !kIsWeb &&
+                              defaultTargetPlatform == TargetPlatform.iOS)
+                            Flexible(
+                              child: Visibility(
+                                visible: !_searchOpen,
+                                maintainState: true,
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    left: compactActions ? 0 : 8,
+                                  ),
+                                  child: SigningExpiryChip(
+                                    compact: compactActions,
+                                    onRead: (value) =>
+                                        sync.reportLocalSigningExpiry(
+                                          value.expiration,
+                                        ),
+                                  ),
                                 ),
-                        ),
-                        if (widget.isHome &&
-                            !kIsWeb &&
-                            defaultTargetPlatform == TargetPlatform.iOS)
-                          Visibility(
-                            visible: !_searchOpen,
-                            maintainState: true,
-                            child: Padding(
-                              padding: const EdgeInsets.only(left: 8),
-                              child: SigningExpiryChip(
-                                onRead: (value) => sync
-                                    .reportLocalSigningExpiry(value.expiration),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
               leading: widget.isHome
                   ? null
@@ -426,10 +550,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                   icon: Icon(_searchOpen ? Icons.close : Icons.search),
                   onPressed: _searchOpen ? _closeSearch : _openSearch,
                 ),
-                IconButton(
-                  tooltip: sync.paired ? '更新目录与所选内容' : '扫描电脑二维码',
-                  icon: const Icon(Icons.refresh),
-                  onPressed: sync.busy ? null : () => unawaited(_refresh()),
+                _syncActions(
+                  compact: compactActions,
+                  minimal: constraints.maxWidth < 360,
+                  maxWidth: managementWidth,
                 ),
                 if (!wide && !widget.isHome)
                   Builder(
@@ -445,30 +569,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                     onPressed: _setLists,
                     icon: const Icon(Icons.queue_music),
                   ),
-                PopupMenuButton<String>(
-                  tooltip: '更多',
-                  onSelected: (value) {
-                    if (value == 'sync') unawaited(_sync());
-                    if (value == 'lists') _setLists();
-                    if (value == 'conflicts') {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute<void>(
-                          builder: (_) => SyncConflictsScreen(controller: sync),
-                        ),
-                      );
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(value: 'sync', child: Text('同步与连接')),
-                    const PopupMenuItem(value: 'lists', child: Text('曲单')),
-                    if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
-                      const PopupMenuItem(
-                        value: 'conflicts',
-                        child: Text('保留的冲突版本'),
-                      ),
-                  ],
-                ),
               ],
             ),
             drawer: wide
@@ -836,6 +936,45 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
               ),
       ),
     );
+  }
+}
+
+class _SyncActivityIcon extends StatefulWidget {
+  const _SyncActivityIcon();
+
+  @override
+  State<_SyncActivityIcon> createState() => _SyncActivityIconState();
+}
+
+class _SyncActivityIconState extends State<_SyncActivityIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _turns = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context) ||
+        !TickerMode.valuesOf(context).enabled) {
+      _turns.stop();
+    } else {
+      _turns.repeat();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => RotationTransition(
+    key: const ValueKey('offline-sync-rotation'),
+    turns: _turns,
+    child: const Icon(Icons.sync),
+  );
+
+  @override
+  void dispose() {
+    _turns.dispose();
+    super.dispose();
   }
 }
 

@@ -9,6 +9,30 @@ import 'package:reader_state/reader_state.dart';
 import 'reader_workspace.dart';
 import 'incremental_stroke_path.dart';
 
+TextStyle textAnnotationStyle(
+  TextAnnotation text,
+  Size paper, {
+  String? fontFamily,
+}) {
+  final windows = defaultTargetPlatform == TargetPlatform.windows;
+  return TextStyle(
+    color: Color(text.argb),
+    fontSize: text.fontSizeFraction * paper.shortestSide,
+    height: 1.25,
+    fontFamily: switch (text.font) {
+      AnnotationTextFont.system => fontFamily,
+      AnnotationTextFont.serif => 'Times New Roman',
+      AnnotationTextFont.monospace => windows ? 'Consolas' : 'Menlo',
+    },
+    fontFamilyFallback: switch (text.font) {
+      AnnotationTextFont.system => null,
+      AnnotationTextFont.serif => windows ? ['SimSun'] : ['Songti SC'],
+      AnnotationTextFont.monospace =>
+        windows ? ['Microsoft YaHei'] : ['PingFang SC'],
+    },
+  );
+}
+
 TextPainter textAnnotationPainter(
   TextAnnotation text,
   Size paper, {
@@ -16,27 +40,61 @@ TextPainter textAnnotationPainter(
 }) => TextPainter(
   text: TextSpan(
     text: text.text,
-    style: TextStyle(
-      color: Color(text.argb),
-      fontSize: text.fontSizeFraction * paper.shortestSide,
-      height: 1.25,
-      fontFamily: fontFamily,
-    ),
+    style: textAnnotationStyle(text, paper, fontFamily: fontFamily),
   ),
   textDirection: TextDirection.ltr,
 )..layout(maxWidth: text.widthFraction * paper.width);
+
+Rect textAnnotationFrame(
+  TextAnnotation text,
+  Size paper, {
+  String? fontFamily,
+}) {
+  final painter = textAnnotationPainter(text, paper, fontFamily: fontFamily);
+  final frame =
+      Offset(text.anchor.x * paper.width, text.anchor.y * paper.height) &
+      Size(text.widthFraction * paper.width, painter.height);
+  painter.dispose();
+  return frame;
+}
+
+Offset rotateTextPoint(Offset point, Offset centre, double angle) {
+  final delta = point - centre, c = math.cos(angle), s = math.sin(angle);
+  return centre +
+      Offset(delta.dx * c - delta.dy * s, delta.dx * s + delta.dy * c);
+}
 
 Rect textAnnotationBounds(
   TextAnnotation text,
   Size paper, {
   String? fontFamily,
 }) {
-  final painter = textAnnotationPainter(text, paper, fontFamily: fontFamily);
-  final rect =
-      Offset(text.anchor.x * paper.width, text.anchor.y * paper.height) &
-      painter.size;
-  painter.dispose();
-  return rect;
+  final frame = textAnnotationFrame(text, paper, fontFamily: fontFamily);
+  final corners = [
+    frame.topLeft,
+    frame.topRight,
+    frame.bottomLeft,
+    frame.bottomRight,
+  ].map((point) => rotateTextPoint(point, frame.center, text.rotation));
+  return Rect.fromLTRB(
+    corners.map((p) => p.dx).reduce(math.min),
+    corners.map((p) => p.dy).reduce(math.min),
+    corners.map((p) => p.dx).reduce(math.max),
+    corners.map((p) => p.dy).reduce(math.max),
+  );
+}
+
+bool textAnnotationHit(
+  TextAnnotation text,
+  Offset point,
+  Size paper, {
+  String? fontFamily,
+  double padding = 6,
+}) {
+  final frame = textAnnotationFrame(text, paper, fontFamily: fontFamily);
+  return frame
+      .inflate(padding)
+      .contains(rotateTextPoint(point, frame.center, -text.rotation));
 }
 
 double _segmentDistance(Offset point, Offset a, Offset b) {
@@ -224,6 +282,7 @@ class AnnotationCanvas extends StatefulWidget {
     this.suspended = false,
     this.mouseControlKey,
     this.textPreview,
+    this.hiddenTextId,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -233,6 +292,7 @@ class AnnotationCanvas extends StatefulWidget {
   final bool suspended;
   final GlobalKey? mouseControlKey;
   final TextAnnotation? textPreview;
+  final String? hiddenTextId;
   final double eraserRadiusFraction;
   final ValueChanged<bool>? onWritingChanged;
   @override
@@ -479,8 +539,11 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
               for (final stroke in strokes)
                 if (stroke.id == widget.textPreview?.id)
                   widget.textPreview!
-                else
+                else if (stroke.id != widget.hiddenTextId)
                   stroke,
+              if (widget.textPreview != null &&
+                  !strokes.any((item) => item.id == widget.textPreview!.id))
+                widget.textPreview!,
             ],
             pending: widget.workspace.pendingFor(widget.page),
             draft: _draft,
@@ -548,10 +611,17 @@ class AnnotationPainter extends CustomPainter {
           size,
           fontFamily: textFontFamily,
         );
-        painter.paint(
-          canvas,
-          Offset(stroke.anchor.x * size.width, stroke.anchor.y * size.height),
+        final frame = Rect.fromLTWH(
+          stroke.anchor.x * size.width,
+          stroke.anchor.y * size.height,
+          stroke.widthFraction * size.width,
+          painter.height,
         );
+        canvas.save();
+        canvas.translate(frame.center.dx, frame.center.dy);
+        canvas.rotate(stroke.rotation);
+        painter.paint(canvas, Offset(-frame.width / 2, -frame.height / 2));
+        canvas.restore();
         painter.dispose();
       } else if (stroke is AnnotationStroke) {
         _stroke(canvas, size, stroke.style, stroke.points);

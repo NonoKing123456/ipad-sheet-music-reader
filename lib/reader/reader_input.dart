@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'reader_text_editing.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -210,7 +212,9 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
-    if (!widget.enabled || _editingText) return KeyEventResult.ignored;
+    if (!widget.enabled || _editingText || readerTextEditorActive) {
+      return KeyEventResult.ignored;
+    }
     final keyboard = HardwareKeyboard.instance;
     if (keyboard.isControlPressed ||
         keyboard.isAltPressed ||
@@ -227,6 +231,7 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _down(PointerDownEvent event) {
+    if (readerTextEditorActive) return;
     if (event.kind == PointerDeviceKind.touch ||
         event.kind == PointerDeviceKind.mouse) {
       final box = widget.touchControlKey?.currentContext?.findRenderObject();
@@ -336,6 +341,13 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _up(PointerUpEvent event, double width) {
+    if (readerTextEditorActive) {
+      _pointers.remove(event.pointer);
+      _inkPointers.remove(event.pointer);
+      _touches.remove(event.pointer);
+      _origin = null;
+      return;
+    }
     if (_inkPointers.remove(event.pointer)) return;
     if (!_pointers.contains(event.pointer)) return;
     final origin = _origin;
@@ -373,7 +385,8 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _signal(PointerSignalEvent event) {
-    if (!widget.mouseWheel ||
+    if (readerTextEditorActive ||
+        !widget.mouseWheel ||
         !widget.enabled ||
         event is! PointerScrollEvent ||
         _pointers.isNotEmpty ||

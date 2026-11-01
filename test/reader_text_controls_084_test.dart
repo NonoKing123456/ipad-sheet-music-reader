@@ -9,6 +9,7 @@ import 'package:score_reader/reader/reader_input.dart';
 import 'package:score_reader/reader/reader_page_seek_bar.dart';
 import 'package:score_reader/reader/reader_stage.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
+import 'package:score_reader/reader/reader_text_editing.dart';
 
 class ControlsHarness extends StatefulWidget {
   const ControlsHarness({super.key, required this.workspace});
@@ -19,6 +20,7 @@ class ControlsHarness extends StatefulWidget {
 
 class ControlsState extends State<ControlsHarness> {
   final transform = TransformationController();
+  final textControls = ReaderTextEditorController();
   final selectionKey = GlobalKey(),
       controlKey = GlobalKey(),
       paperKey = GlobalKey();
@@ -38,6 +40,7 @@ class ControlsState extends State<ControlsHarness> {
   @override
   void dispose() {
     transform.dispose();
+    textControls.dispose();
     super.dispose();
   }
 
@@ -65,6 +68,7 @@ class ControlsState extends State<ControlsHarness> {
                 icon: const Icon(Icons.text_fields),
                 onPressed: () => mode(!textTool),
               ),
+              ReaderTextFormatControls(controller: textControls),
             ],
           ),
         ),
@@ -104,6 +108,8 @@ class ControlsState extends State<ControlsHarness> {
               enabled: true,
               textTool: textTool,
               selectionKey: selectionKey,
+              textControls: textControls,
+              transform: transform,
               mouseControlKey: controlKey,
               suspended: suspended,
               style: StrokeStyle(
@@ -178,7 +184,7 @@ void main() {
         await tester.pump();
         await stale.up();
         await tester.pump();
-        expect(find.byType(AlertDialog), findsNothing);
+        expect(find.byType(TextField), findsNothing);
         expect(workspace.store.snapshot.annotations, isEmpty);
         final rect = tester.getRect(find.byKey(state.controlKey));
         expect(rect.height, 56);
@@ -193,7 +199,7 @@ void main() {
         await touch.up();
         await tester.pump();
         expect(state.turns, 0);
-        expect(find.byType(AlertDialog), findsNothing);
+        expect(find.byType(TextField), findsNothing);
         final mouse = await tester.createGesture(
           pointer: 42,
           kind: PointerDeviceKind.mouse,
@@ -339,7 +345,7 @@ void main() {
         final state = key.currentState!, initialPage = key.currentState!.page;
         await tester.tapAt(const Offset(240, 320));
         await tester.pumpAndSettle();
-        expect(find.byType(AlertDialog), findsOneWidget);
+        expect(find.byType(TextField), findsOneWidget);
         expect(
           state.editing,
           isTrue,
@@ -354,7 +360,7 @@ void main() {
         await tester.pump();
         expect(workspace.store.snapshot.annotationsFor(initialPage), isEmpty);
         await tester.enterText(find.byType(TextField), '中文，Hello! “标点”\n第二行。');
-        await tester.tap(find.text('完成'));
+        await tester.tap(find.byTooltip('完成文字编辑'));
         await until(
           tester,
           () =>
@@ -463,7 +469,7 @@ void main() {
         await tester.pump();
         await blank.up();
         await tester.pump();
-        expect(find.byType(AlertDialog), findsNothing);
+        expect(find.byType(TextField), findsNothing);
         expect(
           state.transform.value,
           isNot(pageMatrix),
@@ -512,7 +518,7 @@ void main() {
         );
         await tester.pump();
         expect(
-          find.byType(AlertDialog),
+          find.byType(TextField),
           findsNothing,
           reason: 'far up without an intermediate move is not a text tap',
         );
@@ -521,7 +527,7 @@ void main() {
         await tester.tap(find.byTooltip('编辑文字'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '取消的文字');
-        await tester.tap(find.text('取消'));
+        await tester.tap(find.byTooltip('取消文字编辑'));
         await tester.pumpAndSettle();
         expect(workspace.store.snapshot.generation, generation);
         await tester.tap(find.byTooltip('删除文字'));

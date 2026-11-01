@@ -13,6 +13,7 @@ import 'collection.dart';
 import 'collection_replica.dart';
 import 'signing_status.dart';
 import 'page_metadata.dart';
+import 'background_transfer.dart';
 
 class SyncProtocolException implements Exception {
   const SyncProtocolException(this.message, [this.status, this.code]);
@@ -294,21 +295,29 @@ class SyncServer {
   final Duration catalogSnapshotTtl;
   final _catalogTransfers = <String, _CatalogTransfer>{};
   int get activeCatalogSnapshots => _catalogTransfers.length;
-  Future<void> Function(String peerId, SigningDeviceStatus status, DateTime receivedAt)? onSigningStatus;
-  Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)? onPageMetadata;
+  Future<void> Function(
+          String peerId, SigningDeviceStatus status, DateTime receivedAt)?
+      onSigningStatus;
+  Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)?
+      onPageMetadata;
   Set<String> get authenticatedPeerIds => _peerIds(_state);
   static Set<String> _peerIds(Map<String, dynamic> state) => {
-    for (final entry in asMap(state['peers']).entries)
-      if (asMap(entry.value)['token'] is String &&
-          (asMap(entry.value)['token'] as String).isNotEmpty) entry.key,
-  };
+        for (final entry in asMap(state['peers']).entries)
+          if (asMap(entry.value)['token'] is String &&
+              (asMap(entry.value)['token'] as String).isNotEmpty)
+            entry.key,
+      };
+
   /// Projection only: callers never receive tokens or peer baselines.
   static Future<Set<String>> authenticatedPeerIdsAt(String directory) async {
     try {
       final state = await readJson(p.join(directory, 'peers.json'));
       return state == null || state['schema'] != 1 ? {} : _peerIds(state);
-    } catch (_) { return {}; }
+    } catch (_) {
+      return {};
+    }
   }
+
   final DirectoryLease _lease;
   Map<String, dynamic> _state;
   late HttpServer _server;
@@ -444,7 +453,9 @@ class SyncServer {
       }
       final peerId = _authenticate(request);
       final collection = collectionSource;
-      if (request.method == 'POST' && path == '/device-status/signing' && onSigningStatus != null) {
+      if (request.method == 'POST' &&
+          path == '/device-status/signing' &&
+          onSigningStatus != null) {
         if (request.contentLength > 1024) {
           throw const SyncProtocolException('Signing status too large.', 413);
         }
@@ -456,15 +467,23 @@ class SyncServer {
       } else if (request.method == 'GET' && path == '/state-capabilities') {
         await _reply(request.response,
             {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
-      } else if (request.method == 'POST' && path == '/collection/page-metadata' && onPageMetadata != null) {
-        if (request.contentLength > 8192) throw const SyncProtocolException('Metadata request too large.', 413);
+      } else if (request.method == 'POST' &&
+          path == '/collection/page-metadata' &&
+          onPageMetadata != null) {
+        if (request.contentLength > 8192)
+          throw const SyncProtocolException('Metadata request too large.', 413);
         final body = await _readBody(request, ioTimeout, 8192);
         final raw = body['items'];
-        if (raw is! List || raw.isEmpty || raw.length > 16) throw const FormatException('Invalid metadata batch.');
-        final keys = raw.map((e) => PageMetadataKey.fromJson(asMap(e))).toSet().toList();
+        if (raw is! List || raw.isEmpty || raw.length > 16)
+          throw const FormatException('Invalid metadata batch.');
+        final keys =
+            raw.map((e) => PageMetadataKey.fromJson(asMap(e))).toSet().toList();
         final result = await onPageMetadata!(keys);
-        await _reply(request.response, {'items': [for (final key in keys)
-          {...key.toJson(), 'pages': result[key]}]});
+        await _reply(request.response, {
+          'items': [
+            for (final key in keys) {...key.toJson(), 'pages': result[key]}
+          ]
+        });
       } else if (collection != null &&
           request.method == 'GET' &&
           path == '/v2/catalog-page') {
@@ -707,6 +726,64 @@ class SyncClient {
   final Duration ioTimeout;
   final int maxJsonBytes;
   String get _statePath => p.join(stateDirectory, 'client.json');
+  BackgroundTransfer? backgroundTransfer;
+  String get _transferNamespace =>
+      sha256.convert(utf8.encode('$baseUri/$peerId')).toString();
+  String get backgroundTransferNamespace => _transferNamespace;
+
+  /// Metadata only: never starts, replaces, or pauses a selected transfer batch.
+  Future<void> refreshCollectionIndex(ReplicaCollectionView replica,
+      {SyncCancellation? cancellation}) async {
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    void cancel() => http.close(force: true);
+    cancellation?.addListener(cancel);
+    try {
+      final index = await _collectionIndex(http, cancellation);
+      cancellation?.check();
+      await replica.updateIndex(index);
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+    }
+  }
+
+  /// Import completed system downloads even when the paired PC is now offline.
+  /// Journal/selection/revision checks and SHA verification remain authoritative.
+  Future<int> recoverBackgroundCollection(ReplicaCollectionView replica) async {
+    final transfer = backgroundTransfer;
+    if (transfer == null) return 0;
+    var imported = 0;
+    while (true) {
+      final completed = await transfer.staged(_transferNamespace);
+      if (completed.isEmpty) break;
+      for (final staged in completed) {
+        final item = staged.item,
+            current = replica.itemFor(staged.item.entryId);
+        if (current == null ||
+            current.sourceId != item.sourceId ||
+            (current.revisionId !=
+                    (staged.requestedRevisionId ?? item.revisionId) &&
+                current.revisionId != item.revisionId) ||
+            current.missing ||
+            !replica.selection.includes(item)) {
+          await transfer.acknowledge(_transferNamespace, item);
+          continue;
+        }
+        try {
+          await replica.receive(item, File(staged.path).openRead());
+        } on LibraryContentIntegrityException {
+          // A damaged or empty stage must not poison every future recovery.
+          // Existing immutable objects remain untouched; the next batch retries.
+          await transfer.acknowledge(_transferNamespace, item);
+          continue;
+        }
+        await transfer.acknowledge(_transferNamespace, item);
+        imported++;
+      }
+    }
+    await replica.flush();
+    return imported;
+  }
 
   /// Credentials and per-peer baselines stay in the app-private directory.
   static Future<SyncClient> pair(
@@ -841,36 +918,47 @@ class SyncClient {
     final http = HttpClient()..connectionTimeout = const Duration(seconds: 3);
     try {
       final response = await _request(http, 'POST', '/device-status/signing',
-          body: status.toJson()).timeout(const Duration(seconds: 3));
+              body: status.toJson())
+          .timeout(const Duration(seconds: 3));
       final body = await _readBody(response, const Duration(seconds: 3), 1024);
       return body['accepted'] == true;
     } on SyncProtocolException catch (error) {
       if (error.status == 404) return false;
       rethrow;
-    } finally { http.close(force: true); }
+    } finally {
+      http.close(force: true);
+    }
   }
 
   /// Optional page counts only; a legacy peer's 404 means unknown.
-  Future<Map<PageMetadataKey, int>> pageMetadata(List<PageMetadataKey> keys) async {
-    if (keys.isEmpty || keys.length > 16) throw ArgumentError('Metadata batch size.');
+  Future<Map<PageMetadataKey, int>> pageMetadata(
+      List<PageMetadataKey> keys) async {
+    if (keys.isEmpty || keys.length > 16)
+      throw ArgumentError('Metadata batch size.');
     final http = HttpClient()..connectionTimeout = ioTimeout;
     try {
       final response = await _request(http, 'POST', '/collection/page-metadata',
           body: {'items': keys.map((key) => key.toJson()).toList()});
       final body = await _readBody(response, ioTimeout, 16384);
       final raw = body['items'];
-      if (raw is! List || raw.length > keys.length) throw const FormatException('Invalid metadata reply.');
+      if (raw is! List || raw.length > keys.length)
+        throw const FormatException('Invalid metadata reply.');
       final allowed = keys.toSet(), result = <PageMetadataKey, int>{};
       for (final item in raw) {
-        final value = asMap(item), key = PageMetadataKey.fromJson(value), count = value['pages'];
-        if (!allowed.contains(key)) throw const FormatException('Unexpected metadata item.');
+        final value = asMap(item),
+            key = PageMetadataKey.fromJson(value),
+            count = value['pages'];
+        if (!allowed.contains(key))
+          throw const FormatException('Unexpected metadata item.');
         if (count is int && count > 0 && count <= 100000) result[key] = count;
       }
       return result;
     } on SyncProtocolException catch (error) {
       if (error.status == 404) return {};
       rethrow;
-    } finally { http.close(force: true); }
+    } finally {
+      http.close(force: true);
+    }
   }
 
   Future<CollectionIndex> _collectionIndex(
@@ -925,14 +1013,50 @@ class SyncClient {
       final targets = manifest.entries.where((e) => !e.missing).toList();
       var processed = 0;
       report(LibrarySyncPhase.transferring, processed, targets.length);
+      final transfer = backgroundTransfer;
+      final pending = <CatalogItem>[];
+      final pendingById = <String, CatalogItem>{};
+      if (transfer != null) {
+        for (final e in targets) {
+          cancellation?.check();
+          if (!await replica.hasVerifiedObject(e)) {
+            pending.add(CatalogItem(
+                sourceId: 'legacy',
+                entryId: e.entryId,
+                revisionId: e.revisionId,
+                relativePath: e.relativePath,
+                length: e.length,
+                format: e.format,
+                hash: e.hash));
+          }
+        }
+        pendingById
+            .addEntries(pending.map((item) => MapEntry(item.entryId, item)));
+        await transfer.enqueue(
+            namespace: _transferNamespace,
+            origin: baseUri,
+            bearerToken: _token,
+            items: pending,
+            prepare: false,
+            cancellation: cancellation);
+      }
       for (final e in targets) {
         cancellation?.check();
         if (!await replica.hasVerifiedObject(e)) {
-          final response = await _request(http, 'GET', '/object',
-              query: {'entryId': e.entryId, 'revisionId': e.revisionId},
-              readLibraryFailure: true);
-          await replica.receiveObject(e, response.timeout(ioTimeout),
-              cancellation: cancellation);
+          if (transfer == null) {
+            final response = await _request(http, 'GET', '/object',
+                query: {'entryId': e.entryId, 'revisionId': e.revisionId},
+                readLibraryFailure: true);
+            await replica.receiveObject(e, response.timeout(ioTimeout),
+                cancellation: cancellation);
+          } else {
+            final item = pendingById[e.entryId]!;
+            final staged =
+                await transfer.wait(_transferNamespace, item, cancellation);
+            await replica.receiveObject(e, File(staged.path).openRead(),
+                cancellation: cancellation);
+            await transfer.acknowledge(_transferNamespace, item);
+          }
           downloaded++;
         }
         processed++;
@@ -958,6 +1082,8 @@ class SyncClient {
       cancellation?.removeListener(cancel);
       http.close(force: true);
       await lease?.close();
+      if (cancellation?.isCancelled == true)
+        await backgroundTransfer?.pause(_transferNamespace);
     }
   }
 
@@ -981,6 +1107,7 @@ class SyncClient {
     }
 
     try {
+      await recoverBackgroundCollection(replica);
       CollectionIndex index;
       try {
         index = await _collectionIndex(http, cancellation);
@@ -1014,6 +1141,26 @@ class SyncClient {
       failed = unavailable > 0;
       processed = unavailable;
       report(total);
+      final transfer = backgroundTransfer;
+      if (transfer != null) {
+        final pending = <CatalogItem>[];
+        for (final item in targets) {
+          cancellation?.check();
+          if (index.sources.firstWhere((s) => s.id == item.sourceId).online &&
+              (item.hash == null ||
+                  !await replica.objects.hasVerifiedObject(item.object))) {
+            pending.add(item);
+          }
+        }
+        await transfer.enqueue(
+            namespace: _transferNamespace,
+            origin: baseUri,
+            bearerToken: _token,
+            items: pending,
+            prepare: true,
+            selection: replica.selection,
+            cancellation: cancellation);
+      }
       for (var item in targets) {
         cancellation?.check();
         if (!replica.selection.includes(item)) continue;
@@ -1028,11 +1175,14 @@ class SyncClient {
               report(total);
               continue;
             }
-            final resolved =
+            final staged = transfer == null
+                ? null
+                : await transfer.wait(_transferNamespace, item, cancellation);
+            final resolved = staged?.item ??
                 CatalogItem.fromJson(await _json(http, '/v2/prepare', body: {
-              'entryId': item.entryId,
-              'revisionId': item.revisionId,
-            }));
+                  'entryId': item.entryId,
+                  'revisionId': item.revisionId,
+                }));
             if (resolved.entryId != item.entryId ||
                 resolved.sourceId != item.sourceId) {
               throw const FormatException('Selected object identity changed.');
@@ -1047,17 +1197,20 @@ class SyncClient {
               continue;
             }
             if (!await replica.objects.hasVerifiedObject(item.object)) {
-              final response =
-                  await _request(http, 'GET', '/v2/object', query: {
-                'entryId': item.entryId,
-                'revisionId': item.revisionId,
-              });
-              await replica.receive(item, response.timeout(ioTimeout),
-                  cancellation: cancellation);
+              final bytes = staged != null
+                  ? File(staged.path).openRead()
+                  : (await _request(http, 'GET', '/v2/object', query: {
+                      'entryId': item.entryId,
+                      'revisionId': item.revisionId,
+                    }))
+                      .timeout(ioTimeout);
+              await replica.receive(item, bytes, cancellation: cancellation);
               downloaded++;
             } else {
               replica.rememberResolved(item);
             }
+            if (staged != null)
+              await transfer!.acknowledge(_transferNamespace, item);
           }
         } catch (error) {
           if (error is SyncCancelled || cancellation?.isCancelled == true)
@@ -1093,6 +1246,8 @@ class SyncClient {
     } finally {
       cancellation?.removeListener(cancel);
       http.close(force: true);
+      if (cancellation?.isCancelled == true)
+        await backgroundTransfer?.pause(_transferNamespace);
       // A cancelled/partial batch retains verified objects and their bounded
       // metadata without serializing the entire directory for every object.
       try {

@@ -105,10 +105,10 @@ class ReaderStateStore {
 
   TextAnnotation newText({required String text, required NormalizedPoint anchor,
       required int argb, double fontSizeFraction = 20 / 1024,
-      double widthFraction = .45}) {
+      double widthFraction = .45, AnnotationTextFont font = AnnotationTextFont.system}) {
     final now = DateTime.now().toUtc();
     return TextAnnotation(id: _newId(), text: text, anchor: anchor, argb: argb,
-        fontSizeFraction: fontSizeFraction, widthFraction: widthFraction,
+        fontSizeFraction: fontSizeFraction, widthFraction: widthFraction, font: font,
         createdUtc: now, updatedUtc: now, version: 1);
   }
 

@@ -18,11 +18,24 @@ import AVFoundation
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    BackgroundDownloadBridge.shared.start()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  override func application(_ application: UIApplication,
+    handleEventsForBackgroundURLSession identifier: String,
+    completionHandler: @escaping () -> Void) {
+    if identifier == BackgroundDownloadBridge.identifier {
+      BackgroundDownloadBridge.shared.handleEvents(completion: completionHandler)
+    } else {
+      super.application(application, handleEventsForBackgroundURLSession: identifier,
+        completionHandler: completionHandler)
+    }
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    BackgroundDownloadBridge.shared.register(messenger: engineBridge.applicationRegistrar.messenger())
     signingExpiryChannel = ProvisioningExpiryBridge.register(
       messenger: engineBridge.applicationRegistrar.messenger()
     )

@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
 
 import 'annotation_text_layer.dart';
+import 'reader_text_editing.dart';
 import 'reader_input.dart';
 import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
@@ -61,6 +62,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   final GlobalKey _viewportKey = GlobalKey();
   final GlobalKey _seekRegionKey = GlobalKey();
   final GlobalKey _textSelectionKey = GlobalKey();
+  final GlobalKey _textToolsKey = GlobalKey();
+  final _textControls = ReaderTextEditorController();
+  bool _textDraftActive = false;
   bool _tablet = false;
   bool _landscape = false;
   bool _writing = false;
@@ -141,12 +145,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         onPresented: widget.onPresented,
         onLoaded: widget.onLoaded,
       );
-    }, blockKeys: () => _desktopMenuOpen || _sampleMenuOpen || _writing);
+    }, blockKeys: () => _desktopMenuOpen || _sampleMenuOpen || _writing || readerTextEditorActive);
   }
 
   @override
   void initState() {
     super.initState();
+    _textControls.addListener(_textControlsChanged);
     _session = ReaderSession(
       workspace: widget.workspace,
       locate: widget.locate,
@@ -231,6 +236,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
+  void _textControlsChanged() {
+    if (mounted && _textDraftActive != _textControls.editing) {
+      setState(() => _textDraftActive = _textControls.editing);
+    }
+  }
+
   @override
   void dispose() {
     _pickEpoch++;
@@ -240,6 +251,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _session.removeListener(_changed);
     _session.dispose();
     _transform.dispose();
+    _textControls.dispose();
     super.dispose();
   }
 
@@ -450,6 +462,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         widget.initialTarget.displayPath;
     if (!isMobileReader) return _desktop(current, page, title);
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       body: ReaderStage(
         controller: _stageControls,
         hasReadablePage: _visiblePage != null,
@@ -479,7 +492,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
-                  if (_editing)
+                  if (_editing && !_textDraftActive)
                     IconButton(
                       tooltip: '完成批注',
                       onPressed: _writing ? null : _stageControls.hideTools,
@@ -853,6 +866,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final pageLabel =
         '${shown.first == shown.last ? focus : '${shown.first}–${shown.last}'} / ${document?.pageCount ?? 1}';
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       body: ReaderStage(
         top: const SizedBox.shrink(),
         bottom: const SizedBox.shrink(),
@@ -900,6 +914,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onFinishEditing: _finishAnnotation,
           editing: _editing,
           writing: _writing,
+          textEditing: _textDraftActive,
           annotationTools: page == null
               ? null
               : IgnorePointer(
@@ -1220,6 +1235,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           ),
         if (widget.allowAnnotations)
           AnnotationTextLayer(
+            transform: _transform,
+            textControls: _textControls,
+            topControlsKey: _textToolsKey,
+            viewportKey: _viewportKey,
             selectionKey: surfacePage == _visiblePage
                 ? _textSelectionKey
                 : null,
@@ -1326,6 +1345,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   Widget _tools(PageKey page) => Align(
     alignment: Alignment.center,
     child: Card(
+      key: _textToolsKey,
       margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
       color: const Color(0xfffaf9f5),
       child: Padding(
@@ -1336,7 +1356,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           alignment: WrapAlignment.center,
           children: [
             for (final tool in ReaderTool.values)
-              ReaderToolButton(
+              if (_textTool)
+                IconButton(tooltip: tool.label, icon: Icon(tool.icon), onPressed: () => _selectTool(tool))
+              else ReaderToolButton(
                 key: ValueKey(tool),
                 tool: tool,
                 selected: !_picking && !_textTool && _tool == tool,
@@ -1353,7 +1375,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 _textTool = !_textTool;
               }),
             ),
-            ReaderSampleColorButton(
+            if (_textTool) ReaderTextFormatControls(controller: _textControls),
+            if (!_textTool) ReaderSampleColorButton(
               key: _sampleButtonKey,
               sample: _lastSample == null ? null : Color(_lastSample!),
               picking: _picking,
@@ -1366,7 +1389,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   ? null
                   : _sampleAction,
             ),
-            for (final (name, color) in [
+            if (!_textTool) for (final (name, color) in [
               ('红色', 0xffc12b32),
               ('黑色', 0xff222222),
               ('蓝色', 0xff1c57ac),

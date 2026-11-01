@@ -8,7 +8,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前公开源码版本：`0.8.10+26`。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。源码版本、下载包和实际安装版本可能不同，请核对构建信息。项目不附带曲谱资源。
+> 当前源码候选版本：`0.8.10+28`，已完成原位文字批注、iPad 后台下载队列及顶部操作改进。Windows 已交付版本为 `0.8.10+27`；iPad 候选包的构建状态以对应 Release 及 `build-info.txt` 为准，尚未完成新版本真机验证。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。项目不附带曲谱资源。
 
 ## 能做什么
 
@@ -18,10 +18,10 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 | 文件阅读 | PDF、JPG / JPEG、PNG、WebP；图片作为单页曲谱 |
 | 电脑看谱 | 单页、双页、连续阅读；缩放、翻页和页码定位 |
 | iPad 看谱 | 整页适配、点按边缘翻页、手势缩放与移动、可收起工具栏 |
-| 做笔记 | 画笔、荧光笔、橡皮和文字批注，支持撤销与重做 |
+| 做笔记 | 画笔、荧光笔、橡皮和谱面原位文字批注，选择字体、拖动调整，支持撤销与重做 |
 | 排练与演出 | 创建、排序曲单，按顺序跨曲阅读，首尾不循环 |
 | 连接两端 | 扫描电脑二维码配对，记住连接，更新目录及所选内容 |
-| 离线携带 | 按曲谱或文件夹选择下载，区分未下载、部分下载和已下载 |
+| 离线携带 | 按曲谱或文件夹选择下载，iPad 系统后台队列、暂停与继续，保留已核验完整文件 |
 | 同步资料 | 同步批注与曲单，保留冲突版本供查看 |
 | 签名提示 | iPad 显示可解析的签名到期时间，电脑查看配对设备的历史报告 |
 | Windows 入口 | 固定启动器、开始菜单快捷方式和任务栏身份，升级时切换版本目录 |
@@ -33,7 +33,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 1. **准备应用。** 开发者可按 [构建文档](docs/BUILDING.md) 生成 Windows 应用；iPad 已有构建见 [Releases](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)。带 `unsigned` 的 IPA 需要本地签名才能安装。
 2. **电脑添加谱库。** 选择“添加谱库文件夹”，确认需要同步的文件已实际下载到电脑。
 3. **连接两端。** 两台设备连接同一可信局域网，电脑打开“连接我的 iPad”，iPad 选择“扫描电脑二维码”，允许相机和本地网络访问。
-4. **准备离线内容。** iPad 更新目录后，选择曲谱或文件夹“下载到 iPad”。后续使用“更新目录与所选内容”。目录可见不代表文件已下载。
+4. **准备离线内容。** iPad 更新目录后，选择曲谱或文件夹“下载到 iPad”。顶部“更新目录”只更新目录元数据，任务在同步管理中查看、暂停或继续；后台调度受系统限制。目录可见不代表文件已下载。
 5. **开始阅读。** 下载完成后断开电脑连接，检查演出曲单中的曲谱都能打开，再带去排练或演出。
 
 完整操作见 [使用指南](docs/USER_GUIDE.md)。

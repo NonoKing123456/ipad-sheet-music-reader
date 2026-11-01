@@ -196,17 +196,22 @@ class AnnotationStroke extends PageAnnotation {
       );
 }
 
+/// Portable font intent; platform font families belong to the view layer.
+enum AnnotationTextFont { system, serif, monospace }
+
 /// Text remains Unicode and paper-relative geometry, never a raster or path.
 class TextAnnotation extends PageAnnotation {
   TextAnnotation({required this.id, required this.text, required this.anchor,
     required this.argb, required this.fontSizeFraction,
     required this.widthFraction, required this.createdUtc,
-    required this.updatedUtc, required this.version, this.deletedUtc}) {
+    required this.updatedUtc, required this.version, this.deletedUtc,
+    this.font = AnnotationTextFont.system, this.rotation = 0}) {
     requireNonEmptyId(id, 'annotationId');
     if (text.trim().isEmpty || text.length > 8192 || version < 1 ||
         argb < 0 || argb > 0xffffffff || !fontSizeFraction.isFinite ||
         fontSizeFraction <= 0 || fontSizeFraction > .25 ||
-        !widthFraction.isFinite || widthFraction <= 0 || widthFraction > 1) {
+        !widthFraction.isFinite || widthFraction <= 0 || widthFraction > 1 ||
+        !rotation.isFinite) {
       throw ArgumentError('Invalid text annotation.');
     }
   }
@@ -216,6 +221,9 @@ class TextAnnotation extends PageAnnotation {
   final NormalizedPoint anchor;
   final int argb;
   final double fontSizeFraction, widthFraction;
+  final AnnotationTextFont font;
+  /// Radians clockwise around the laid-out text frame centre.
+  final double rotation;
   @override
   final DateTime createdUtc, updatedUtc;
   @override
@@ -224,10 +232,12 @@ class TextAnnotation extends PageAnnotation {
   final DateTime? deletedUtc;
   TextAnnotation revise({String? text, NormalizedPoint? anchor,
       int? argb, double? fontSizeFraction, double? widthFraction,
+      AnnotationTextFont? font, double? rotation,
       bool? deleted, required DateTime now, int? version}) => TextAnnotation(
     id: id, text: text ?? this.text, anchor: anchor ?? this.anchor,
     argb: argb ?? this.argb, fontSizeFraction: fontSizeFraction ?? this.fontSizeFraction,
-    widthFraction: widthFraction ?? this.widthFraction, createdUtc: createdUtc,
+    widthFraction: widthFraction ?? this.widthFraction, font: font ?? this.font,
+    rotation: rotation ?? this.rotation, createdUtc: createdUtc,
     updatedUtc: now, version: version ?? this.version + 1,
     deletedUtc: deleted == null ? deletedUtc : deleted ? now : null);
   @override
@@ -236,6 +246,8 @@ class TextAnnotation extends PageAnnotation {
   Map<String, Object?> get geometry => {
     'text': text, 'anchor': anchor.toJson(), 'argb': argb,
     'fontSizeFraction': fontSizeFraction, 'widthFraction': widthFraction,
+    if (font != AnnotationTextFont.system) 'font': font.name,
+    if (rotation != 0) 'rotation': rotation,
   };
   @override
   Map<String, Object?> toJson() => {
@@ -250,6 +262,10 @@ class TextAnnotation extends PageAnnotation {
       anchor: NormalizedPoint.fromJson(Map<String, dynamic>.from(data['anchor'] as Map)),
       argb: data['argb'] as int, fontSizeFraction: (data['fontSizeFraction'] as num).toDouble(),
       widthFraction: (data['widthFraction'] as num).toDouble(),
+      rotation: data['rotation'] is num && (data['rotation'] as num).isFinite
+          ? (data['rotation'] as num).toDouble() : 0,
+      font: AnnotationTextFont.values.where((font) => font.name == data['font']).firstOrNull
+          ?? AnnotationTextFont.system,
       createdUtc: DateTime.parse(json['createdUtc'] as String).toUtc(),
       updatedUtc: DateTime.parse(json['updatedUtc'] as String).toUtc(),
       version: json['version'] as int,

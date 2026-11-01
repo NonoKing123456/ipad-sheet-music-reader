@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'reader_text_editing.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -194,6 +196,7 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   KeyEventResult _pageKey(KeyEvent event) {
+    if (readerTextEditorActive) return KeyEventResult.ignored;
     final arrowPrevious =
         defaultTargetPlatform == TargetPlatform.windows &&
         (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
