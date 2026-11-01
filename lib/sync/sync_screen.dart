@@ -162,7 +162,7 @@ class _SyncScreenState extends State<SyncScreen> {
                     child: Text(sync.serverMessage!),
                   ),
                 const SizedBox(height: 8),
-                const Text('二维码2分钟有效、使用一次失效；未使用时会自动更新。请只让自己的iPad扫描。'),
+                const Text('用 iPad 扫码连接。'),
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('下次打开阅读器，自动连接我的 iPad'),
@@ -182,9 +182,7 @@ class _SyncScreenState extends State<SyncScreen> {
             if (!_desktop)
               _card(sync.paired ? '我的电脑已连接' : '扫描电脑二维码', [
                 Text(
-                  sync.paired
-                      ? '已记住电脑，打开电脑阅读器后可更新目录与所选内容。电脑换网络后重新扫码，已有离线内容保留。'
-                      : '先在电脑阅读器首页点击“连接我的 iPad”，再扫描电脑上出现的二维码。只需操作一次，资料通过同一Wi-Fi传输。',
+                  sync.paired ? '已记住电脑。' : '先在电脑阅读器首页点击“连接我的 iPad”，再扫描电脑上出现的二维码。只需操作一次，资料通过同一Wi-Fi传输。',
                 ),
                 const SizedBox(height: 12),
                 FilledButton.icon(
@@ -252,8 +250,8 @@ class _SyncScreenState extends State<SyncScreen> {
             _card('目录与离线内容', [
               Text(
                 sync.hasOfflineLibrary
-                    ? '已保存 ${sync.offlineCount} 份可用曲谱，可断网阅读。'
-                    : '先更新目录，再在谱库中选择文件夹或单曲。新谱库不会自动下载。',
+                    ? '${sync.offlineCount} 份曲谱可用'
+                    : '更新目录后选择要下载的曲谱。',
               ),
               Text(
                 '已选择 ${sync.selectedDownloadTotals.$1} 份曲谱 · ${_contentSize(sync.selectedDownloadTotals.$2)}',
@@ -305,7 +303,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   child: _status(sync.message!),
                 ),
               const SizedBox(height: 10),
-              const Text('中断可重试，已有离线内容保留。取消选择不会删除下载或批注。'),
+              const SizedBox.shrink(),
               TextButton(
                 onPressed: sync.busy || !sync.hasOfflineLibrary
                     ? null
@@ -316,7 +314,7 @@ class _SyncScreenState extends State<SyncScreen> {
             if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
               _card('有待处理的批注或曲单版本', [
                 Text(
-                  '共 ${sync.workspace.store.snapshot.conflicts.length} 项。双方完整版本已保留，尚未自动解决。',
+                  '共 ${sync.workspace.store.snapshot.conflicts.length} 项待查看。',
                 ),
                 TextButton(
                   onPressed: () => Navigator.push(
@@ -331,9 +329,7 @@ class _SyncScreenState extends State<SyncScreen> {
             if (defaultTargetPlatform == TargetPlatform.iOS)
               const Padding(
                 padding: EdgeInsets.all(12),
-                child: Text(
-                  '首次连接请允许“本地网络”。若连接失败，可在系统设置中允许本应用访问本地网络后重试。请保持应用在前台完成目录更新和所选下载。',
-                ),
+                child: Text('首次连接请允许本地网络访问。'),
               ),
           ],
         ),
@@ -417,7 +413,17 @@ class SyncConflictsScreen extends StatelessWidget {
       );
     }
     try {
-      final stroke = AnnotationStroke.fromJson(Map<String, dynamic>.from(json));
+      final stroke = PageAnnotation.fromJson(Map<String, dynamic>.from(json));
+      if (stroke is TextAnnotation) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$label：${stroke.isDeleted ? '已删除文字' : '文字批注'}'),
+            Text(stroke.text, maxLines: 4, overflow: TextOverflow.ellipsis),
+          ],
+        );
+      }
+      if (stroke is! AnnotationStroke) return Text('$label：批注');
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -455,7 +461,7 @@ class SyncConflictsScreen extends StatelessWidget {
         body: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            const Text('下面两份版本均已完整保存。此版本提供查看；选取、合并和清除冲突的操作尚未提供。'),
+            const Text('双方版本可查看，暂不支持合并选择。'),
             for (final conflict in conflicts)
               Card(
                 child: Padding(

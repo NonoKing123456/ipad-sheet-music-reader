@@ -1,8 +1,10 @@
 import '../library/score_path_label.dart';
+import '../library/directory_navigation.dart';
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
@@ -96,6 +98,8 @@ class _OfflineStatusIcon extends StatelessWidget {
 
 class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   final TextEditingController _search = TextEditingController();
+  final _searchFocus = FocusNode();
+  bool _searchOpen = false;
   final Set<String> _collapsed = {};
   String _folder = '';
   bool _withinFolder = false;
@@ -107,7 +111,56 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     return sources.isEmpty ? null : sources.first.id;
   }
 
+  @override
+  void initState() {
+    super.initState();
+    FocusManager.instance.addEarlyKeyEventHandler(_searchKey);
+  }
+
+  void _openSearch() {
+    setState(() => _searchOpen = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocus.requestFocus();
+    });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _searchOpen = false;
+      _search.clear();
+    });
+    _searchFocus.unfocus();
+  }
+
+  KeyEventResult _searchKey(KeyEvent event) {
+    if (mounted &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyF &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed)) {
+      _openSearch();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  Future<void> _refresh() async {
+    final sync = widget.controller;
+    if (!sync.paired) {
+      await _sync(immediate: true);
+      return;
+    }
+    await sync.synchronize();
+    if (mounted && sync.phase == SyncPhase.complete) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('已更新')));
+    }
+  }
+
   void _selectSource(String id) => setState(() {
+    _searchOpen = false;
+    _searchFocus.unfocus();
     _sourceId = id;
     _folder = '';
     _search.clear();
@@ -143,7 +196,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                     : '下载文件夹'
               : '下载到iPad',
         ),
-        content: Text('$count 份曲谱 · ${_size(bytes)}\n需要电脑在线，已下载的内容会复用。'),
+        content: Text('$count 份曲谱 · ${_size(bytes)}'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -182,6 +235,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   @override
   void dispose() {
+    FocusManager.instance.removeEarlyKeyEventHandler(_searchKey);
+    _searchFocus.dispose();
     _search.dispose();
     super.dispose();
   }
@@ -191,6 +246,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   void _selectFolder(String folder) {
     setState(() {
       _folder = folder;
+      _searchOpen = false;
+      _searchFocus.unfocus();
       _search.clear();
     });
   }
@@ -296,7 +353,13 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           final wide = constraints.maxWidth >= 850;
           return Scaffold(
             appBar: AppBar(
-              title: Text(widget.isHome ? '曲谱库' : '离线谱库'),
+              title: _searchOpen
+                  ? DirectorySearchField(
+                      controller: _search,
+                      focusNode: _searchFocus,
+                      onChanged: (_) => setState(() {}),
+                    )
+                  : Text(widget.isHome ? '曲谱库' : '离线谱库'),
               leading: widget.isHome
                   ? null
                   : IconButton(
@@ -306,11 +369,16 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                     ),
               actions: [
                 IconButton(
-                  tooltip: '同步与连接',
-                  onPressed: () => unawaited(_sync()),
-                  icon: const Icon(Icons.sync),
+                  tooltip: _searchOpen ? '关闭搜索' : '搜索',
+                  icon: Icon(_searchOpen ? Icons.close : Icons.search),
+                  onPressed: _searchOpen ? _closeSearch : _openSearch,
                 ),
-                if (!wide)
+                IconButton(
+                  tooltip: sync.paired ? '更新目录与所选内容' : '扫描电脑二维码',
+                  icon: const Icon(Icons.refresh),
+                  onPressed: sync.busy ? null : () => unawaited(_refresh()),
+                ),
+                if (!wide && !widget.isHome)
                   Builder(
                     builder: (context) => IconButton(
                       tooltip: '离线文件夹',
@@ -318,22 +386,36 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                       icon: const Icon(Icons.folder_outlined),
                     ),
                   ),
-                IconButton(
-                  tooltip: '曲单',
-                  onPressed: _setLists,
-                  icon: const Icon(Icons.queue_music),
-                ),
-                if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
+                if (!_searchOpen)
                   IconButton(
-                    tooltip: '保留的冲突版本',
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (_) => SyncConflictsScreen(controller: sync),
-                      ),
-                    ),
-                    icon: const Icon(Icons.compare),
+                    tooltip: '曲单',
+                    onPressed: _setLists,
+                    icon: const Icon(Icons.queue_music),
                   ),
+                PopupMenuButton<String>(
+                  tooltip: '更多',
+                  onSelected: (value) {
+                    if (value == 'sync') unawaited(_sync());
+                    if (value == 'lists') _setLists();
+                    if (value == 'conflicts') {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute<void>(
+                          builder: (_) => SyncConflictsScreen(controller: sync),
+                        ),
+                      );
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(value: 'sync', child: Text('同步与连接')),
+                    const PopupMenuItem(value: 'lists', child: Text('曲单')),
+                    if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
+                      const PopupMenuItem(
+                        value: 'conflicts',
+                        child: Text('保留的冲突版本'),
+                      ),
+                  ],
+                ),
               ],
             ),
             drawer: wide
@@ -345,38 +427,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                 Expanded(
                   child: Column(
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                sync.hasOfflineLibrary
-                                    ? '已离线 ${sync.offlineCount} 份曲谱'
-                                    : '连接电脑更新目录，再选择要下载的曲谱',
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            FilledButton.icon(
-                              onPressed: sync.busy
-                                  ? null
-                                  : () => unawaited(_sync(immediate: true)),
-                              icon: Icon(
-                                sync.paired
-                                    ? Icons.sync
-                                    : Icons.qr_code_scanner,
-                              ),
-                              label: Text(
-                                sync.busy
-                                    ? '正在同步…'
-                                    : sync.paired
-                                    ? '更新目录与所选内容'
-                                    : '扫描电脑二维码',
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
                       if (sync.initializationError != null)
                         Padding(
                           padding: const EdgeInsets.all(12),
@@ -416,63 +466,46 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                           ),
                         ),
                       Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: TextField(
-                          controller: _search,
-                          onChanged: (_) => setState(() {}),
-                          decoration: InputDecoration(
-                            labelText: '搜索曲名、谱库或文件夹',
-                            prefixIcon: const Icon(Icons.search),
-                            suffixIcon: _search.text.isEmpty
-                                ? null
-                                : IconButton(
-                                    tooltip: '清空搜索',
-                                    icon: const Icon(Icons.close),
-                                    onPressed: () => setState(_search.clear),
-                                  ),
-                            border: const OutlineInputBorder(),
-                          ),
-                        ),
-                      ),
-                      Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         child: Row(
                           children: [
-                            IconButton(
-                              tooltip: '上一级文件夹',
-                              onPressed: folder.isEmpty
-                                  ? null
-                                  : () => _selectFolder(_parent(folder)),
-                              icon: const Icon(Icons.arrow_upward),
+                            Expanded(
+                              child: DirectoryParentButton(
+                                currentPath: folder,
+                                parentLabel: _parent(folder).isEmpty
+                                    ? '谱库根目录'
+                                    : p.posix.basename(_parent(folder)),
+                                rootLabel:
+                                    sync.offlineSources
+                                        .where(
+                                          (source) =>
+                                              source.id == _activeSourceId,
+                                        )
+                                        .firstOrNull
+                                        ?.name ??
+                                    '谱库',
+                                onPressed: folder.isEmpty
+                                    ? null
+                                    : () => _selectFolder(_parent(folder)),
+                              ),
                             ),
-                            if (_activeSourceId != null) ...[
+                            if (_activeSourceId != null)
                               _OfflineFolderIcon(
                                 status: sync.folderOfflineStatus(
                                   sourceId: _activeSourceId!,
                                   folder: folder,
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                            ],
-                            Expanded(
-                              child: Text(
-                                folder.isEmpty ? '谱库根目录' : folder,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
                             if (_activeSourceId != null &&
                                 sync.needsOfflineDownload(
                                   sourceId: _activeSourceId!,
                                   folder: folder,
                                 ))
-                              TextButton.icon(
+                              IconButton(
+                                tooltip: folder.isEmpty ? '下载整个谱库' : '下载此文件夹',
                                 onPressed: () =>
                                     unawaited(_download(folder: folder)),
                                 icon: const Icon(Icons.download_outlined),
-                                label: Text(
-                                  folder.isEmpty ? '下载整个谱库' : '下载此文件夹',
-                                ),
                               ),
                           ],
                         ),
@@ -489,7 +522,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                         ListTile(
                           dense: true,
                           leading: const Icon(Icons.info_outline),
-                          title: Text('${missing.length} 份源曲谱已标为缺失，缓存与曲单引用仍保留'),
+                          title: Text('${missing.length} 份源曲谱缺失'),
                           onTap: () => showDialog<void>(
                             context: context,
                             builder: (_) => AlertDialog(
@@ -515,7 +548,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                         ),
                       if (sync.workspace.unsavedCount > 0)
                         ListTile(
-                          title: Text('${sync.workspace.unsavedCount} 笔未保存'),
+                          title: Text('${sync.workspace.unsavedCount} 项批注未保存'),
                           trailing: TextButton(
                             onPressed: () =>
                                 unawaited(sync.workspace.retryStrokes()),
@@ -630,15 +663,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   );
                                 },
                               ),
-                      ),
-                      Container(
-                        width: double.infinity,
-                        color: const Color(0xfffaf9f5),
-                        padding: const EdgeInsets.all(12),
-                        child: Text(
-                          '${sync.offlineCount} 份可读离线曲谱 · 断网仍可阅读和批注',
-                          style: const TextStyle(fontSize: 12),
-                        ),
                       ),
                     ],
                   ),

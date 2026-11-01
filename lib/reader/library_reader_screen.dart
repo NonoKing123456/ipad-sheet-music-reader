@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
 
-import 'annotation_canvas.dart';
+import 'annotation_text_layer.dart';
 import 'reader_input.dart';
 import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
@@ -48,6 +48,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   final TransformationController _transform = TransformationController();
   final GlobalKey _viewportKey = GlobalKey();
   final GlobalKey _seekRegionKey = GlobalKey();
+  final GlobalKey _textSelectionKey = GlobalKey();
   bool _tablet = false;
   bool _landscape = false;
   bool _writing = false;
@@ -63,6 +64,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   String? _pickMessage;
   EdgeInsets _panInsets = EdgeInsets.zero;
   ReaderTool _tool = ReaderTool.pen;
+  bool _textTool = false;
   final _sizes = <ReaderTool, double>{
     ReaderTool.pen: 3.2,
     ReaderTool.highlighter: 16,
@@ -159,14 +161,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Future<bool> _confirmLeaving() async {
     if (widget.workspace.pending.isEmpty &&
-        widget.workspace.pendingPaths.isEmpty) {
+        widget.workspace.pendingPaths.isEmpty &&
+        widget.workspace.pendingText.isEmpty) {
       return true;
     }
     return await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: const Text('还有笔迹未保存'),
-            content: const Text('可以先留在阅读器重试保存。返回谱库后，未保存笔迹会保留在本次应用会话中；退出应用将丢失。'),
+            title: const Text('批注尚未保存'),
+            content: const Text('退出应用会丢失未保存内容。'),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
@@ -210,6 +213,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   void _selectTool(ReaderTool tool) => setState(() {
     _cancelPick();
+    _textTool = false;
     _tool = tool;
   });
 
@@ -278,6 +282,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     setState(() {
       _editing = editing;
       if (!editing) {
+        _textTool = false;
         _inputGeneration++;
         _cancelPick();
         _touchTransforming = false;
@@ -356,7 +361,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       body: ReaderStage(
         hasReadablePage: _visiblePage != null,
         statusLabel: workspace.unsavedCount > 0
-            ? '${workspace.unsavedCount} 笔未保存'
+            ? '${workspace.unsavedCount} 项未保存'
             : '阅读状态',
         onToolsVisibilityChanged: _setEditing,
         allowOverlayPageKeys: _sampleMenuOpen,
@@ -441,14 +446,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         bottom: _footer(),
         notices: [
           if (workspace.store.storageWarnings.isNotEmpty)
-            _notice('批注和曲单已从备份恢复，请检查最近修改。'),
+            _notice('已从备份恢复，请检查最近修改。'),
           if (workspace.error != null) _notice(workspace.error!),
+          if (workspace.textConflictNotice != null)
+            _notice(workspace.textConflictNotice!),
           if (workspace.unsavedCount > 0)
             Material(
               color: const Color(0xffffedcf),
               child: ListTile(
                 dense: true,
-                title: Text('${workspace.unsavedCount} 笔未保存'),
+                title: Text('${workspace.unsavedCount} 项批注未保存'),
                 trailing: TextButton(
                   onPressed: () => unawaited(workspace.retryStrokes()),
                   child: const Text('重试保存'),
@@ -473,8 +480,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             ),
           if (_navigationWarning != null) _notice(_navigationWarning!),
           if (_pickMessage != null) _notice(_pickMessage!),
-          if (_session.sourceChanged)
-            _notice('源曲谱已更新或移除，当前为旧版本。请返回谱库打开新版；旧批注仍保留。'),
+          if (_session.sourceChanged) _notice('源曲谱已变更，当前为旧版。'),
         ],
         loading: _session.loading && _visiblePage != null,
         contentBuilder: (toggleTools) => ReaderPreviewFrame(
@@ -513,6 +519,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   transform: _transform,
                   viewportKey: _viewportKey,
                   touchControlKey: _seekRegionKey,
+                  textTool: _textTool,
+                  textSelectionKey: _textSelectionKey,
                   child: ReaderPageWindow(
                     documentKey: current.target.key,
                     pageNumber: _session.page,
@@ -610,12 +618,24 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               }
             },
           ),
-        AnnotationCanvas(
+        AnnotationTextLayer(
+          selectionKey: surfacePage == _visiblePage ? _textSelectionKey : null,
           mouseControlKey: _seekRegionKey,
           workspace: widget.workspace,
           page: surfacePage,
-          enabled: active && !_session.sourceChanged && !_picking,
-          style: _style,
+          enabled:
+              active &&
+              !_session.sourceChanged &&
+              !_picking &&
+              (!_textTool || (_editing && surfacePage == _visiblePage)),
+          textTool: _textTool,
+          style: _textTool
+              ? StrokeStyle(
+                  tool: AnnotationTool.pen,
+                  argb: _color,
+                  widthFraction: _style.widthFraction,
+                )
+              : _style,
           eraser: _tool == ReaderTool.eraser,
           eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
           suspended: _touchTransforming,
@@ -699,11 +719,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               ReaderToolButton(
                 key: ValueKey(tool),
                 tool: tool,
-                selected: !_picking && _tool == tool,
+                selected: !_picking && !_textTool && _tool == tool,
                 value: _sizes[tool]!,
                 onSelect: () => _selectTool(tool),
                 onChanged: (value) => setState(() => _sizes[tool] = value),
               ),
+            IconButton(
+              tooltip: '文字批注',
+              isSelected: _textTool,
+              icon: const Icon(Icons.text_fields),
+              onPressed: () => setState(() {
+                _cancelPick();
+                _textTool = !_textTool;
+              }),
+            ),
             ReaderSampleColorButton(
               key: _sampleButtonKey,
               sample: _lastSample == null ? null : Color(_lastSample!),
@@ -796,7 +825,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _direction = step;
     if (_writing) {
       if (!_deferredTurns.add(direction)) {
-        setState(() => _navigationWarning = '翻页操作过密，已保留先前请求；请稍候再翻。');
+        setState(() => _navigationWarning = '翻页处理中，请稍候。');
       }
       return;
     }

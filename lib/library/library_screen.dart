@@ -1,10 +1,12 @@
 import 'score_path_label.dart';
+import 'directory_navigation.dart';
 
 import 'dart:async';
 import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
@@ -40,6 +42,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     with WidgetsBindingObserver {
   LibraryController? _library;
   final TextEditingController _search = TextEditingController();
+  final _searchFocus = FocusNode();
+  bool _searchOpen = false;
   final Set<String> _collapsedFolders = {};
   String? _initializationError;
   ReaderWorkspace? _workspace;
@@ -56,6 +60,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   void initState() {
     super.initState();
+    FocusManager.instance.addEarlyKeyEventHandler(_searchKey);
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
   }
@@ -86,9 +91,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     } catch (failure) {
       debugPrint('LIBRARY data_directory_failed: $failure');
       if (mounted) {
-        setState(
-          () => _initializationError = '无法准备应用数据目录。请检查磁盘空间和写入权限，重新启动应用。',
-        );
+        setState(() => _initializationError = '应用存储不可用，请检查空间与权限。');
       }
     }
   }
@@ -115,8 +118,39 @@ class _LibraryScreenState extends State<LibraryScreen>
     _sync?.removeListener(_changed);
     if (widget.readerWorkspace == null) _workspace?.dispose();
     _sync?.dispose();
+    FocusManager.instance.removeEarlyKeyEventHandler(_searchKey);
+    _searchFocus.dispose();
     _search.dispose();
     super.dispose();
+  }
+
+  void _openSearch() {
+    setState(() => _searchOpen = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocus.requestFocus();
+    });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _searchOpen = false;
+      _search.clear();
+    });
+    _searchFocus.unfocus();
+    _library?.setQuery('');
+  }
+
+  KeyEventResult _searchKey(KeyEvent event) {
+    if (mounted &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyF &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed)) {
+      _openSearch();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   Future<void> _selectRoot() async {
@@ -156,6 +190,8 @@ class _LibraryScreenState extends State<LibraryScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   void _folder(String folder) {
+    _searchOpen = false;
+    _searchFocus.unfocus();
     _search.clear();
     _library!.setQuery('');
     _library!.setFolder(folder);
@@ -170,7 +206,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       final target = _locate(entry.id);
       if (!mounted) return;
       if (target == null) {
-        _message('曲谱暂时无法读取，请先下载到本机或刷新谱库后重试。');
+        _message('曲谱暂不可读，请刷新谱库。');
         return;
       }
       await Navigator.of(context).push(
@@ -187,7 +223,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (mounted) library.scheduleRescan();
     } catch (failure, stack) {
       debugPrint('READER workspace_failed: $failure\n$stack');
-      if (mounted) _message('批注和曲单数据暂时无法打开。请检查应用数据目录；已有记录未被清空。');
+      if (mounted) _message('无法打开批注数据，请检查应用存储。');
     } finally {
       _openingReader = false;
     }
@@ -418,43 +454,82 @@ class _LibraryScreenState extends State<LibraryScreen>
         final wide = constraints.maxWidth >= 850;
         return Scaffold(
           appBar: AppBar(
-            title: const Text(
-              '曲谱库',
-              style: TextStyle(fontWeight: FontWeight.w600),
-            ),
+            title: _searchOpen
+                ? DirectorySearchField(
+                    controller: _search,
+                    focusNode: _searchFocus,
+                    onChanged: (text) => library?.setQuery(text),
+                  )
+                : const Text(
+                    '曲谱库',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
             backgroundColor: const Color(0xfffaf9f5),
             actions: [
               IconButton(
-                tooltip: '无线同步 / 连接电脑',
-                onPressed: library?.initialized == true
-                    ? () => unawaited(_openSync())
-                    : null,
-                icon: const Icon(Icons.wifi),
+                tooltip: _searchOpen ? '关闭搜索' : '搜索',
+                icon: Icon(_searchOpen ? Icons.close : Icons.search),
+                onPressed: _searchOpen ? _closeSearch : _openSearch,
               ),
               IconButton(
-                tooltip: '离线谱库',
-                onPressed: library?.initialized == true
-                    ? () => unawaited(_openOffline())
-                    : null,
-                icon: const Icon(Icons.offline_pin_outlined),
+                tooltip: '刷新谱库',
+                icon: const Icon(Icons.refresh),
+                onPressed: library?.rootPath == null || library!.scanning
+                    ? null
+                    : () => unawaited(library.rescan()),
               ),
-              IconButton(
-                tooltip: '曲单',
-                onPressed: library?.initialized == true ? _openSetLists : null,
-                icon: const Icon(Icons.queue_music),
-              ),
-              IconButton(
-                tooltip: '打开单份曲谱',
-                onPressed: _openSingle,
-                icon: const Icon(Icons.description_outlined),
-              ),
-              if (_canProvideLibrary)
-                TextButton.icon(
-                  onPressed: library == null ? null : _selectRoot,
-                  icon: const Icon(Icons.create_new_folder_outlined),
-                  label: const Text('添加谱库文件夹'),
+              if (wide && !_searchOpen) ...[
+                IconButton(
+                  tooltip: '无线同步 / 连接电脑',
+                  icon: const Icon(Icons.wifi),
+                  onPressed: library?.initialized == true
+                      ? () => unawaited(_openSync())
+                      : null,
                 ),
-              const SizedBox(width: 8),
+                IconButton(
+                  tooltip: '曲单',
+                  icon: const Icon(Icons.queue_music),
+                  onPressed: library?.initialized == true
+                      ? _openSetLists
+                      : null,
+                ),
+                IconButton(
+                  tooltip: '打开单份曲谱',
+                  onPressed: _openSingle,
+                  icon: const Icon(Icons.description_outlined),
+                ),
+              ],
+              PopupMenuButton<String>(
+                tooltip: '更多',
+                onSelected: (value) {
+                  switch (value) {
+                    case 'add':
+                      unawaited(_selectRoot());
+                    case 'single':
+                      unawaited(_openSingle());
+                    case 'sync':
+                      unawaited(_openSync());
+                    case 'offline':
+                      unawaited(_openOffline());
+                    case 'lists':
+                      _openSetLists();
+                    case 'verify':
+                      unawaited(library?.rescan(verifyAll: true));
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'add', child: Text('添加谱库文件夹')),
+                  const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
+                  const PopupMenuItem(value: 'sync', child: Text('连接我的 iPad')),
+                  const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
+                  const PopupMenuItem(value: 'lists', child: Text('曲单')),
+                  PopupMenuItem(
+                    value: 'verify',
+                    enabled: library?.rootPath != null && !library!.scanning,
+                    child: const Text('完整校验此谱库内容'),
+                  ),
+                ],
+              ),
             ],
           ),
           drawer: !wide && library?.rootPath != null
@@ -504,30 +579,16 @@ class _LibraryScreenState extends State<LibraryScreen>
               const SizedBox(height: 12),
               Text(
                 _canProvideLibrary
-                    ? '保留原来的整理方式，按文件夹浏览，按曲名和路径搜索。\n支持 PDF、JPG、PNG 和 WebP。'
+                    ? '选择存放 PDF 或图片的文件夹。'
                     : '连接电脑更新目录，再选择要带走的文件夹或曲谱。\n已下载的曲谱、批注和曲单可断网使用。',
                 textAlign: TextAlign.center,
                 style: TextStyle(height: 1.8, color: Color(0xff65736b)),
               ),
               const SizedBox(height: 24),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                alignment: WrapAlignment.center,
-                children: [
-                  if (_canProvideLibrary)
-                    FilledButton.icon(
-                      onPressed: _selectRoot,
-                      icon: const Icon(Icons.folder_open_outlined),
-                      label: const Text('添加谱库文件夹'),
-                    ),
-                  _connectionButton(),
-                  OutlinedButton.icon(
-                    onPressed: () => unawaited(_openOffline()),
-                    icon: const Icon(Icons.offline_pin_outlined),
-                    label: const Text('打开离线谱库'),
-                  ),
-                ],
+              FilledButton.icon(
+                onPressed: _selectRoot,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('添加谱库文件夹'),
               ),
               if (library.error != null)
                 Padding(
@@ -678,105 +739,22 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   double mathIndent(int depth) => (depth * 12.0).clamp(0, 132);
 
-  Widget _connectionButton() => FilledButton.icon(
-    onPressed: () => unawaited(
-      _openSync(
-        scan: !_canProvideLibrary && _sync?.paired != true,
-        syncNow: !_canProvideLibrary && _sync?.paired == true,
-      ),
-    ),
-    icon: Icon(
-      _canProvideLibrary
-          ? Icons.qr_code
-          : (_sync?.paired == true ? Icons.sync : Icons.qr_code_scanner),
-    ),
-    label: Text(
-      _canProvideLibrary
-          ? '连接我的 iPad'
-          : (_sync?.paired == true ? '立即同步' : '扫描电脑二维码'),
-    ),
-  );
-
   Widget _content(LibraryController library) => Column(
     children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: _connectionButton(),
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _search,
-                onChanged: library.setQuery,
-                decoration: InputDecoration(
-                  hintText: '搜索曲名或文件夹名称',
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: _search.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: '清空搜索',
-                          icon: const Icon(Icons.close),
-                          onPressed: () {
-                            _search.clear();
-                            library.setQuery('');
-                          },
-                        ),
-                  filled: true,
-                  fillColor: const Color(0xfffaf9f5),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xffdedfd7)),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            IconButton(
-              tooltip: '刷新谱库',
-              onPressed: () => unawaited(library.rescan()),
-              icon: const Icon(Icons.refresh),
-            ),
-            PopupMenuButton<String>(
-              tooltip: '更多刷新选项',
-              enabled: !library.scanning,
-              onSelected: (_) => unawaited(library.rescan(verifyAll: true)),
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'verify', child: Text('完整校验此谱库内容')),
-              ],
-            ),
-          ],
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(
-          children: [
-            IconButton(
-              tooltip: '上一级文件夹',
-              onPressed: library.currentFolder.isEmpty
-                  ? null
-                  : () => _folder(_parent(library.currentFolder)),
-              icon: const Icon(Icons.arrow_upward, size: 18),
-            ),
-            Expanded(
-              child: Tooltip(
-                message: library.currentFolder.isEmpty
-                    ? library.rootPath!
-                    : library.currentFolder,
-                child: Text(
-                  library.currentFolder.isEmpty
-                      ? '${library.selectedSource?.name ?? '谱库'} · 根目录'
-                      : library.currentFolder,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
+              child: DirectoryParentButton(
+                currentPath: library.currentFolder,
+                parentLabel: _parent(library.currentFolder).isEmpty
+                    ? library.selectedSource?.name ?? '谱库'
+                    : p.posix.basename(_parent(library.currentFolder)),
+                rootLabel: library.selectedSource?.name ?? '谱库',
+                onPressed: library.currentFolder.isEmpty
+                    ? null
+                    : () => _folder(_parent(library.currentFolder)),
               ),
             ),
             if (library.searching) ...[
@@ -790,9 +768,9 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       ),
       if (library.scanning) const LinearProgressIndicator(minHeight: 2),
-      if (_workspace?.pending.isNotEmpty ?? false)
+      if ((_workspace?.unsavedCount ?? 0) > 0)
         _notice(
-          '还有 ${_workspace!.pending.length} 笔批注未保存，点击重试。退出应用将丢失未保存笔迹。',
+          '${_workspace!.unsavedCount} 项批注未保存',
           Icons.edit_outlined,
           () => unawaited(_workspace!.retryStrokes()),
         ),
@@ -813,17 +791,6 @@ class _LibraryScreenState extends State<LibraryScreen>
           () => _details(library),
         ),
       Expanded(child: _entries(library)),
-      Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
-        color: const Color(0xfffaf9f5),
-        child: Text(
-          library.scanning
-              ? '正在更新谱库，可继续搜索和浏览已有结果…'
-              : '${library.visibleEntries.length} 份曲谱${library.lastScanDuration == null ? '' : ' · 上次更新 ${(library.lastScanDuration!.inMilliseconds / 1000).toStringAsFixed(2)} 秒'}',
-          style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),
-        ),
-      ),
     ],
   );
 

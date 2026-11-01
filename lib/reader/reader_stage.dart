@@ -93,7 +93,7 @@ class _ReaderStageState extends State<ReaderStage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late bool _tools = !isMobileReader;
   Size? _viewport;
-  final _topKey = GlobalKey(), _bottomKey = GlobalKey();
+  final _topKey = GlobalKey();
   EdgeInsets? _reportedObstruction;
   bool _measurementScheduled = false;
   late final AnimationController _animation;
@@ -168,6 +168,7 @@ class _ReaderStageState extends State<ReaderStage>
       curve: Curves.easeOutCubic,
       reverseCurve: Curves.easeInCubic,
     );
+    _animation.addListener(_measureObstruction);
     WidgetsBinding.instance.addObserver(this);
     readerRouteVisibility.addListener(_updateWake);
     FocusManager.instance.addEarlyKeyEventHandler(_pageKey);
@@ -246,11 +247,10 @@ class _ReaderStageState extends State<ReaderStage>
       _measurementScheduled = false;
       if (!mounted) return;
       final top = _topKey.currentContext?.findRenderObject() as RenderBox?;
-      final bottom =
-          _bottomKey.currentContext?.findRenderObject() as RenderBox?;
       final value = EdgeInsets.only(
-        top: top?.size.height ?? 0,
-        bottom: bottom?.size.height ?? 0,
+        top: !_tools || top == null || !top.hasSize
+            ? 0
+            : top.localToGlobal(Offset(0, top.size.height)).dy,
       );
       if (value != _reportedObstruction) {
         _reportedObstruction = value;
@@ -280,12 +280,14 @@ class _ReaderStageState extends State<ReaderStage>
             right: 0,
             top: 0,
             child: SafeArea(
-              key: _topKey,
               bottom: false,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _animatedTools(widget.top, const Offset(0, -1)),
+                  _animatedTools(
+                    KeyedSubtree(key: _topKey, child: widget.top),
+                    const Offset(0, -1),
+                  ),
                   if (!widget.hasReadablePage) ...widget.notices,
                 ],
               ),
@@ -318,25 +320,11 @@ class _ReaderStageState extends State<ReaderStage>
             right: 0,
             bottom: 0,
             child: SafeArea(
-              key: _bottomKey,
               top: false,
               child: _animatedTools(
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: Padding(
-                        padding: const EdgeInsets.only(right: 8, bottom: 4),
-                        child: IconButton.filledTonal(
-                          tooltip: '收起阅读工具',
-                          onPressed: () => _show(false),
-                          icon: const Icon(Icons.fullscreen),
-                        ),
-                      ),
-                    ),
-                    widget.bottom,
-                  ],
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 18),
+                  child: widget.bottom,
                 ),
                 const Offset(0, 1),
               ),

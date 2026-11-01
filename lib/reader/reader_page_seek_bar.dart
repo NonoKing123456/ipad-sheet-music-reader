@@ -3,7 +3,10 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
-/// Floating dots; the 44-pixel touch area is transparent and never resizes paper.
+int readerSeekDotCount(int pages, double width) =>
+    math.min(pages.clamp(1, 60), math.max(1, ((width - 24) / 18).floor() + 1));
+
+/// Floating dots; the transparent touch area never resizes paper.
 class ReaderPageSeekBar extends StatefulWidget {
   const ReaderPageSeekBar({
     super.key,
@@ -60,8 +63,8 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
   }
 
   void _move(double x, double width) {
-    final dots = widget.pageCount.clamp(1, 60);
-    final length = math.min(width - 24, (dots - 1) * 6.0);
+    final dots = readerSeekDotCount(widget.pageCount, width);
+    final length = (dots - 1) * 18.0;
     final left = (width - length) / 2;
     final page =
         (1 +
@@ -83,10 +86,10 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
   @override
   Widget build(BuildContext context) => Center(
     child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 420),
+      constraints: const BoxConstraints(maxWidth: 720),
       child: SizedBox(
         key: widget.hitRegionKey,
-        height: 44,
+        height: 56,
         child: LayoutBuilder(
           builder: (_, constraints) {
             final width = constraints.maxWidth;
@@ -172,22 +175,23 @@ class ReaderPageDotsPainter extends CustomPainter {
   int get dotCount => pages.clamp(1, 60);
   @override
   void paint(Canvas canvas, Size size) {
-    final dots = dotCount, length = math.min(size.width - 24, (dots - 1) * 6.0);
+    final dots = readerSeekDotCount(pages, size.width),
+        length = (dots - 1) * 18.0;
     final left = (size.width - length) / 2;
     final ink = Paint()..color = const Color(0x9952615c);
     for (var dot = 0; dot < dots; dot++) {
       final x = dots == 1 ? size.width / 2 : left + length * dot / (dots - 1);
-      canvas.drawCircle(Offset(x, 28), 1.5, ink);
+      canvas.drawCircle(Offset(x, 28), 3, ink);
     }
     final progress = pages <= 1 ? .5 : (page - 1) / (pages - 1);
     final centre = Offset(
       pages <= 1 ? size.width / 2 : left + length * progress,
       28,
     );
-    canvas.drawCircle(centre, 4, Paint()..color = Colors.white);
+    canvas.drawCircle(centre, 5, Paint()..color = Colors.white);
     canvas.drawCircle(
       centre,
-      4,
+      5,
       Paint()
         ..color = const Color(0xff52615c)
         ..style = PaintingStyle.stroke

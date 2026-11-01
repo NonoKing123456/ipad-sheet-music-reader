@@ -67,7 +67,7 @@ class SetListsScreen extends StatelessWidget {
     this.catalog,
     this.prepare,
     this.preparationLabel = '准备本曲单',
-    this.preparationNotice = '只准备本曲单所需文件，不会下载整个谱库。',
+    this.preparationNotice = '需要来源可用。',
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -107,7 +107,7 @@ class SetListsScreen extends StatelessWidget {
             if (workspace.store.storageWarnings.isNotEmpty)
               const Padding(
                 padding: EdgeInsets.all(16),
-                child: Text('曲单和批注从备份恢复，最近一次修改可能未恢复。请检查内容。'),
+                child: Text('已从备份恢复，请检查最近修改。'),
               ),
             Expanded(
               child: lists.isEmpty
@@ -162,7 +162,7 @@ class _SetListDetail extends StatelessWidget {
     this.catalog,
     this.prepare,
     this.preparationLabel = '准备本曲单',
-    this.preparationNotice = '只准备本曲单所需文件，不会下载整个谱库。',
+    this.preparationNotice = '需要来源可用。',
   });
   final ReaderWorkspace workspace;
   final String listId;
@@ -220,7 +220,7 @@ class _SetListDetail extends StatelessWidget {
     try {
       message = await callback(needed.map((entry) => entry.entryId).toSet());
     } catch (_) {
-      message = '准备尚未完成，曲单已保留；请检查连接、来源和空间后重试。';
+      message = '准备未完成，请检查连接后重试。';
     }
     if (context.mounted) {
       final current = {
@@ -247,7 +247,7 @@ class _SetListDetail extends StatelessWidget {
     if (metadata?.state == ScoreContentState.missing ||
         metadata?.state == ScoreContentState.sourceOffline) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${metadata!.statusLabel}，请先恢复来源；曲单关联已保留。')),
+        SnackBar(content: Text('${metadata!.statusLabel}，请先恢复来源。')),
       );
       return;
     }
@@ -412,7 +412,7 @@ class _SetListDetail extends StatelessWidget {
                             ),
                             subtitle: Text(
                               target == null
-                                  ? '请更新目录，原曲谱关联仍保留。'
+                                  ? '请更新目录。'
                                   : '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,

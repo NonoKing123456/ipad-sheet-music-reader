@@ -130,110 +130,145 @@ Future<String> prepareReadingCopy(
   String cacheDirectory,
 ) async {
   final watch = Stopwatch()..start();
-  final result = await Isolate.run(() async {
-    if (target.contentHash == null) {
-      throw const FormatException('Unverified revision');
-    }
-    final key = sha256
-        .convert(utf8.encode('${target.entryId}/${target.revisionId}'))
-        .toString();
-    final copy = File(
-      p.join(
-        cacheDirectory,
-        '$key${p.extension(target.filePath).toLowerCase()}',
-      ),
+  final result = await Isolate.run(
+    _ReadingCopyRequest(
+      entryId: target.entryId,
+      revisionId: target.revisionId,
+      filePath: target.filePath,
+      contentHash: target.contentHash,
+      cacheDirectory: cacheDirectory,
+    ).call,
+  );
+  debugPrint(
+    'READER reading_copy mode=${result.mode} object_bytes=${result.bytes} copy_read_bytes=${result.copied} verification_read_bytes=${result.verified} content_read_bytes=${result.copied + result.verified} elapsed_ms=${watch.elapsedMilliseconds}',
+  );
+  return result.path;
+}
+
+typedef _ReadingCopyResult = ({
+  String path,
+  String mode,
+  int bytes,
+  int copied,
+  int verified,
+});
+
+/// Only scalar file identity crosses the isolate boundary. ScoreTarget also
+/// owns a read validator that can retain live controllers, futures and watchers.
+class _ReadingCopyRequest {
+  const _ReadingCopyRequest({
+    required this.entryId,
+    required this.revisionId,
+    required this.filePath,
+    required this.contentHash,
+    required this.cacheDirectory,
+  });
+  final String entryId, revisionId, filePath, cacheDirectory;
+  final String? contentHash;
+  Future<_ReadingCopyResult> call() => _prepareReadingCopyWorker(this);
+}
+
+Future<_ReadingCopyResult> _prepareReadingCopyWorker(
+  _ReadingCopyRequest request,
+) async {
+  if (request.contentHash == null) {
+    throw const FormatException('Unverified revision');
+  }
+  final key = sha256
+      .convert(utf8.encode('${request.entryId}/${request.revisionId}'))
+      .toString();
+  final copy = File(
+    p.join(
+      request.cacheDirectory,
+      '$key${p.extension(request.filePath).toLowerCase()}',
+    ),
+  );
+  final marker = File('${copy.path}.verified.json');
+  var copiedBytes = 0;
+  var verifiedBytes = 0;
+  Future<String> contentHash(File file) async {
+    final hash = await sha256
+        .bind(
+          file.openRead().map((chunk) {
+            verifiedBytes += chunk.length;
+            return chunk;
+          }),
+        )
+        .first;
+    return hash.toString();
+  }
+
+  Future<void> markVerified() async {
+    final stat = await copy.stat();
+    final temporaryMarker = File('${marker.path}.tmp');
+    await temporaryMarker.writeAsString(
+      jsonEncode({
+        'hash': request.contentHash,
+        'size': stat.size,
+        'modified': stat.modified.toUtc().toIso8601String(),
+      }),
+      flush: true,
     );
-    final marker = File('${copy.path}.verified.json');
-    var copiedBytes = 0;
-    var verifiedBytes = 0;
-    Future<String> contentHash(File file) async {
-      final hash = await sha256
-          .bind(
-            file.openRead().map((chunk) {
-              verifiedBytes += chunk.length;
-              return chunk;
-            }),
-          )
-          .first;
-      return hash.toString();
-    }
+    await temporaryMarker.rename(marker.path);
+  }
 
-    Future<void> markVerified() async {
-      final stat = await copy.stat();
-      final temporaryMarker = File('${marker.path}.tmp');
-      await temporaryMarker.writeAsString(
-        jsonEncode({
-          'hash': target.contentHash,
-          'size': stat.size,
-          'modified': stat.modified.toUtc().toIso8601String(),
-        }),
-        flush: true,
-      );
-      await temporaryMarker.rename(marker.path);
-    }
-
-    if (await copy.exists()) {
-      final stat = await copy.stat();
-      try {
-        final verified =
-            jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
-        if (verified['hash'] == target.contentHash &&
-            verified['size'] == stat.size &&
-            verified['modified'] == stat.modified.toUtc().toIso8601String()) {
-          return (
-            path: copy.path,
-            mode: 'warm',
-            bytes: stat.size,
-            copied: copiedBytes,
-            verified: verifiedBytes,
-          );
-        }
-      } catch (_) {
-        /* A missing marker is repaired only after content verification. */
-      }
-      if (await contentHash(copy) == target.contentHash) {
-        await markVerified();
+  if (await copy.exists()) {
+    final stat = await copy.stat();
+    try {
+      final verified =
+          jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
+      if (verified['hash'] == request.contentHash &&
+          verified['size'] == stat.size &&
+          verified['modified'] == stat.modified.toUtc().toIso8601String()) {
         return (
           path: copy.path,
-          mode: 'reverified',
+          mode: 'warm',
           bytes: stat.size,
           copied: copiedBytes,
           verified: verifiedBytes,
         );
       }
+    } catch (_) {
+      /* A missing marker is repaired only after content verification. */
     }
-    await copy.parent.create(recursive: true);
-    final temporary = File(
-      '${copy.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
-    );
-    try {
-      await File(target.filePath)
-          .openRead()
-          .map((chunk) {
-            copiedBytes += chunk.length;
-            return chunk;
-          })
-          .pipe(temporary.openWrite());
-      if (await contentHash(temporary) != target.contentHash) {
-        throw const FormatException('Source revision changed during load');
-      }
-      await temporary.rename(copy.path);
+    if (await contentHash(copy) == request.contentHash) {
       await markVerified();
       return (
         path: copy.path,
-        mode: 'cold',
-        bytes: (await copy.stat()).size,
+        mode: 'reverified',
+        bytes: stat.size,
         copied: copiedBytes,
         verified: verifiedBytes,
       );
-    } finally {
-      if (await temporary.exists()) await temporary.delete();
     }
-  });
-  debugPrint(
-    'READER reading_copy mode=${result.mode} object_bytes=${result.bytes} copy_read_bytes=${result.copied} verification_read_bytes=${result.verified} content_read_bytes=${result.copied + result.verified} elapsed_ms=${watch.elapsedMilliseconds}',
+  }
+  await copy.parent.create(recursive: true);
+  final temporary = File(
+    '${copy.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
   );
-  return result.path;
+  try {
+    await File(request.filePath)
+        .openRead()
+        .map((chunk) {
+          copiedBytes += chunk.length;
+          return chunk;
+        })
+        .pipe(temporary.openWrite());
+    if (await contentHash(temporary) != request.contentHash) {
+      throw const FormatException('Source revision changed during load');
+    }
+    await temporary.rename(copy.path);
+    await markVerified();
+    return (
+      path: copy.path,
+      mode: 'cold',
+      bytes: (await copy.stat()).size,
+      copied: copiedBytes,
+      verified: verifiedBytes,
+    );
+  } finally {
+    if (await temporary.exists()) await temporary.delete();
+  }
 }
 
 Future<LoadedScore> loadScore(
@@ -518,7 +553,7 @@ class ReaderSession extends ChangeNotifier {
     } catch (failure, stack) {
       debugPrint('READER load_failed: $failure\n$stack');
       if (!_disposed && epoch == _epoch) {
-        message = '无法读取这份曲谱。请检查文件是否完整、已下载到本机且未受密码保护。';
+        message = '无法打开曲谱，请检查文件是否完整。';
       }
     } finally {
       if (!_disposed && epoch == _epoch) {
@@ -531,7 +566,7 @@ class ReaderSession extends ChangeNotifier {
   Future<void> turn(NavigationDirection direction) {
     if (_pendingActions.length >= ReaderNavigationQueue.maxPresses ||
         !_pendingTurns.add(direction)) {
-      message = '翻页操作过密，已保留先前请求；请稍候再翻。';
+      message = '翻页处理中，请稍候。';
       _changed();
       return _navigationTask ?? Future<void>.value();
     }

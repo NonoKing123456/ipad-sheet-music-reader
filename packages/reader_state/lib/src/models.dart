@@ -116,7 +116,27 @@ class StrokeStyle {
       widthFraction: (json['widthFraction'] as num).toDouble());
 }
 
-class AnnotationStroke {
+/// A page owns one drawing order across ink and editable vector text.
+sealed class PageAnnotation {
+  String get id;
+  DateTime get createdUtc;
+  DateTime get updatedUtc;
+  int get version;
+  DateTime? get deletedUtc;
+  bool get isDeleted => deletedUtc != null;
+  PageAnnotation withDeletion(bool deleted, DateTime now);
+  Map<String, Object?> toJson();
+
+  static PageAnnotation fromJson(Map<String, dynamic> json) {
+    if (json['kind'] == 'text') return TextAnnotation.fromJson(json);
+    if (json['kind'] != null && json['kind'] != 'ink') {
+      throw const FormatException('Unknown page annotation kind.');
+    }
+    return AnnotationStroke.fromJson(json);
+  }
+}
+
+class AnnotationStroke extends PageAnnotation {
   AnnotationStroke(
       {required this.id,
       required this.style,
@@ -174,6 +194,73 @@ class AnnotationStroke {
             ? null
             : DateTime.parse(json['deletedUtc'] as String).toUtc(),
       );
+}
+
+/// Text remains Unicode and paper-relative geometry, never a raster or path.
+class TextAnnotation extends PageAnnotation {
+  TextAnnotation({required this.id, required this.text, required this.anchor,
+    required this.argb, required this.fontSizeFraction,
+    required this.widthFraction, required this.createdUtc,
+    required this.updatedUtc, required this.version, this.deletedUtc}) {
+    requireNonEmptyId(id, 'annotationId');
+    if (text.trim().isEmpty || text.length > 8192 || version < 1 ||
+        argb < 0 || argb > 0xffffffff || !fontSizeFraction.isFinite ||
+        fontSizeFraction <= 0 || fontSizeFraction > .25 ||
+        !widthFraction.isFinite || widthFraction <= 0 || widthFraction > 1) {
+      throw ArgumentError('Invalid text annotation.');
+    }
+  }
+  @override
+  final String id;
+  final String text;
+  final NormalizedPoint anchor;
+  final int argb;
+  final double fontSizeFraction, widthFraction;
+  @override
+  final DateTime createdUtc, updatedUtc;
+  @override
+  final int version;
+  @override
+  final DateTime? deletedUtc;
+  TextAnnotation revise({String? text, NormalizedPoint? anchor,
+      int? argb, double? fontSizeFraction, double? widthFraction,
+      bool? deleted, required DateTime now, int? version}) => TextAnnotation(
+    id: id, text: text ?? this.text, anchor: anchor ?? this.anchor,
+    argb: argb ?? this.argb, fontSizeFraction: fontSizeFraction ?? this.fontSizeFraction,
+    widthFraction: widthFraction ?? this.widthFraction, createdUtc: createdUtc,
+    updatedUtc: now, version: version ?? this.version + 1,
+    deletedUtc: deleted == null ? deletedUtc : deleted ? now : null);
+  @override
+  TextAnnotation withDeletion(bool deleted, DateTime now) =>
+      revise(deleted: deleted, now: now);
+  Map<String, Object?> get geometry => {
+    'text': text, 'anchor': anchor.toJson(), 'argb': argb,
+    'fontSizeFraction': fontSizeFraction, 'widthFraction': widthFraction,
+  };
+  @override
+  Map<String, Object?> toJson() => {
+    'kind': 'text', 'id': id, 'text': geometry,
+    'createdUtc': createdUtc.toUtc().toIso8601String(),
+    'updatedUtc': updatedUtc.toUtc().toIso8601String(), 'version': version,
+    'deletedUtc': deletedUtc?.toUtc().toIso8601String(),
+  };
+  factory TextAnnotation.fromJson(Map<String, dynamic> json) {
+    final data = Map<String, dynamic>.from(json['text'] as Map);
+    return TextAnnotation(id: json['id'] as String, text: data['text'] as String,
+      anchor: NormalizedPoint.fromJson(Map<String, dynamic>.from(data['anchor'] as Map)),
+      argb: data['argb'] as int, fontSizeFraction: (data['fontSizeFraction'] as num).toDouble(),
+      widthFraction: (data['widthFraction'] as num).toDouble(),
+      createdUtc: DateTime.parse(json['createdUtc'] as String).toUtc(),
+      updatedUtc: DateTime.parse(json['updatedUtc'] as String).toUtc(),
+      version: json['version'] as int,
+      deletedUtc: json['deletedUtc'] == null ? null : DateTime.parse(json['deletedUtc'] as String).toUtc());
+  }
+}
+
+/// Explicit null means this draft started before the annotation existed.
+class TextEditBase {
+  const TextEditBase(this.value);
+  final TextAnnotation? value;
 }
 
 class SetListItem {
@@ -363,24 +450,25 @@ class MergeConflict {
 }
 
 class ReaderSnapshot {
-  static const schemaVersion = 2;
+  static const schemaVersion = 3;
 
   ReaderSnapshot(
       {required this.generation,
-      required Map<PageKey, List<AnnotationStroke>> pages,
+      Map<PageKey, List<AnnotationStroke>> pages = const {},
+      Map<PageKey, List<PageAnnotation>>? annotations,
       required List<ScoreSetList> setLists,
       required Map<DocumentKey, ReadingBookmark> bookmarks,
       List<MergeConflict> conflicts = const [],
       Set<String> mergeReceipts = const {}})
-      : pages = Map.unmodifiable(pages.map((key, value) =>
-            MapEntry(key, List<AnnotationStroke>.unmodifiable(value)))),
+      : annotations = Map.unmodifiable((annotations ?? pages).map((key, value) =>
+            MapEntry(key, List<PageAnnotation>.unmodifiable(value)))),
         setLists = List.unmodifiable(setLists),
         bookmarks = Map.unmodifiable(bookmarks),
         conflicts = List.unmodifiable(conflicts),
         mergeReceipts = Set.unmodifiable(mergeReceipts) {
     if (generation < 0) throw ArgumentError.value(generation, 'generation');
     final strokeIds = <String>{};
-    for (final strokes in pages.values) {
+    for (final strokes in this.annotations.values) {
       for (final stroke in strokes) {
         if (!strokeIds.add(stroke.id))
           throw ArgumentError('Duplicate stroke ID.');
@@ -405,7 +493,15 @@ class ReaderSnapshot {
   factory ReaderSnapshot.empty() =>
       ReaderSnapshot(generation: 0, pages: {}, setLists: [], bookmarks: {});
   final int generation;
-  final Map<PageKey, List<AnnotationStroke>> pages;
+  final Map<PageKey, List<PageAnnotation>> annotations;
+  Map<PageKey, List<AnnotationStroke>>? _inkPages;
+  /// Compatibility view for ink-only callers. Never use it to serialize a page.
+  Map<PageKey, List<AnnotationStroke>> get pages => _inkPages ??=
+      Map.unmodifiable(annotations.map((key, value) => MapEntry(key,
+          List<AnnotationStroke>.unmodifiable(value.whereType<AnnotationStroke>()))));
+  List<PageAnnotation> annotationsFor(PageKey key, {bool includeDeleted = false}) =>
+      List.unmodifiable((annotations[key] ?? const <PageAnnotation>[])
+          .where((item) => includeDeleted || !item.isDeleted));
   final List<ScoreSetList> setLists;
   final Map<DocumentKey, ReadingBookmark> bookmarks;
   final List<MergeConflict> conflicts;
@@ -428,24 +524,48 @@ class ReaderSnapshot {
 
   ReaderSnapshot next(
           {Map<PageKey, List<AnnotationStroke>>? pages,
+          Map<PageKey, List<PageAnnotation>>? annotations,
           List<ScoreSetList>? setLists,
           Map<DocumentKey, ReadingBookmark>? bookmarks,
           List<MergeConflict>? conflicts,
           Set<String>? mergeReceipts}) =>
       ReaderSnapshot(
           generation: generation + 1,
-          pages: pages ?? this.pages,
+          annotations: annotations ?? (pages == null ? this.annotations : _replaceInk(pages)),
           setLists: setLists ?? this.setLists,
           bookmarks: bookmarks ?? this.bookmarks,
           conflicts: conflicts ?? this.conflicts,
           mergeReceipts: mergeReceipts ?? this.mergeReceipts);
+
+  Map<PageKey, List<PageAnnotation>> _replaceInk(
+      Map<PageKey, List<AnnotationStroke>> ink) => {
+    for (final page in {...annotations.keys, ...ink.keys})
+      page: annotations[page]?.any((item) => item is TextAnnotation) == true
+          ? _inkKeepingText(annotations[page]!, ink[page] ?? const [])
+          : ink[page] ?? const [],
+  };
+
+  static List<PageAnnotation> _inkKeepingText(
+      List<PageAnnotation> original, List<AnnotationStroke> ink) {
+    final remaining = {for (final stroke in ink) stroke.id: stroke};
+    final result = <PageAnnotation>[];
+    for (final item in original) {
+      if (item is TextAnnotation) {
+        result.add(item);
+      } else if (remaining.remove(item.id) case final AnnotationStroke stroke) {
+        result.add(stroke);
+      }
+    }
+    result.addAll(remaining.values);
+    return result;
+  }
 
   Map<String, Object?> toJson() => {
         'schemaVersion': schemaVersion,
         'generation': generation,
         'conflicts': conflicts.map((conflict) => conflict.toJson()).toList(),
         'mergeReceipts': mergeReceipts.toList()..sort(),
-        'pages': pages.entries
+        'pages': annotations.entries
             .map((entry) => {
                   'key': entry.key.toJson(),
                   'strokes':
@@ -458,10 +578,10 @@ class ReaderSnapshot {
       };
 
   factory ReaderSnapshot.fromJson(Map<String, dynamic> json) {
-    if (json['schemaVersion'] != 1 && json['schemaVersion'] != schemaVersion) {
+    if (json['schemaVersion'] != 1 && json['schemaVersion'] != 2 && json['schemaVersion'] != schemaVersion) {
       throw UnsupportedReaderSchemaException(json['schemaVersion']);
     }
-    final pages = <PageKey, List<AnnotationStroke>>{};
+    final pages = <PageKey, List<PageAnnotation>>{};
     for (final raw in json['pages'] as List) {
       final page = Map<String, dynamic>.from(raw as Map);
       final key =
@@ -469,7 +589,7 @@ class ReaderSnapshot {
       if (pages.containsKey(key))
         throw const FormatException('Duplicate page key.');
       pages[key] = (page['strokes'] as List)
-          .map((stroke) => AnnotationStroke.fromJson(
+          .map((stroke) => PageAnnotation.fromJson(
               Map<String, dynamic>.from(stroke as Map)))
           .toList();
     }
@@ -483,7 +603,7 @@ class ReaderSnapshot {
     }
     return ReaderSnapshot(
         generation: json['generation'] as int,
-        pages: pages,
+        annotations: pages,
         setLists: (json['setLists'] as List)
             .map((list) =>
                 ScoreSetList.fromJson(Map<String, dynamic>.from(list as Map)))

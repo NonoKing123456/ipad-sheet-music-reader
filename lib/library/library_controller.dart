@@ -343,7 +343,7 @@ class LibraryController extends ChangeNotifier {
       }
     } catch (failure) {
       debugPrint('LIBRARY restore_failed: $failure');
-      error = '无法恢复上次的谱库设置，请重新选择文件夹。原谱未被更改。';
+      error = '无法恢复谱库设置，请重新选择文件夹。';
     } finally {
       if (!_disposed) {
         initialized = true;
@@ -417,7 +417,7 @@ class LibraryController extends ChangeNotifier {
     } catch (failure) {
       if (_disposed || epoch != _epoch) return;
       debugPrint('LIBRARY open_failed: $failure');
-      error = '无法打开谱库。请确认文件夹仍可访问、应用数据目录可写，或重新选择文件夹。已有索引未被清空。';
+      error = '无法打开谱库，请检查文件夹连接与应用存储。';
       notifyListeners();
     }
   }
@@ -545,7 +545,7 @@ class LibraryController extends ChangeNotifier {
         statePath: _stateFor(source.root),
       );
     } catch (_) {
-      error = '有一个谱库暂时无法刷新，已保留上次目录。请连接该文件夹后重试。';
+      error = '有谱库无法刷新，请检查连接后重试。';
     } finally {
       source.running = false;
       _extraJobs--;
@@ -567,13 +567,13 @@ class LibraryController extends ChangeNotifier {
             onError: (Object failure) {
               if (_disposed) return;
               debugPrint('LIBRARY watch_failed: $failure');
-              watchWarning = '文件夹变化监听暂时不可用，请点击刷新更新谱库。';
+              watchWarning = '自动刷新不可用，请手动刷新。';
               notifyListeners();
             },
           );
     } catch (failure) {
       debugPrint('LIBRARY watch_failed: $failure');
-      watchWarning = '文件夹变化监听暂时不可用，请点击刷新更新谱库。';
+      watchWarning = '自动刷新不可用，请手动刷新。';
     }
   }
 
@@ -655,7 +655,7 @@ class LibraryController extends ChangeNotifier {
     } catch (failure) {
       debugPrint('LIBRARY scan_failed: $failure');
       if (!_disposed && epoch == _epoch) {
-        error = '刷新失败，已保留上次谱库结果。请检查文件夹连接和应用数据目录，再点击刷新。';
+        error = '刷新失败，请检查连接后重试。';
       }
     } finally {
       if (!_disposed && epoch == _epoch) {

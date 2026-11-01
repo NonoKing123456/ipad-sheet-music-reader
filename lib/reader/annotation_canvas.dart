@@ -9,6 +9,36 @@ import 'package:reader_state/reader_state.dart';
 import 'reader_workspace.dart';
 import 'incremental_stroke_path.dart';
 
+TextPainter textAnnotationPainter(
+  TextAnnotation text,
+  Size paper, {
+  String? fontFamily,
+}) => TextPainter(
+  text: TextSpan(
+    text: text.text,
+    style: TextStyle(
+      color: Color(text.argb),
+      fontSize: text.fontSizeFraction * paper.shortestSide,
+      height: 1.25,
+      fontFamily: fontFamily,
+    ),
+  ),
+  textDirection: TextDirection.ltr,
+)..layout(maxWidth: text.widthFraction * paper.width);
+
+Rect textAnnotationBounds(
+  TextAnnotation text,
+  Size paper, {
+  String? fontFamily,
+}) {
+  final painter = textAnnotationPainter(text, paper, fontFamily: fontFamily);
+  final rect =
+      Offset(text.anchor.x * paper.width, text.anchor.y * paper.height) &
+      painter.size;
+  painter.dispose();
+  return rect;
+}
+
 double _segmentDistance(Offset point, Offset a, Offset b) {
   final delta = b - a;
   final squared = delta.dx * delta.dx + delta.dy * delta.dy;
@@ -145,17 +175,17 @@ List<List<NormalizedPoint>> eraseStrokePath(
 
 /// A composed view needs distinct temporary fragment IDs so the next queued
 /// rebuild can address every fragment. Durable rebuilds still receive store IDs.
-List<AnnotationStroke> _previewFragments(
-  List<AnnotationStroke> strokes,
+List<PageAnnotation> _previewFragments(
+  List<PageAnnotation> strokes,
   Map<String, List<List<NormalizedPoint>>> replacements,
   String prefix,
 ) {
-  final result = <AnnotationStroke>[];
+  final result = <PageAnnotation>[];
   final used = {for (final stroke in strokes) stroke.id};
   var serial = 0;
   for (final stroke in strokes) {
     final paths = replacements[stroke.id];
-    if (paths == null) {
+    if (paths == null || stroke is! AnnotationStroke) {
       result.add(stroke);
       continue;
     }
@@ -193,6 +223,7 @@ class AnnotationCanvas extends StatefulWidget {
     this.onWritingChanged,
     this.suspended = false,
     this.mouseControlKey,
+    this.textPreview,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -201,6 +232,7 @@ class AnnotationCanvas extends StatefulWidget {
   final bool eraser;
   final bool suspended;
   final GlobalKey? mouseControlKey;
+  final TextAnnotation? textPreview;
   final double eraserRadiusFraction;
   final ValueChanged<bool>? onWritingChanged;
   @override
@@ -219,6 +251,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   Size? _previewSize;
   List<PendingPathEdit> _previewEdits = const [];
   List<AnnotationStroke> _previewBase = const [];
+  List<PageAnnotation> _previewAnnotations = const [];
   int? _pointer;
   StrokeStyle? _style;
   bool _erasing = false;
@@ -269,13 +302,16 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     _previewPage = widget.page;
     _previewSize = size;
     _previewEdits = edits;
-    var strokes = snapshot.strokesFor(widget.page);
+    var strokes = snapshot.annotationsFor(widget.page);
     for (var index = 0; index < edits.length; index++) {
       final edit = edits[index];
-      final paths = edit.rebuild?.call(strokes) ?? edit.paths;
+      final paths =
+          edit.rebuild?.call(strokes.whereType<AnnotationStroke>().toList()) ??
+          edit.paths;
       strokes = _previewFragments(strokes, paths, '@preview-pending-$index');
     }
-    _previewBase = List.unmodifiable(strokes);
+    _previewAnnotations = List.unmodifiable(strokes);
+    _previewBase = List.unmodifiable(strokes.whereType<AnnotationStroke>());
     // A commit can replace IDs underneath a live draft. Replay that draft once
     // against the new base, then resume incremental clipping on normal moves.
     _replacements.clear();
@@ -429,13 +465,23 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
         final size = constraints.biggest;
         _ensurePreviewBase(size);
         final strokes = _previewFragments(
-          _previewBase,
+          widget.workspace.annotationsFor(
+            widget.page,
+            base: _previewAnnotations,
+          ),
           _replacements,
           '@preview-draft',
         );
         final painter = CustomPaint(
           painter: AnnotationPainter(
-            strokes: strokes,
+            textFontFamily: Theme.of(context).textTheme.bodyMedium?.fontFamily,
+            strokes: [
+              for (final stroke in strokes)
+                if (stroke.id == widget.textPreview?.id)
+                  widget.textPreview!
+                else
+                  stroke,
+            ],
             pending: widget.workspace.pendingFor(widget.page),
             draft: _draft,
             draftSegments: List.of(_segments),
@@ -471,28 +517,45 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
 
 class AnnotationPainter extends CustomPainter {
   AnnotationPainter({
-    required this.strokes,
+    required List<PageAnnotation> strokes,
     required this.pending,
     required this.draft,
     required this.draftStyle,
     this.draftSegments = const [],
     this.eraserPosition,
     this.eraserRadius = 0,
-  });
-  final List<AnnotationStroke> strokes;
+    this.textFontFamily,
+  }) : annotations = strokes;
+  final List<PageAnnotation> annotations;
+  List<AnnotationStroke> get strokes =>
+      annotations.whereType<AnnotationStroke>().toList(growable: false);
   final List<PendingStroke> pending;
   final List<NormalizedPoint> draft;
   final StrokeStyle draftStyle;
   final List<List<NormalizedPoint>> draftSegments;
   final Offset? eraserPosition;
   final double eraserRadius;
+  final String? textFontFamily;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.save();
     canvas.clipRect(Offset.zero & size);
-    for (final stroke in strokes) {
-      _stroke(canvas, size, stroke.style, stroke.points);
+    for (final stroke in annotations) {
+      if (stroke is TextAnnotation) {
+        final painter = textAnnotationPainter(
+          stroke,
+          size,
+          fontFamily: textFontFamily,
+        );
+        painter.paint(
+          canvas,
+          Offset(stroke.anchor.x * size.width, stroke.anchor.y * size.height),
+        );
+        painter.dispose();
+      } else if (stroke is AnnotationStroke) {
+        _stroke(canvas, size, stroke.style, stroke.points);
+      }
     }
     for (final stroke in pending) {
       _stroke(canvas, size, stroke.style, stroke.points);

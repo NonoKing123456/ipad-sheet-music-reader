@@ -866,7 +866,7 @@ class SyncController extends ChangeNotifier {
   Future<void> _synchronize({Set<String>? onlyEntryIds}) async {
     if (busy || _client == null || replica == null) return;
     if (hasUnsavedEdits) {
-      message = '请先等待保存完成或重试未保存笔迹；本次没有开始同步。';
+      message = '批注未保存，请先重试保存。';
       _changed();
       return;
     }
@@ -897,8 +897,8 @@ class SyncController extends ChangeNotifier {
         phase = result.status == LibrarySyncStatus.cancelled
             ? SyncPhase.cancelled
             : SyncPhase.partial;
-        message =
-            '${onlyEntryIds != null && result.error == 'Scoped preparation requires a v2 computer' ? '这台电脑版本暂不支持按曲单准备，请先更新电脑端。' : _libraryFailureMessage(result.failure)}已离线的曲谱仍可阅读，已完成文件保留，可重试所选下载。';
+        message = onlyEntryIds != null && result.error == 'Scoped preparation requires a v2 computer'
+            ? '请先更新电脑端，再按曲单准备。' : _libraryFailureMessage(result.failure);
         if (result.status == LibrarySyncStatus.cancelled ||
             (onlyEntryIds != null &&
                 result.error == 'Scoped preparation requires a v2 computer') ||
@@ -910,7 +910,7 @@ class SyncController extends ChangeNotifier {
       }
       if (hasUnsavedEdits) {
         phase = SyncPhase.partial;
-        message = '目录和离线内容已更新，但有笔迹尚未保存，保存后可交换批注和曲单。';
+        message = '批注未保存，请先重试保存。';
         return;
       }
       phase = SyncPhase.merging;
@@ -927,22 +927,26 @@ class SyncController extends ChangeNotifier {
       cancellation.check();
       if (hasUnsavedEdits) {
         phase = SyncPhase.partial;
-        message = '已保存记录已交换；仍有笔迹正在保存，请保存后再次同步。';
+        message = '批注正在保存，请稍后同步。';
         return;
       }
       phase = contentPartial ? SyncPhase.partial : SyncPhase.complete;
-      message =
-          '${contentPartial
-              ? '部分所选曲谱尚未下载，可重试；'
-              : onlyEntryIds != null
-              ? '本次所选曲目已准备；其他离线选择保持不变。'
-              : '目录与所选离线内容已更新；'}${workspace.store.snapshot.conflicts.isEmpty ? '已保存的批注和曲单交换完成。' : '有待处理的批注或曲单版本，双方均已保留。'}';
-    } catch (_) {
+      message = contentPartial
+          ? '部分曲谱未下载，请重试。'
+          : workspace.store.snapshot.conflicts.isEmpty
+          ? '已更新。'
+          : '有不同版本，请查看。';
+    } catch (failure) {
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
           : SyncPhase.partial;
       message =
-          '${cancellation.isCancelled ? '同步已取消' : '批注和曲单交换尚未完成'}。完整离线库仍保留；请重试，未确认的交换会继续恢复。';
+          failure is SyncProtocolException &&
+              failure.code == 'reader_upgrade_required'
+          ? '请更新电脑和 iPad 后再同步批注。'
+          : cancellation.isCancelled
+          ? '同步已取消。'
+          : '批注同步未完成，请重试。';
     } finally {
       workspace.refreshFromStore(force: true);
       _tick();
@@ -1006,7 +1010,7 @@ class SyncController extends ChangeNotifier {
           : '$unavailable 份离线文件无法读取，请重新同步修复。';
     } catch (_) {
       phase = SyncPhase.failed;
-      message = '离线文件校验失败，已有资料未被清空，请重试或重新同步。';
+      message = '离线校验失败，请重新同步。';
     } finally {
       busy = false;
       _changed();

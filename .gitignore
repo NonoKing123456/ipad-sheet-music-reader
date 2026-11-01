@@ -92,3 +92,5 @@
 !/lib/library/windows_file_identity.dart
 !/packages/library_sync/lib/src/collection.dart
 !/packages/library_sync/lib/src/collection_replica.dart
+!/lib/library/directory_navigation.dart
+!/lib/reader/annotation_text_layer.dart

@@ -1,7 +1,7 @@
 name: score_reader
 description: Local sheet music library and reader for Windows and iPad.
 publish_to: none
-version: 0.8.3+16
+version: 0.8.4+17
 
 environment:
   sdk: ^3.13.0

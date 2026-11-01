@@ -29,14 +29,8 @@ Offset clampReaderPan({
   final (minX, maxX) = normalBounds(paper.left, paper.right, viewport.width);
   var (minY, maxY) = normalBounds(paper.top, paper.bottom, viewport.height);
   if (obstruction != null) {
-    final top = math.min(obstruction.top, viewport.height * .45),
-        bottom = math.min(obstruction.bottom, viewport.height * .45);
-    final margin = math.min(24.0, (viewport.height - top - bottom) / 4);
-    minY = math.min(
-      minY,
-      viewport.height - bottom - margin - paper.bottom * scale,
-    );
-    maxY = math.max(maxY, top + margin - paper.top * scale);
+    final top = obstruction.top.clamp(0.0, viewport.height);
+    maxY = math.max(maxY, top - paper.top * scale);
   }
   return Offset(
     translation.dx.clamp(minX, maxX),
@@ -67,6 +61,8 @@ class ReaderInput extends StatefulWidget {
     this.pageAspect,
     this.editing = false,
     this.gestureGeneration = 0,
+    this.textTool = false,
+    this.textSelectionKey,
   });
 
   final Widget child;
@@ -84,6 +80,8 @@ class ReaderInput extends StatefulWidget {
   final double? pageAspect;
   final bool editing;
   final int gestureGeneration;
+  final bool textTool;
+  final GlobalKey? textSelectionKey;
 
   @override
   State<ReaderInput> createState() => _ReaderInputState();
@@ -93,6 +91,8 @@ class _ReaderInputState extends State<ReaderInput> {
   final FocusNode _focus = FocusNode(debugLabel: 'reader-page-controls');
   final Set<int> _pointers = {};
   final Set<int> _inkPointers = {};
+  final Set<int> _textMoves = {};
+  bool _textPanning = false;
   final Map<int, Offset> _touches = {};
   double _pinchDistance = 1, _startScale = 1;
   Offset _sceneAnchor = Offset.zero, _lastTouch = Offset.zero;
@@ -104,11 +104,29 @@ class _ReaderInputState extends State<ReaderInput> {
   @override
   void didUpdateWidget(covariant ReaderInput oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.editing && oldWidget.panInsets != widget.panInsets) {
+      final controller = widget.transform;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            controller == null ||
+            controller != widget.transform ||
+            !widget.editing) {
+          return;
+        }
+        final matrix = controller.value;
+        _matrix(
+          matrix.getMaxScaleOnAxis(),
+          Offset(matrix.storage[12], matrix.storage[13]),
+        );
+      });
+    }
     if (oldWidget.editing != widget.editing ||
+        oldWidget.textTool != widget.textTool ||
         oldWidget.gestureGeneration != widget.gestureGeneration) {
       final transforming = _touches.length >= 2;
       final generation = ++_touchGeneration;
       _pointers.clear();
+      _textMoves.clear();
       _touches.clear();
       _origin = null;
       _pinching = false;
@@ -227,8 +245,19 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_pointers.length == 1) {
       _touchGeneration++;
       _singleAxis = null;
+      _textPanning = false;
     }
     if (event.kind == PointerDeviceKind.touch) {
+      final selected = widget.textSelectionKey?.currentContext
+          ?.findRenderObject();
+      if (widget.textTool &&
+          selected is RenderBox &&
+          selected.hasSize &&
+          (Offset.zero & selected.size).contains(
+            selected.globalToLocal(event.position),
+          )) {
+        _textMoves.add(event.pointer);
+      }
       _touches[event.pointer] = event.localPosition;
       _lastTouch = event.localPosition;
       _anchorPinch();
@@ -263,14 +292,21 @@ class _ReaderInputState extends State<ReaderInput> {
       } else if (controller != null &&
           !_pinching &&
           _inkPointers.isEmpty &&
+          !_textMoves.contains(event.pointer) &&
           _touches.length == 1 &&
+          (!widget.textTool ||
+              _textPanning ||
+              (_origin != null &&
+                  (event.localPosition - _origin!).distance >= kTouchSlop)) &&
           (widget.editing || controller.value.getMaxScaleOnAxis() > 1.000001)) {
+        _textPanning = widget.textTool;
         final m = controller.value;
         final scale = m.getMaxScaleOnAxis();
         var delta = event.localPosition - _lastTouch;
         if (scale <= 1.000001 && _origin != null) {
           final travel = event.localPosition - _origin!;
-          if (_singleAxis == null && travel.distance >= 12) {
+          if (_singleAxis == null &&
+              travel.distance >= (widget.textTool ? kTouchSlop : 12)) {
             if (travel.dy.abs() > travel.dx.abs() * 1.2) {
               _singleAxis = Axis.vertical;
               delta = travel;
@@ -285,7 +321,9 @@ class _ReaderInputState extends State<ReaderInput> {
           _cancelled = true;
         }
       }
-      _lastTouch = event.localPosition;
+      if (!widget.textTool || _touches.length != 1 || _textPanning) {
+        _lastTouch = event.localPosition;
+      }
     }
     if (_origin != null) {
       final travel = (event.localPosition - _origin!).distance;
@@ -297,6 +335,7 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_inkPointers.remove(event.pointer)) return;
     if (!_pointers.contains(event.pointer)) return;
     final origin = _origin;
+    final movingText = _textMoves.remove(event.pointer);
     _pointers.remove(event.pointer);
     if (_touches.length == 2 && _touches.containsKey(event.pointer)) {
       widget.onTransformGestureChanged?.call(false);
@@ -305,6 +344,7 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_touches.isEmpty) _pinching = false;
     if (_cancelled ||
         origin == null ||
+        movingText ||
         _pointers.isNotEmpty ||
         !widget.enabled) {
       if (_pointers.isEmpty) _origin = null;
@@ -316,7 +356,9 @@ class _ReaderInputState extends State<ReaderInput> {
       if (widget.allowPointerPageTurns) {
         delta.dx < 0 ? widget.onNext() : widget.onPrevious();
       }
-    } else if (_greatestTravel < 12 && delta.distance < 12) {
+    } else if (_greatestTravel < 12 &&
+        delta.distance < 12 &&
+        !widget.textTool) {
       final fraction = event.localPosition.dx / width;
       if (fraction >= 0.35 && fraction <= 0.65) widget.onCenterTap?.call();
       if (widget.allowPointerPageTurns) {
@@ -356,6 +398,7 @@ class _ReaderInputState extends State<ReaderInput> {
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {
               _inkPointers.remove(event.pointer);
+              _textMoves.remove(event.pointer);
               _pointers.remove(event.pointer);
               if (_touches.length == 2 && _touches.containsKey(event.pointer)) {
                 widget.onTransformGestureChanged?.call(false);

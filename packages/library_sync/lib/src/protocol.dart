@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
@@ -62,14 +63,173 @@ String _libraryFailureMessage(LibrarySyncFailure failure) => switch (failure) {
     };
 
 Future<Map<String, dynamic>> _readBody(
-    Stream<List<int>> stream, Duration timeout, int limit) async {
+    Stream<List<int>> stream, Duration timeout, int limit,
+    {void Function(int)? onBytesRead}) async {
   final bytes = <int>[];
   await for (final chunk in stream.timeout(timeout)) {
     if (bytes.length + chunk.length > limit)
       throw const FormatException('Request too large.');
     bytes.addAll(chunk);
   }
+  onBytesRead?.call(bytes.length);
   return asMap(jsonDecode(utf8.decode(bytes)));
+}
+
+const _catalogPageBytes = 512 * 1024;
+const _catalogMaxRecords = 250000;
+const _catalogMaxBytes = 128 * 1024 * 1024;
+
+/// One immutable metadata view; never stores a full encoded catalogue or bytes.
+class _CatalogTransfer {
+  _CatalogTransfer(this.peerId, CollectionIndex current)
+      : token = randomId(),
+        index = CollectionIndex(id: current.id,
+            legacyLibraryId: current.legacyLibraryId,
+            sources: List.unmodifiable(current.sources),
+            entries: List.unmodifiable(current.entries),
+            folders: Map.unmodifiable({
+              for (final e in current.folders.entries)
+                e.key: List<String>.unmodifiable(e.value),
+            })),
+        folders = [
+          for (final source in current.folders.entries)
+            for (final folder in source.value) (source.key, folder)
+        ];
+  final String peerId, token;
+  final CollectionIndex index;
+  final List<(String, String)> folders;
+  Timer? expiry;
+  int nextOffset = 0;
+  int get totalRecords =>
+      1 + index.sources.length + folders.length + index.entries.length;
+
+  Map<String, Object?> _record(int offset) {
+    if (offset == 0) return {
+      'kind': 'header', 'id': index.id,
+      'legacyLibraryId': index.legacyLibraryId,
+      'sources': index.sources.length, 'folders': folders.length,
+      'entries': index.entries.length,
+    };
+    var i = offset - 1;
+    if (i < index.sources.length) return {
+      'kind': 'source', 'value': index.sources[i].toJson(),
+      'hasFolders': index.folders.containsKey(index.sources[i].id),
+    };
+    i -= index.sources.length;
+    if (i < folders.length) return {
+      'kind': 'folder', 'sourceId': folders[i].$1, 'path': folders[i].$2,
+    };
+    return {
+      'kind': 'entry',
+      'value': index.entries[i - folders.length].toJson(),
+    };
+  }
+
+  Uint8List page(int offset) {
+    if (offset != nextOffset || offset >= totalRecords) {
+      throw const SyncProtocolException('Invalid catalogue offset.', 409);
+    }
+    final bytes = BytesBuilder(copy: false)
+      ..add(utf8.encode('{"protocol":2,"snapshot":${jsonEncode(token)},'
+          '"offset":$offset,"totalRecords":$totalRecords,"records":['));
+    var end = offset;
+    while (end < totalRecords) {
+      final record = utf8.encode(jsonEncode(_record(end)));
+      // Reserve the comma plus a bounded trailing cursor/complete envelope.
+      if (bytes.length + record.length + 128 > _catalogPageBytes) break;
+      if (end > offset) bytes.addByte(44);
+      bytes.add(record);
+      end++;
+    }
+    if (end == offset) {
+      throw const SyncProtocolException('Catalogue record is too large.', 413);
+    }
+    bytes.add(utf8.encode('],"nextOffset":$end,'
+        '"complete":${end == totalRecords}}'));
+    nextOffset = end;
+    return bytes.takeBytes();
+  }
+}
+
+/// Parse each bounded response directly into typed records. Publish only the
+/// completed view; interruption cannot replace a previously committed index.
+class _CatalogAccumulator {
+  String? token, id, legacyLibraryId;
+  int offset = 0, totalRecords = 0, bytes = 0;
+  int sourceCount = 0, folderCount = 0, entryCount = 0;
+  final sources = <LibrarySourceInfo>[];
+  final folders = <String, List<String>>{};
+  final folderKeys = <(String, String)>{};
+  final entries = <CatalogItem>[];
+
+  void countBytes(int count) {
+    bytes += count;
+    if (bytes > _catalogMaxBytes) {
+      throw const FormatException('Catalogue exceeds the metadata budget.');
+    }
+  }
+
+  bool add(Map<String, dynamic> page) {
+    final receivedToken = page['snapshot'];
+    final declared = page['totalRecords'];
+    final records = page['records'] as List;
+    final next = page['nextOffset'];
+    if (page['protocol'] != 2 || receivedToken is! String ||
+        receivedToken.isEmpty || receivedToken.length > 128 ||
+        page['offset'] != offset || declared is! int || declared < 1 ||
+        declared > _catalogMaxRecords || records.isEmpty ||
+        next is! int || next != offset + records.length || next > declared ||
+        page['complete'] != (next == declared) ||
+        (token != null && (token != receivedToken || totalRecords != declared))) {
+      throw const FormatException('Inconsistent catalogue page.');
+    }
+    token ??= receivedToken;
+    totalRecords = declared;
+    for (final value in records) {
+      final record = asMap(value);
+      if (offset == 0) {
+        if (record['kind'] != 'header') {
+          throw const FormatException('Missing catalogue header.');
+        }
+        id = record['id'] as String;
+        legacyLibraryId = record['legacyLibraryId'] as String?;
+        sourceCount = record['sources'] as int;
+        folderCount = record['folders'] as int;
+        entryCount = record['entries'] as int;
+        if (sourceCount < 0 || folderCount < 0 || entryCount < 0 ||
+            1 + sourceCount + folderCount + entryCount != totalRecords) {
+          throw const FormatException('Invalid catalogue record totals.');
+        }
+      } else if (offset <= sourceCount) {
+        if (record['kind'] != 'source') throw const FormatException('Expected source.');
+        final source = LibrarySourceInfo.fromJson(asMap(record['value']));
+        sources.add(source);
+        if (record['hasFolders'] == true) folders[source.id] = [];
+      } else if (offset <= sourceCount + folderCount) {
+        if (record['kind'] != 'folder') throw const FormatException('Expected folder.');
+        final source = record['sourceId'] as String, path = record['path'] as String;
+        if (!folders.containsKey(source)) throw const FormatException('Unknown folder source.');
+        if (!folderKeys.add((source, path))) throw const FormatException('Duplicate folder.');
+        validatePortablePath(path, folder: true);
+        folders[source]!.add(path);
+      } else {
+        if (record['kind'] != 'entry') throw const FormatException('Expected entry.');
+        entries.add(CatalogItem.fromJson(asMap(record['value'])));
+      }
+      offset++;
+    }
+    return offset == totalRecords;
+  }
+
+  CollectionIndex finish() {
+    if (offset != totalRecords || id == null ||
+        sources.length != sourceCount || folderKeys.length != folderCount ||
+        entries.length != entryCount) {
+      throw const FormatException('Incomplete catalogue.');
+    }
+    return CollectionIndex(id: id!, legacyLibraryId: legacyLibraryId,
+        sources: sources, entries: entries, folders: folders);
+  }
 }
 
 bool _constantEqual(String a, String b) {
@@ -83,13 +243,17 @@ bool _constantEqual(String a, String b) {
 
 class SyncServer {
   SyncServer._(this.source, this.readerStore, this.stateDirectory, this._lease,
-      this._state, this.ioTimeout, this.maxJsonBytes, this.collectionSource);
+      this._state, this.ioTimeout, this.maxJsonBytes, this.collectionSource,
+      this.catalogSnapshotTtl);
   final LibrarySource source;
   final CollectionLibrarySource? collectionSource;
   final ReaderStateStore readerStore;
   final String stateDirectory;
   final Duration ioTimeout;
   final int maxJsonBytes;
+  final Duration catalogSnapshotTtl;
+  final _catalogTransfers = <String, _CatalogTransfer>{};
+  int get activeCatalogSnapshots => _catalogTransfers.length;
   final DirectoryLease _lease;
   Map<String, dynamic> _state;
   late HttpServer _server;
@@ -110,7 +274,9 @@ class SyncServer {
       int port = 0,
       CollectionLibrarySource? collectionSource,
       Duration ioTimeout = const Duration(seconds: 30),
+      Duration catalogSnapshotTtl = const Duration(minutes: 2),
       int maxJsonBytes = 16 * 1024 * 1024}) async {
+    if (catalogSnapshotTtl <= Duration.zero) throw ArgumentError.value(catalogSnapshotTtl);
     final dir = p.normalize(p.absolute(stateDirectory));
     if (source is CatalogLibrarySource &&
         (p.equals(source.catalog.rootPath, dir) ||
@@ -125,7 +291,7 @@ class SyncServer {
       if (state['schema'] != 1)
         throw const FormatException('Unsupported peer schema.');
       final server = SyncServer._(source, readerStore, dir, lease, state,
-          ioTimeout, maxJsonBytes, collectionSource);
+          ioTimeout, maxJsonBytes, collectionSource, catalogSnapshotTtl);
       server._server =
           await HttpServer.bind(address ?? InternetAddress.loopbackIPv4, port);
       server._server.idleTimeout = ioTimeout;
@@ -155,6 +321,10 @@ class SyncServer {
     _pairCode = null;
     await _server.close(force: true);
     await _tail;
+    for (final transfer in _catalogTransfers.values) {
+      transfer.expiry?.cancel();
+    }
+    _catalogTransfers.clear();
     await _lease.close();
   }
 
@@ -218,7 +388,13 @@ class SyncServer {
       }
       final peerId = _authenticate(request);
       final collection = collectionSource;
-      if (collection != null &&
+      if (request.method == 'GET' && path == '/state-capabilities') {
+        await _reply(request.response, {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
+      } else if (collection != null &&
+          request.method == 'GET' &&
+          path == '/v2/catalog-page') {
+        await _catalogPage(request, peerId, collection);
+      } else if (collection != null &&
           request.method == 'GET' &&
           path == '/v2/catalog') {
         await _reply(request.response, (await collection.index()).toJson());
@@ -261,8 +437,10 @@ class SyncServer {
         await request.response.addStream(stream.timeout(ioTimeout));
         await request.response.close();
       } else if (request.method == 'POST' && path == '/state') {
+        _requireReaderCapability(request);
         await _exchange(request, peerId);
       } else if (request.method == 'POST' && path == '/ack') {
+        _requireReaderCapability(request);
         await _acknowledge(request, peerId);
       } else {
         throw const SyncProtocolException('Unknown protocol route.', 404);
@@ -276,7 +454,9 @@ class SyncServer {
               'error': error is LibrarySourceNotReady
                   ? 'Source library is not ready for sync.'
                   : 'Sync operation failed.',
-              if (error is LibrarySourceNotReady) 'code': 'source_not_ready'
+              if (error is LibrarySourceNotReady) 'code': 'source_not_ready',
+              if (error is SyncProtocolException && error.code == 'reader_upgrade_required')
+                'code': 'reader_upgrade_required',
             },
             status: error is LibrarySourceNotReady
                 ? 503
@@ -286,6 +466,71 @@ class SyncServer {
       } catch (_) {
         await request.response.close().catchError((Object _) {});
       }
+    }
+  }
+
+  void _requireReaderCapability(HttpRequest request) {
+    final schema = int.tryParse(request.headers.value('x-reader-state-max-schema') ?? '');
+    if (schema == null || schema < ReaderSnapshot.schemaVersion) {
+      throw const SyncProtocolException('Update both readers before syncing annotations.',
+          426, 'reader_upgrade_required');
+    }
+  }
+
+  Future<void> _catalogPage(HttpRequest request, String peerId,
+      CollectionLibrarySource source) async {
+    final offset = int.tryParse(request.uri.queryParameters['offset'] ?? '0');
+    final token = request.uri.queryParameters['snapshot'];
+    if (offset == null || offset < 0) {
+      throw const SyncProtocolException('Invalid catalogue offset.', 400);
+    }
+    _CatalogTransfer? transfer;
+    if (token == null) {
+      if (offset != 0) throw const SyncProtocolException('Missing snapshot.', 409);
+      final index = await source.index();
+      final count = 1 + index.sources.length + index.entries.length +
+          index.folders.values.fold<int>(0, (n, paths) => n + paths.length);
+      if (count > _catalogMaxRecords) {
+        throw const SyncProtocolException('Catalogue exceeds record budget.', 413);
+      }
+      // At most one outstanding snapshot per peer and two for the server.
+      for (final old in _catalogTransfers.values.toList()) {
+        if (old.peerId == peerId) _releaseCatalog(old);
+      }
+      while (_catalogTransfers.length >= 2) {
+        _releaseCatalog(_catalogTransfers.values.first);
+      }
+      transfer = _CatalogTransfer(peerId, index);
+      _catalogTransfers[transfer.token] = transfer;
+    } else {
+      transfer = _catalogTransfers[token];
+      if (transfer == null || transfer.peerId != peerId) {
+        throw const SyncProtocolException('Catalogue snapshot expired.', 409);
+      }
+    }
+    Uint8List bytes;
+    try {
+      bytes = transfer.page(offset);
+    } catch (_) {
+      _releaseCatalog(transfer);
+      rethrow;
+    }
+    transfer.expiry?.cancel();
+    if (transfer.nextOffset == transfer.totalRecords) {
+      _releaseCatalog(transfer);
+    } else {
+      transfer.expiry = Timer(catalogSnapshotTtl, () => _releaseCatalog(transfer!));
+    }
+    request.response.headers.contentType = ContentType.json;
+    request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+    request.response.add(bytes);
+    await request.response.close();
+  }
+
+  void _releaseCatalog(_CatalogTransfer transfer) {
+    transfer.expiry?.cancel();
+    if (identical(_catalogTransfers[transfer.token], transfer)) {
+      _catalogTransfers.remove(transfer.token);
     }
   }
 
@@ -459,6 +704,9 @@ class SyncClient {
     final request = await http.openUrl(method, uri).timeout(ioTimeout);
     request.followRedirects = false;
     request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+    if (path == '/state' || path == '/ack') {
+      request.headers.set('x-reader-state-max-schema', ReaderSnapshot.schemaVersion);
+    }
     if (body != null) {
       final bytes = utf8.encode(jsonEncode(body));
       if (bytes.length > maxJsonBytes)
@@ -470,10 +718,11 @@ class SyncClient {
     final response = await request.close().timeout(ioTimeout);
     if (response.statusCode != 200) {
       String? code;
-      if (readLibraryFailure && response.statusCode == 503) {
+      if (response.statusCode == 426 || (readLibraryFailure && response.statusCode == 503)) {
         try {
           final error = await _readBody(response, ioTimeout, maxJsonBytes);
           if (error['code'] == 'source_not_ready') code = 'source_not_ready';
+          if (response.statusCode == 426 && error['code'] == 'reader_upgrade_required') code = 'reader_upgrade_required';
         } on FormatException {
           // Malformed/unknown error bodies do not grant a typed source failure.
         } on TypeError {
@@ -496,6 +745,28 @@ class SyncClient {
               body: body, readLibraryFailure: readLibraryFailure),
           ioTimeout,
           maxJsonBytes);
+
+  Future<CollectionIndex> _collectionIndex(HttpClient http,
+      SyncCancellation? cancellation) async {
+    final received = _CatalogAccumulator();
+    while (true) {
+      cancellation?.check();
+      HttpClientResponse response;
+      try {
+        response = await _request(http, 'GET', '/v2/catalog-page', query: {
+          'offset': '${received.offset}',
+          if (received.token != null) 'snapshot': received.token!,
+        });
+      } on SyncProtocolException catch (error) {
+        // Compatibility is negotiated only before any page is accepted.
+        if (received.offset != 0 || error.status != 404) rethrow;
+        return CollectionIndex.fromJson(await _json(http, '/v2/catalog'));
+      }
+      final page = await _readBody(response, ioTimeout, _catalogPageBytes,
+          onBytesRead: received.countBytes);
+      if (received.add(page)) return received.finish();
+    }
+  }
 
   Future<LibrarySyncResult> syncLibrary(ReplicaLibraryView replica,
       {SyncCancellation? cancellation,
@@ -585,7 +856,7 @@ class SyncClient {
     try {
       CollectionIndex index;
       try {
-        index = CollectionIndex.fromJson(await _json(http, '/v2/catalog'));
+        index = await _collectionIndex(http, cancellation);
       } on SyncProtocolException catch (e) {
         if (e.status != 404) rethrow;
         // A v1 complete-manifest sync cannot promise a scoped download. Do not
@@ -708,6 +979,22 @@ class SyncClient {
     cancellation?.addListener(cancel);
     try {
       cancellation?.check();
+      // Negotiate before creating/replaying any durable pending transaction.
+      // The HTTP capability header leaves existing schema-2 body fingerprints
+      // unchanged, allowing their exact retry and acknowledgement to finish.
+      Map<String, dynamic> capability;
+      try {
+        capability = await _json(http, '/state-capabilities');
+      } on SyncProtocolException catch (error) {
+        if (error.status != 404) rethrow;
+        throw const SyncProtocolException('Update both readers before syncing annotations.',
+            426, 'reader_upgrade_required');
+      }
+      if (capability['readerStateMaxSchema'] is! int ||
+          (capability['readerStateMaxSchema'] as int) < ReaderSnapshot.schemaVersion) {
+        throw const SyncProtocolException('Update both readers before syncing annotations.',
+            426, 'reader_upgrade_required');
+      }
       final state = (await readJson(_statePath))!;
       var pending = state['pending'] == null ? null : asMap(state['pending']);
       if (pending == null) {

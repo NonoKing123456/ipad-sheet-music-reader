@@ -78,9 +78,9 @@ class ReaderStateStore {
           createdUtc: now,
           updatedUtc: now,
           version: 1);
-      final pages = Map<PageKey, List<AnnotationStroke>>.of(_snapshot.pages);
+      final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
       pages[page] = [...?pages[page], stroke];
-      await _commit(_snapshot.next(pages: pages));
+      await _commit(_snapshot.next(annotations: pages));
       _undo
           .putIfAbsent(page, () => [])
           .add([_StrokeEdit(stroke.id, true, false)]);
@@ -91,7 +91,7 @@ class ReaderStateStore {
 
   /// Erases the entire matching stroke. No effect for missing/deleted IDs.
   Future<bool> eraseStroke(PageKey page, String strokeId) => _enqueue(() async {
-        final strokes = _snapshot.pages[page] ?? [];
+        final strokes = _snapshot.annotations[page] ?? [];
         final index = strokes
             .indexWhere((stroke) => stroke.id == strokeId && !stroke.isDeleted);
         if (index < 0) return false;
@@ -102,6 +102,81 @@ class ReaderStateStore {
         _redo.remove(page);
         return true;
       });
+
+  TextAnnotation newText({required String text, required NormalizedPoint anchor,
+      required int argb, double fontSizeFraction = 20 / 1024,
+      double widthFraction = .45}) {
+    final now = DateTime.now().toUtc();
+    return TextAnnotation(id: _newId(), text: text, anchor: anchor, argb: argb,
+        fontSizeFraction: fontSizeFraction, widthFraction: widthFraction,
+        createdUtc: now, updatedUtc: now, version: 1);
+  }
+
+  /// One confirmed text creation/edit/move/delete is one history operation.
+  Future<TextAnnotation> saveText(PageKey page, TextAnnotation desired,
+      {TextEditBase? expected}) {
+    final base = expected?.value ?? (expected == null
+        ? (_snapshot.annotations[page] ?? []).whereType<TextAnnotation>()
+            .where((item) => item.id == desired.id).firstOrNull
+        : null);
+    return _enqueue(() async {
+        final items = List<PageAnnotation>.of(_snapshot.annotations[page] ?? []);
+        final index = items.indexWhere((item) => item.id == desired.id);
+        final now = DateTime.now().toUtc();
+        TextAnnotation next;
+        TextAnnotation? previous;
+        if (index < 0) {
+          if (desired.isDeleted) throw StateError('Cannot delete an unknown text.');
+          next = desired.revise(now: now, version: 1);
+          items.add(next);
+        } else {
+          final original = items[index];
+          if (original is! TextAnnotation) throw StateError('Annotation is not text.');
+          previous = original;
+          next = desired.revise(now: now, version: original.version + 1,
+              deleted: desired.isDeleted);
+          items[index] = next;
+        }
+        final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+        pages[page] = items;
+        final current = (_snapshot.annotations[page] ?? [])
+            .whereType<TextAnnotation>().where((item) => item.id == desired.id).firstOrNull;
+        bool same(TextAnnotation? a, TextAnnotation? b) => a == null || b == null
+            ? a == b
+            : a.isDeleted == b.isDeleted &&
+                canonicalReaderJson(a.geometry) == canonicalReaderJson(b.geometry);
+        if (current != null && (same(current, next) || same(base, next))) {
+          return current; // An unchanged confirmation cannot undo a peer edit.
+        }
+        if (!same(current, base) && !same(current, next)) {
+          // A draft can outlive a peer merge or a failed save. Preserve its
+          // captured semantic base; counters/clocks are not causal evidence.
+          final basePages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+          basePages[page] = [for (final item in _snapshot.annotations[page] ?? <PageAnnotation>[])
+            if (item.id != desired.id) item else if (base != null) base];
+          final ancestor = ReaderSnapshot(generation: _snapshot.generation,
+              annotations: basePages, setLists: _snapshot.setLists,
+              bookmarks: _snapshot.bookmarks, conflicts: _snapshot.conflicts,
+              mergeReceipts: _snapshot.mergeReceipts);
+          final merged = mergeReaderSnapshots(base: ancestor, local: _snapshot,
+              remote: _snapshot.next(annotations: pages), peerId: 'local-text-edit');
+          await _commit(merged.snapshot);
+          next = _snapshot.annotations[page]!.whereType<TextAnnotation>()
+              .singleWhere((item) => item.id == desired.id);
+        } else {
+          await _commit(_snapshot.next(annotations: pages));
+        }
+        final edit = previous == null ? _StrokeEdit(next.id, true, false)
+            : same(previous, next) ? null
+            : _StrokeEdit(next.id, previous.isDeleted, next.isDeleted,
+                beforeText: previous, afterText: next);
+        if (edit != null) {
+          _undo.putIfAbsent(page, () => []).add([edit]);
+          _redo.remove(page);
+        }
+        return next;
+      });
+  }
 
   Future<bool> undo(PageKey page) => _enqueue(() async {
         final stack = _undo[page];
@@ -135,12 +210,12 @@ class ReaderStateStore {
       _enqueue(() async {
         final requested =
             rebuild?.call(_snapshot.strokesFor(page)) ?? replacements;
-        final strokes = <AnnotationStroke>[];
+        final strokes = <PageAnnotation>[];
         final edits = <_StrokeEdit>[];
         final now = DateTime.now().toUtc();
-        for (final original in _snapshot.pages[page] ?? <AnnotationStroke>[]) {
+        for (final original in _snapshot.annotations[page] ?? <PageAnnotation>[]) {
           final paths = requested[original.id];
-          if (paths == null || original.isDeleted) {
+          if (paths == null || original.isDeleted || original is! AnnotationStroke) {
             strokes.add(original);
             continue;
           }
@@ -161,9 +236,9 @@ class ReaderStateStore {
           }
         }
         if (edits.isEmpty) return false;
-        final pages = Map<PageKey, List<AnnotationStroke>>.of(_snapshot.pages);
+        final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
         pages[page] = strokes;
-        await _commit(_snapshot.next(pages: pages));
+        await _commit(_snapshot.next(annotations: pages));
         _undo.putIfAbsent(page, () => []).add(edits);
         _redo.remove(page);
         return true;
@@ -171,18 +246,26 @@ class ReaderStateStore {
 
   Future<void> _changeDeletions(PageKey page, List<_StrokeEdit> edits,
       {required bool undo}) async {
-    final strokes = List<AnnotationStroke>.of(_snapshot.pages[page] ?? []);
+    final strokes = List<PageAnnotation>.of(_snapshot.annotations[page] ?? []);
     final now = DateTime.now().toUtc();
     for (final edit in edits) {
       final index = strokes.indexWhere((stroke) => stroke.id == edit.strokeId);
       if (index < 0)
         throw StateError('Stroke history no longer matches state; reload.');
-      strokes[index] = strokes[index]
-          .withDeletion(undo ? edit.beforeDeleted : edit.afterDeleted, now);
+      final current = strokes[index];
+      final text = undo ? edit.beforeText : edit.afterText;
+      if (text != null) {
+        if (current is! TextAnnotation) throw StateError('Text history type changed.');
+        strokes[index] = text.revise(now: now, version: current.version + 1,
+            deleted: undo ? edit.beforeDeleted : edit.afterDeleted);
+      } else {
+        strokes[index] = current.withDeletion(
+            undo ? edit.beforeDeleted : edit.afterDeleted, now);
+      }
     }
-    final pages = Map<PageKey, List<AnnotationStroke>>.of(_snapshot.pages);
+    final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
     pages[page] = strokes;
-    await _commit(_snapshot.next(pages: pages));
+    await _commit(_snapshot.next(annotations: pages));
   }
 
   Future<ScoreSetList> createSetList(String name) => _enqueue(() async {
@@ -427,8 +510,10 @@ class ReaderStateStore {
 }
 
 class _StrokeEdit {
-  const _StrokeEdit(this.strokeId, this.beforeDeleted, this.afterDeleted);
+  const _StrokeEdit(this.strokeId, this.beforeDeleted, this.afterDeleted,
+      {this.beforeText, this.afterText});
   final String strokeId;
   final bool beforeDeleted;
   final bool afterDeleted;
+  final TextAnnotation? beforeText, afterText;
 }

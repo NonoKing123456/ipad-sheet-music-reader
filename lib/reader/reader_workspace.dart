@@ -18,13 +18,23 @@ class PendingPathEdit {
   bool saving = false;
 }
 
+class PendingTextEdit {
+  PendingTextEdit(this.page, this.value, this.expected);
+  final PageKey page;
+  TextAnnotation value;
+  final TextEditBase expected;
+  bool saving = false;
+}
+
 /// Presentation state only. Durable changes always go through reader_state.
 class ReaderWorkspace extends ChangeNotifier {
   ReaderWorkspace(this.store) : _seenGeneration = store.snapshot.generation;
   final ReaderStateStore store;
   final List<PendingStroke> pending = [];
   final List<PendingPathEdit> pendingPaths = [];
+  final List<PendingTextEdit> pendingText = [];
   String? error;
+  String? textConflictNotice;
   int _operations = 0;
   int _positionOperations = 0;
   bool _disposed = false;
@@ -36,7 +46,8 @@ class ReaderWorkspace extends ChangeNotifier {
   bool get savingAnnotations => _operations > 0;
   int get unsavedCount =>
       pending.where((stroke) => !stroke.saving).length +
-      pendingPaths.where((edit) => !edit.saving).length;
+      pendingPaths.where((edit) => !edit.saving).length +
+      pendingText.where((edit) => !edit.saving).length;
 
   void _changed() {
     _seenGeneration = store.snapshot.generation;
@@ -96,7 +107,7 @@ class ReaderWorkspace extends ChangeNotifier {
       return await operation(store);
     } catch (failure, stack) {
       debugPrint('READER state_save_failed: $failure\n$stack');
-      error = '保存失败。请检查磁盘空间和应用数据目录后重试；原谱未被更改。';
+      error = '保存失败，请重试。';
       return null;
     } finally {
       _operations--;
@@ -136,6 +147,83 @@ class ReaderWorkspace extends ChangeNotifier {
     for (final edit in List<PendingPathEdit>.of(pendingPaths)) {
       await _savePaths(edit);
     }
+    for (final edit in List<PendingTextEdit>.of(pendingText)) {
+      await _saveText(edit);
+    }
+  }
+
+  List<PageAnnotation> annotationsFor(
+    PageKey page, {
+    List<PageAnnotation>? base,
+  }) {
+    final result = List<PageAnnotation>.of(
+      base ?? store.snapshot.annotations[page] ?? [],
+    );
+    for (final edit in pendingText.where((edit) => edit.page == page)) {
+      final index = result.indexWhere((item) => item.id == edit.value.id);
+      if (index < 0) {
+        result.add(edit.value);
+      } else {
+        result[index] = edit.value;
+      }
+    }
+    return result.where((item) => !item.isDeleted).toList(growable: false);
+  }
+
+  Future<bool> saveText(
+    PageKey page,
+    TextAnnotation value, {
+    TextEditBase? expected,
+  }) async {
+    final existing = pendingText
+        .where((edit) => edit.page == page && edit.value.id == value.id)
+        .firstOrNull;
+    if (existing?.saving == true) return false;
+    final pending =
+        existing ??
+        PendingTextEdit(
+          page,
+          value,
+          expected ??
+              TextEditBase(
+                (store.snapshot.annotations[page] ?? [])
+                    .whereType<TextAnnotation>()
+                    .where((item) => item.id == value.id)
+                    .firstOrNull,
+              ),
+        );
+    pending.value = value;
+    if (existing == null) pendingText.add(pending);
+    if (value.isDeleted &&
+        !(store.snapshot.annotations[page] ?? []).any(
+          (item) => item.id == value.id,
+        )) {
+      pendingText.remove(pending);
+      if (unsavedCount == 0) error = null;
+      _changed();
+      return true;
+    }
+    return _saveText(pending);
+  }
+
+  Future<bool> _saveText(PendingTextEdit pending) async {
+    if (pending.saving) return false;
+    pending.saving = true;
+    final conflicts = store.snapshot.conflicts.length;
+    final saved = await edit(
+      (store) => store.saveText(
+        pending.page,
+        pending.value,
+        expected: pending.expected,
+      ),
+    );
+    pending.saving = false;
+    if (saved != null) pendingText.remove(pending);
+    if (saved != null && store.snapshot.conflicts.length > conflicts) {
+      textConflictNotice = '文字有不同修改，双方已保留。';
+    }
+    _changed();
+    return saved != null;
   }
 
   Future<void> replacePaths(
