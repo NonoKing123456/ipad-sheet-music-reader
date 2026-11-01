@@ -2,7 +2,6 @@ import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
 import 'page_count_service.dart';
-import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
@@ -38,6 +37,41 @@ class _ExternalHashRequest {
   const _ExternalHashRequest(this.path);
   final String path;
   Future<String> call() => _hashExternalFile(path);
+}
+
+/// The host library shows local file types without offline download status.
+class _HostLibraryIcon extends StatelessWidget {
+  const _HostLibraryIcon({required this.path}) : isFolder = false;
+  const _HostLibraryIcon.folder() : path = '', isFolder = true;
+
+  final String path;
+  final bool isFolder;
+
+  @override
+  Widget build(BuildContext context) {
+    final image = const {
+      '.jpg',
+      '.jpeg',
+      '.png',
+      '.webp',
+    }.contains(p.extension(path).toLowerCase());
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(4, 5, 8, 7),
+        child: Icon(
+          isFolder
+              ? Icons.folder_outlined
+              : image
+              ? Icons.image_outlined
+              : Icons.description_outlined,
+          size: 32,
+          color: const Color(0xff53645c),
+        ),
+      ),
+    );
+  }
 }
 
 class LibraryScreen extends StatefulWidget {
@@ -821,7 +855,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 }
                 return ListTile(
                   key: ValueKey('source-${source.id}'),
-                  leading: const ScoreFileIcon.folder(),
+                  leading: const _HostLibraryIcon.folder(),
                   selected:
                       source.id == library.selectedSourceId &&
                       library.currentFolder.isEmpty,
@@ -896,7 +930,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         dense: true,
         selected: selected,
         selectedTileColor: const Color(0xffdfe8df),
-        leading: const ScoreFileIcon.folder(),
+        leading: const _HostLibraryIcon.folder(),
         title: Tooltip(
           message: folder.isEmpty ? library.rootPath! : folder,
           child: Text(
@@ -1038,7 +1072,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         if (index < subfolders.length) {
           final folder = subfolders[index];
           return ListTile(
-            leading: const ScoreFileIcon.folder(),
+            leading: const _HostLibraryIcon.folder(),
             title: Text(p.posix.basename(folder)),
             subtitle: Text(folder, style: const TextStyle(fontSize: 12)),
             trailing: const Icon(Icons.chevron_right),
@@ -1052,21 +1086,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             horizontal: 12,
             vertical: 0,
           ),
-          leading: Tooltip(
-            message: switch (entry.availability) {
-              ContentAvailability.ready => '本机可读',
-              ContentAvailability.deferred => '未下载，请先从云盘下载到本机',
-              ContentAvailability.unreadable => '本机内容不可读，请检查文件',
-            },
-            child: ScoreFileIcon(
-              path: entry.relativePath,
-              state: switch (entry.availability) {
-                ContentAvailability.ready => ScoreFileIconState.ready,
-                ContentAvailability.deferred => ScoreFileIconState.cloud,
-                ContentAvailability.unreadable => ScoreFileIconState.unreadable,
-              },
-            ),
-          ),
+          leading: _HostLibraryIcon(path: entry.relativePath),
           title: Text(
             p.posix.basenameWithoutExtension(entry.relativePath),
             maxLines: 1,
