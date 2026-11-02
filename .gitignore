@@ -10,6 +10,7 @@
 !/.metadata
 !/CHANGELOG.md
 !/CONTRIBUTING.md
+!/DESIGN.md
 !/README.md
 !/SECURITY.md
 !/analysis_options.yaml
@@ -104,12 +105,14 @@
 !/lib/sync/sync_controller.dart
 !/lib/sync/sync_screen.dart
 !/lib/theme/app_theme.dart
+!/lib/theme/tokens.dart
 !/packages/library_core/README.md
 !/packages/library_core/analysis_options.yaml
 !/packages/library_core/lib/library_core.dart
 !/packages/library_core/lib/src/catalog.dart
 !/packages/library_core/lib/src/models.dart
 !/packages/library_core/pubspec.yaml
+!/packages/library_core/test/batch_materialization_test.dart
 !/packages/library_core/test/catalog_test.dart
 !/packages/library_core/test/support/hold_lock.dart
 !/packages/library_sync/README.md
@@ -150,6 +153,7 @@
 !/test/annotation_path_test.dart
 !/test/annotation_pending_preview_test.dart
 !/test/app_smoke_test.dart
+!/test/appearance_reader_0832_test.dart
 !/test/desktop_continuous_085_test.dart
 !/test/desktop_reader_087_test.dart
 !/test/desktop_reader_fixture.dart
@@ -157,6 +161,7 @@
 !/test/directory_navigation_084_test.dart
 !/test/ios_background_transfer_test.dart
 !/test/ipad_reading_test.dart
+!/test/library_batch_prepare_0832_test.dart
 !/test/library_controller_test.dart
 !/test/library_hot_path_085_test.dart
 !/test/library_reader_focus_test.dart
@@ -204,6 +209,7 @@
 !/test/text_rotation_snap_test.dart
 !/test/theme_share_test.dart
 !/tool/background_queue_schema_smoke.swift
+!/tool/catalog_batch_prepare_benchmark.dart
 !/tool/prepare_windows_links.ps1
 !/tool/raster_decode_smoke.swift
 !/tool/signing_expiry_smoke.swift

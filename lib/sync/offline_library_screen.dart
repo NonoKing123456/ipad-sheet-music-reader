@@ -234,8 +234,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     super.dispose();
   }
 
-  String _parent(String folder) =>
-      folder.contains('/') ? folder.substring(0, folder.lastIndexOf('/')) : '';
   void _selectFolder(String folder) {
     setState(() {
       _folder = folder;
@@ -550,12 +548,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                       icon: const Icon(Icons.arrow_back),
                     ),
               actions: [
-                const ThemeAction(),
                 IconButton(
                   tooltip: _searchOpen ? '关闭搜索' : '搜索',
                   icon: Icon(_searchOpen ? Icons.close : Icons.search),
                   onPressed: _searchOpen ? _closeSearch : _openSearch,
                 ),
+                const ThemeAction(),
                 _syncActions(
                   compact: compactActions,
                   minimal: constraints.maxWidth < 360,
@@ -629,11 +627,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                         child: Row(
                           children: [
                             Expanded(
-                              child: DirectoryParentButton(
-                                currentPath: folder,
-                                parentLabel: _parent(folder).isEmpty
-                                    ? '谱库根目录'
-                                    : p.posix.basename(_parent(folder)),
+                              child: DirectoryBreadcrumbs(
                                 rootLabel:
                                     sync.offlineSources
                                         .where(
@@ -643,9 +637,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                         .firstOrNull
                                         ?.name ??
                                     '谱库',
-                                onPressed: folder.isEmpty
-                                    ? null
-                                    : () => _selectFolder(_parent(folder)),
+                                currentPath: folder,
+                                onNavigate: _selectFolder,
                               ),
                             ),
                             if (_activeSourceId != null)

@@ -174,6 +174,30 @@ class LibrarySnapshot {
     return next;
   }
 
+  /// Replace a bounded selected set with one immutable list/map copy.
+  LibrarySnapshot replacingEntries(Iterable<LibraryEntry> replacements,
+      {required int generation, required DateTime savedUtc}) {
+    final changed = {for (final entry in replacements) entry.id: entry};
+    for (final id in changed.keys) {
+      if (entryById(id) == null) throw StateError('Unknown replacement entry.');
+    }
+    final next = LibrarySnapshot._replacement(
+        rootPath: rootPath,
+        generation: generation,
+        entries: List.unmodifiable(
+            [for (final entry in entries) changed[entry.id] ?? entry]),
+        folders: folders,
+        savedUtc: savedUtc);
+    next._entriesById = Map.of(_entriesById!)..addAll(changed);
+    if (_availableEntries != null &&
+        changed.values
+            .every((entry) => entryById(entry.id)!.status == entry.status)) {
+      next._availableEntries = List.unmodifiable(
+          [for (final entry in _availableEntries!) changed[entry.id] ?? entry]);
+    }
+    return next;
+  }
+
   /// Replacing one ready/deferred revision preserves sibling object identities
   /// and lookup caches. Old immutable snapshots keep their own maps/lists.
   LibrarySnapshot replacingEntry(LibraryEntry replacement,

@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoThemeData;
 import 'package:flutter/services.dart';
 import 'package:reader_state/reader_state.dart';
 
@@ -11,6 +14,8 @@ import 'reader_text_editing.dart';
 import 'reader_workspace.dart';
 import 'text_rotation_snap.dart';
 import 'text_handle_layout.dart';
+
+// Editing chrome sits on the unchanged white paper, even in dark app chrome.
 
 /// Paper-relative text. Only explicit T mode accepts finger/mouse text actions.
 class AnnotationTextLayer extends StatefulWidget {
@@ -903,34 +908,84 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           constraints: BoxConstraints(
             maxHeight: math.max(44, math.min(240, size.height * .4)),
           ),
-          child: TextField(
-            key: _inputKey,
-            controller: _controller,
-            readOnly: _committing,
-            focusNode: _focus,
-            style: textAnnotationStyle(value, size, fontFamily: _family),
-            minLines: 1,
-            maxLines: null,
-            keyboardType: TextInputType.multiline,
-            textInputAction: TextInputAction.newline,
-            onTapOutside: (_) {},
-            onChanged: (_) {
-              setState(() {
-                _error = null;
-                final value = _editingValue(size)!;
-                _draft = _automaticNewWidth
-                    ? _sizeNewDraft(value, size)
-                    : _fit(value, size);
-              });
-              _scheduleReveal();
-            },
-            decoration: InputDecoration(
-              isDense: true,
-              filled: true,
-              fillColor: const Color(0xe6ffffff),
-              contentPadding: const EdgeInsets.only(bottom: 4),
-              errorText: _error,
-              border: const UnderlineInputBorder(),
+          child: Theme(
+            data: Theme.of(context).copyWith(
+              extensions: [
+                for (final extension in Theme.of(context).extensions.values)
+                  if (extension is! ScoreTokens) extension,
+                ScoreTokens.light,
+              ],
+            ),
+            child: Builder(
+              builder: (paperContext) {
+                final tokens = ScoreTokens.of(paperContext);
+                return Theme(
+                  data: Theme.of(paperContext).copyWith(
+                    textSelectionTheme: TextSelectionThemeData(
+                      cursorColor: tokens.pine,
+                      selectionColor: tokens.pineWash,
+                      selectionHandleColor: tokens.pine,
+                    ),
+                    cupertinoOverrideTheme: CupertinoThemeData(
+                      primaryColor: tokens.pine,
+                    ),
+                  ),
+                  child: TextField(
+                    key: _inputKey,
+                    controller: _controller,
+                    readOnly: _committing,
+                    focusNode: _focus,
+                    cursorColor: tokens.pine,
+                    cursorErrorColor: tokens.dangerInk,
+                    style: textAnnotationStyle(
+                      value,
+                      size,
+                      fontFamily: _family,
+                    ),
+                    minLines: 1,
+                    maxLines: null,
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    onTapOutside: (_) {},
+                    onChanged: (_) {
+                      setState(() {
+                        _error = null;
+                        final value = _editingValue(size)!;
+                        _draft = _automaticNewWidth
+                            ? _sizeNewDraft(value, size)
+                            : _fit(value, size);
+                      });
+                      _scheduleReveal();
+                    },
+                    decoration: InputDecoration(
+                      isDense: true,
+                      filled: true,
+                      fillColor: tokens.paper0,
+                      contentPadding: const EdgeInsets.only(
+                        bottom: ScoreSpace.xs,
+                      ),
+                      errorText: _error,
+                      errorStyle: TextStyle(color: tokens.dangerInk),
+                      border: const UnderlineInputBorder(),
+                      enabledBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: tokens.ink500),
+                      ),
+                      focusedBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: tokens.pine, width: 2),
+                      ),
+                      errorBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(color: tokens.dangerInk),
+                      ),
+                      focusedErrorBorder: UnderlineInputBorder(
+                        borderSide: BorderSide(
+                          color: tokens.dangerInk,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ),

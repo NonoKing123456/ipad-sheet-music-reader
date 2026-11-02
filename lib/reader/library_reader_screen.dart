@@ -701,7 +701,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       current.aspectFor(_session.page),
                   mouseInk: _editing && _tool != null,
                   touchInk: _editing && _tool != null,
-                  editing: _editing && (_tool != null || _textTool),
+                  editing: _editing,
                   gestureGeneration: _inputGeneration,
                   onTransformGestureChanged: (active) =>
                       setState(() => _touchTransforming = active),
@@ -1138,7 +1138,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               mouseInk: _editing && _tool != null,
               touchInk: _editing && _tool != null,
               mouseWheel: true,
-              editing: _editing && (_tool != null || _textTool),
+              editing: _editing,
               gestureGeneration: _inputGeneration,
               transform: _transform,
               viewportKey: _viewportKey,

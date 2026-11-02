@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,36 @@ import 'package:score_reader/sharing/score_share.dart';
 import 'package:score_reader/theme/app_theme.dart';
 import 'package:score_reader/library/page_count_service.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
+
+class _ObservedThemeController extends ThemeController {
+  _ObservedThemeController({super.directory});
+  int pending = 0;
+  @override
+  Future<void> setMode(ThemeMode mode) {
+    pending++;
+    return super.setMode(mode).whenComplete(() => pending--);
+  }
+}
+
+Future<void> _waitForThemeSaved(
+  WidgetTester tester,
+  Directory root,
+  ThemeMode mode, {
+  int Function()? pending,
+}) async {
+  final file = File(p.join(root.path, 'appearance.json'));
+  var saved = false;
+  for (var i = 0; i < 100 && !saved; i++) {
+    await tester.pump(const Duration(milliseconds: 16));
+    saved = (await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      return await file.exists() &&
+          jsonDecode(await file.readAsString())['theme'] == mode.name &&
+          (pending == null || pending() == 0);
+    }))!;
+  }
+  expect(saved, isTrue);
+}
 
 void main() {
   test(
@@ -92,12 +123,12 @@ void main() {
   });
 
   testWidgets(
-    'appearance action exposes all modes and system brightness reaches chrome',
+    'appearance action toggles effective brightness once and persists explicit mode without a menu',
     (tester) async {
       final root = (await tester.runAsync(
         () => Directory.systemTemp.createTemp('theme-ui-'),
       ))!;
-      final controller = ThemeController(directory: root);
+      final controller = _ObservedThemeController(directory: root);
       addTearDown(() async {
         await tester.pumpWidget(const SizedBox());
         controller.dispose();
@@ -129,10 +160,10 @@ void main() {
       );
       IconData actionIcon() =>
           (tester
-                      .widget<PopupMenuButton<ThemeMode>>(
+                      .widget<IconButton>(
                         find.byKey(const ValueKey('theme-action')),
                       )
-                      .icon!
+                      .icon
                   as Icon)
               .icon!;
       expect(actionIcon(), Icons.dark_mode_outlined);
@@ -143,13 +174,8 @@ void main() {
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
       await tester.pumpAndSettle();
       expect(actionIcon(), Icons.dark_mode_outlined);
-      await tester.tap(find.byKey(const ValueKey('theme-action')));
-      await tester.pumpAndSettle();
-      for (final label in ['跟随系统', '浅色', '深色']) {
-        expect(find.text(label), findsOneWidget);
-      }
       await tester.runAsync(() async {
-        await tester.tap(find.widgetWithText(PopupMenuItem<ThemeMode>, '浅色'));
+        await tester.tap(find.byTooltip('切换到浅色'));
         await Future<void>.delayed(const Duration(milliseconds: 20));
       });
       await tester.pumpAndSettle();
@@ -159,6 +185,53 @@ void main() {
         Theme.of(tester.element(find.byType(Scaffold))).brightness,
         Brightness.light,
       );
+      expect(find.byType(PopupMenuItem<ThemeMode>), findsNothing);
+      final reopened = ThemeController(directory: root);
+      await _waitForThemeSaved(
+        tester,
+        root,
+        ThemeMode.light,
+        pending: () => controller.pending,
+      );
+      await tester.runAsync(reopened.load);
+      expect(reopened.mode, ThemeMode.light);
+      await tester.runAsync(() async {
+        await tester.tap(find.byTooltip('切换到深色'));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      await tester.pumpAndSettle();
+      expect(controller.mode, ThemeMode.dark);
+      await _waitForThemeSaved(
+        tester,
+        root,
+        ThemeMode.dark,
+        pending: () => controller.pending,
+      );
+      await tester.runAsync(reopened.load);
+      expect(reopened.mode, ThemeMode.dark);
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      await tester.pumpAndSettle();
+      expect(
+        actionIcon(),
+        Icons.dark_mode_outlined,
+        reason: 'a click opts out of system mode',
+      );
+      await tester.tap(find.byKey(const ValueKey('theme-action')));
+      await tester.tap(find.byKey(const ValueKey('theme-action')));
+      expect(
+        controller.mode,
+        ThemeMode.dark,
+        reason: 'rapid second click reads current explicit mode before theme animation catches up',
+      );
+      await _waitForThemeSaved(
+        tester,
+        root,
+        ThemeMode.dark,
+        pending: () => controller.pending,
+      );
+      await tester.runAsync(reopened.load);
+      expect(reopened.mode, ThemeMode.dark);
+      reopened.dispose();
     },
   );
 

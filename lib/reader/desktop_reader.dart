@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/material.dart';
 
 import 'reader_spreads.dart';
@@ -258,7 +260,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
 
   Widget _group(BuildContext context, List<Widget> children) => DecoratedBox(
     decoration: BoxDecoration(
-      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      border: Border.all(color: ScoreTokens.of(context).ink500),
       borderRadius: BorderRadius.circular(12),
     ),
     child: Padding(
@@ -329,8 +331,8 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             Theme.of(context).colorScheme.surface,
           ),
           surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-          side: const WidgetStatePropertyAll(
-            BorderSide(color: Color(0xffd7dedb)),
+          side: WidgetStatePropertyAll(
+            BorderSide(color: ScoreTokens.of(context).ink500),
           ),
           shape: WidgetStatePropertyAll(
             RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -387,8 +389,8 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             Theme.of(context).colorScheme.surface,
           ),
           surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-          side: const WidgetStatePropertyAll(
-            BorderSide(color: Color(0xffd7dedb)),
+          side: WidgetStatePropertyAll(
+            BorderSide(color: ScoreTokens.of(context).ink500),
           ),
           shape: WidgetStatePropertyAll(
             RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),

@@ -2,6 +2,22 @@
 
 验证日期：2026-11-02。构建、安装和真机验证分别记录；下方保留 `0.8.10+26` 公开副本的历史测试结果，不把后续定向验证视为全量通过。
 
+## 0.8.10+32：定向证据与边界
+
+Windows +32已交付；根iPad为+31，+32待唯一Mac构建。本轮没有完整回归、真实分享或私谱测试。
+
+| 范围 | 结果与限制 |
+| --- | --- |
+| UI32 | 一键外观及快速双击持久化1、实际双谱库搜索顺序1、iPad工具空选纵向避让/横翻/复位/画笔与双指/纸内caret1、真实错误和工具预览对比1，累计4项；使用已有Windows测试进程采样规避设置，不用于性能测量 |
+| 最后样式迁移 | 只替换用户确认的library_screen样式值；header旧case通过。directory旧case仍两失败：裸MaterialApp下未变父级按钮实际40而旧断言48；iOS直接挂载OfflineLibraryScreen并找旧tooltip，未进入迁移页面。不改测试或组件，不把旧失败隐藏为通过。白纸局部Theme/of(context)后复核原caret用例通过；没有重跑25项或53k基准 |
+| 下载32 | core批量publication3、协议微批15、实际Controller与CatalogCollectionSource跨来源1、原生adapter能力边界1、旧单件/HTTP快路径1，合计21项；新能力/31回退、坏件隔离、撤销无关数据保留、旧publication拒绝、ready零写/零哈希均有针对证据 |
+| 分析 | 本轮Dart产品、公共定向tests与合成benchmark分析无问题；最终library/annotation两文件复核无问题，不称全仓库lint |
+| 53k实测 | 53,461总 / 31,165 active / 22,296 missing，初始8,638 ready / 22,527 cold，目录32,113,693字节；只创建合成选择文件。旧冷仅32项以避免无意义重写16GB，新512验证稳定性；详见公开benchmark与协议文档表 |
+| Windows | 唯一release构建48.5秒，完整19成员逐hash、share-v1验证及发布通过；固定launcher/Start/cmd不变、用户旧窗口未关闭，不代表真实分享操作已验 |
+| Mac与真机 | Swift同schema烟测和+32原生编译待Mac；复用原精确6独立Mach-O及Runner四个真实静态share定义、channel/selector/privacy门禁，不接受任意6/7。iPad安装、Wi-Fi速度、后台调度、系统分享与实机交互未验证 |
+
+所有测试均为合成数据；私有字体/本机截图夹具不发布。此前失败与验证历史保留如下。
+
 ## 0.8.10+31 已交付：定向证据与未验证边界
 
 Windows `+31` 已交付：唯一release构建57.2秒，19成员完整校验后通过share-v1发布。唯一Mac [run22](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases/tag/unsigned-ipad-22-1) 已成功，三件套来源与包门禁核验通过；根iPad IPA已提升`+31`并保留旧30，用户装机与真实交互仍待验。

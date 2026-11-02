@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -73,7 +75,7 @@ class _ReaderToolButtonState extends State<ReaderToolButton> {
         child: Material(
           elevation: 6,
           borderRadius: BorderRadius.circular(12),
-          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          color: ScoreTokens.of(context).paper0,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -85,7 +87,11 @@ class _ReaderToolButtonState extends State<ReaderToolButton> {
                 width: 86,
                 height: 32,
                 child: CustomPaint(
-                  painter: _ToolPreview(widget.tool, widget.value),
+                  painter: _ToolPreview(
+                    widget.tool,
+                    widget.value,
+                    ScoreTokens.of(context).pineDeep,
+                  ),
                 ),
               ),
             ],
@@ -169,13 +175,14 @@ class _ReaderToolButtonState extends State<ReaderToolButton> {
 }
 
 class _ToolPreview extends CustomPainter {
-  _ToolPreview(this.tool, this.value);
+  _ToolPreview(this.tool, this.value, this.color);
   final ReaderTool tool;
   final double value;
+  final Color color;
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xff236459)
+      ..color = color
       ..strokeCap = StrokeCap.round;
     if (tool == ReaderTool.eraser) {
       paint.style = PaintingStyle.stroke;
@@ -197,7 +204,7 @@ class _ToolPreview extends CustomPainter {
 
   @override
   bool shouldRepaint(_ToolPreview old) =>
-      old.tool != tool || old.value != value;
+      old.tool != tool || old.value != value || old.color != color;
 }
 
 /// The last successful sample belongs to the eyedropper, independently of the
@@ -265,7 +272,7 @@ class ReaderSampleColorButton extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: sample ?? Colors.transparent,
                       border: Border.all(
-                        color: const Color(0xff52615c),
+                        color: ScoreTokens.of(context).ink500,
                         width: 1.5,
                       ),
                       borderRadius: BorderRadius.circular(3),

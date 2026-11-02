@@ -74,6 +74,26 @@ class _Source implements LibrarySource, CollectionLibrarySource {
       throw StateError('Legacy not used');
 }
 
+class _BulkSource extends _Source implements CollectionBatchPreparation {
+  _BulkSource(super.sizes);
+  int bulkCalls = 0, singleCalls = 0;
+  @override
+  Future<CatalogItem> prepare(String id, String revision) {
+    singleCalls++;
+    return super.prepare(id, revision);
+  }
+
+  @override
+  Future<Map<String, CatalogItem>> prepareMany(
+      Map<String, String> selected) async {
+    bulkCalls++;
+    return {
+      for (final request in selected.entries)
+        request.key: await super.prepare(request.key, request.value)
+    };
+  }
+}
+
 class _Harness {
   _Harness(this.root, this.source, this.server, this.proxy, this.http);
   final Directory root;
@@ -84,13 +104,14 @@ class _Harness {
   late SyncClient client;
   late ReplicaCollectionView view;
   final requests = <String, int>{};
-  bool legacy = false,
+  bool legacyCap = false,
+      legacy = false,
       expireOnce = false,
       tamperOnce = false,
       invalidFrameOnce = false;
-  static Future<_Harness> create(List<int> sizes) async {
+  static Future<_Harness> create(List<int> sizes, {bool bulk = false}) async {
     final root = await Directory.systemTemp.createTemp('small-batch-test-');
-    final source = _Source(sizes);
+    final source = bulk ? _BulkSource(sizes) : _Source(sizes);
     final server = await SyncServer.start(
         source: source,
         collectionSource: source,
@@ -126,6 +147,11 @@ class _Harness {
           expireOnce && path == '/v2/batch-object') {
         incoming.response.statusCode = legacy ? 404 : 410;
         expireOnce = false;
+        await incoming.response.close();
+        return;
+      }
+      if (legacyCap && path == '/v2/transfer-capabilities') {
+        incoming.response.write(jsonEncode({'smallFileBatch': 1}));
         await incoming.response.close();
         return;
       }
@@ -181,6 +207,30 @@ class _Harness {
 }
 
 void main() {
+  test(
+      'negotiated 1MiB groups medium files with bounded payload and optional bulk source',
+      () async {
+    final h =
+        await _Harness.create([350 * 1024, 650 * 1024, 900 * 1024], bulk: true);
+    expect((await h.client.syncCollection(h.view)).status,
+        LibrarySyncStatus.complete);
+    expect(h.count('/v2/batch-prepare'), 1);
+    expect(h.count('/v2/batch-object'), 1);
+    expect(h.count('/v2/prepare'), 0);
+    expect((h.source as _BulkSource).bulkCalls, 1);
+    expect((h.source as _BulkSource).singleCalls, 0);
+  });
+  test(
+      '31 capability without size field keeps medium files on the single-object path',
+      () async {
+    final h = await _Harness.create([32 * 1024, 350 * 1024, 900 * 1024]);
+    h.legacyCap = true;
+    expect((await h.client.syncCollection(h.view)).status,
+        LibrarySyncStatus.complete);
+    expect(h.count('/v2/batch-prepare'), 1);
+    expect(h.count('/v2/prepare'), 2);
+    expect(h.count('/v2/object'), 2);
+  });
   for (final size in [1024, 32768]) {
     test(
         '129 synthetic $size-byte files use six transfer requests and three metadata checkpoints',
@@ -201,7 +251,7 @@ void main() {
   test('mixed sizes obey count and byte caps and send large files individually',
       () async {
     final h = await _Harness.create(
-        [...List.filled(20, 256 * 1024), 1024 * 1024, 32 * 1024]);
+        [...List.filled(20, 256 * 1024), 1024 * 1024 + 1, 32 * 1024]);
     final groups =
         planSmallFileBatches((await h.source.index()).entries).toList();
     expect(groups.map((g) => g.length), [16, 5]);
@@ -358,7 +408,7 @@ void main() {
       ..setUint32(0, 0x53524231)
       ..setUint32(4, 1)
       ..setUint32(8, 1)
-      ..setUint32(12, 256 * 1024 + 1);
+      ..setUint32(12, SmallFileBatchLimits.objectBytes + 1);
     await expectLater(
         decodeSmallFileBatch(Stream.value(prefix.buffer.asUint8List()))
             .toList(),

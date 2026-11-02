@@ -43,6 +43,17 @@ class CatalogMaterialization {
   final LibraryCatalog? fallback;
 }
 
+/// Bounded selected-file commit; failures do not discard successful siblings.
+class CatalogBatchMaterialization {
+  const CatalogBatchMaterialization._(this.entries, this.failures, this.base,
+      this.after, this.savedUtc, this.fallback);
+  final Map<String, LibraryEntry> entries;
+  final Map<String, String> failures;
+  final CatalogPublication base, after;
+  final DateTime savedUtc;
+  final LibraryCatalog? fallback;
+}
+
 class LibraryCatalog {
   LibraryCatalog._(this.rootPath, this.statePath, this.fileAccessProbe,
       this.fileIdentityResolver, this.stateIdentityResolver)
@@ -77,6 +88,10 @@ class LibraryCatalog {
   final _folderListings = <String, FolderListing>{};
   final _storageWarnings = <String>[];
   int contentHashOperations = 0, contentHashBytesRead = 0;
+  int catalogReads = 0,
+      catalogReadBytes = 0,
+      catalogWrites = 0,
+      catalogWriteBytes = 0;
 
   Future<String> _hashFile(File file) {
     contentHashOperations++;
@@ -210,6 +225,118 @@ class LibraryCatalog {
     final (entry, base) = await _materialize(id);
     return CatalogMaterialization._(entry, base, publication,
         _snapshot.savedUtc, base._matches(expected) ? null : this);
+  }
+
+  /// Opened catalogue and writer lease are shared by at most 64 selections.
+  /// Only those source files are checked/hashed; missing tombstones are retained.
+  Future<CatalogBatchMaterialization> materializeManyForPublication(
+      Map<String, String> selected, CatalogPublication expected) async {
+    if (selected.isEmpty || selected.length > 64) {
+      throw ArgumentError('Selected materialization requires 1..64 files.');
+    }
+    return _withLock(() async {
+      _snapshot = await matchesDisk() ? _snapshot : await _loadSnapshot();
+      final base = publication;
+      final ready = <String, LibraryEntry>{},
+          changed = <String, LibraryEntry>{};
+      final failures = <String, String>{};
+      final now = DateTime.now().toUtc();
+      for (final request in selected.entries) {
+        try {
+          final entry = _snapshot.entryById(request.key);
+          if (entry == null ||
+              entry.status != EntryStatus.available ||
+              entry.currentRevisionId != request.value) {
+            throw StateError('Selected revision changed or is missing.');
+          }
+          final path = await validatedPathFor(entry);
+          final file = File(path), before = await File(path).stat();
+          final current = entry.currentRevision;
+          if (current.contentHash != null &&
+              before.size == current.size &&
+              before.modified.toUtc() == current.modifiedUtc &&
+              entry.availability == ContentAvailability.ready) {
+            ready[entry.id] = entry;
+            continue;
+          }
+          if (await fileAccessProbe?.call(path, before) ==
+              FileAccess.deferred) {
+            throw StateError(
+                'Selected file is not available on this computer.');
+          }
+          final hash = await _hashFile(file);
+          final after = await file.stat();
+          if (after.type != FileSystemEntityType.file ||
+              after.size != before.size ||
+              after.modified != before.modified ||
+              await validatedPathFor(entry) != path) {
+            throw const FileSystemException(
+                'Selected file changed while hashing.');
+          }
+          final updated = _updateEntry(
+              entry,
+              _ObservedFile(
+                  entry.relativePath,
+                  after.size,
+                  after.modified.toUtc(),
+                  hash,
+                  ContentAvailability.ready,
+                  entry.platformFileId),
+              now);
+          changed[entry.id] = updated;
+          if (updated.currentRevisionId != request.value) {
+            throw StateError('Selected revision changed while preparing.');
+          }
+          ready[entry.id] = updated;
+        } catch (error) {
+          failures[request.key] = error.toString();
+        }
+      }
+      if (changed.isNotEmpty) {
+        final next = _snapshot.replacingEntries(changed.values,
+            generation: _snapshot.generation + 1, savedUtc: now);
+        await _saveSnapshot(next);
+        _snapshot = next;
+      }
+      return CatalogBatchMaterialization._(
+          Map.unmodifiable(ready),
+          Map.unmodifiable(failures),
+          base,
+          publication,
+          _snapshot.savedUtc,
+          base._matches(expected) ? null : this);
+    });
+  }
+
+  /// Same publication and disk-generation guards as the one-entry worker patch.
+  Future<bool> applyBatchMaterialization(
+      CatalogBatchMaterialization patch) async {
+    if (patch.fallback != null ||
+        !publication._matches(patch.base) ||
+        patch.after.generation < patch.base.generation ||
+        patch.after.generation > patch.base.generation + 1 ||
+        patch.after._primary != await _readStateStamp() ||
+        (patch.after._backup != null &&
+            patch.after._backup != await _readStateStamp('$statePath.backup')))
+      return false;
+    for (final entry in patch.entries.values) {
+      final old = _snapshot.entryById(entry.id);
+      if (old == null ||
+          old.relativePath != entry.relativePath ||
+          old.status != EntryStatus.available ||
+          entry.status != old.status) return false;
+    }
+    if (!publication._matches(patch.base)) return false;
+    if (patch.after._matches(patch.base)) return true;
+    // A changed revision omitted from successes also needs the durable refresh.
+    if (patch.failures.isNotEmpty) return false;
+    _snapshot = _snapshot.replacingEntries(patch.entries.values,
+        generation: patch.after.generation, savedUtc: patch.savedUtc);
+    _listedSnapshot = null;
+    _folderListings.clear();
+    _stateStamp = patch.after._primary;
+    _backupStamp = patch.after._backup;
+    return true;
   }
 
   /// Apply only a worker-proven one-entry commit from our exact persisted base.
@@ -781,7 +908,10 @@ class LibraryCatalog {
   }
 
   Future<LibrarySnapshot> _decodeSnapshot(File file) async {
-    final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    final encoded = await file.readAsString();
+    catalogReads++;
+    catalogReadBytes += await file.length();
+    final json = jsonDecode(encoded) as Map<String, dynamic>;
     if (json['schemaVersion'] != _schemaVersion) {
       throw const CatalogStorageException('Unsupported catalogue schema.');
     }
@@ -817,17 +947,17 @@ class LibraryCatalog {
     final primary = File(statePath);
     final backup = File('$statePath.backup');
     final temporary = File('$statePath.tmp.${_newId()}');
-    await temporary.writeAsString(
-      jsonEncode({
-        'schemaVersion': _schemaVersion,
-        'rootPath': rootPath,
-        'generation': snapshot.generation,
-        'savedUtc': snapshot.savedUtc.toIso8601String(),
-        'folders': snapshot.folders,
-        'entries': snapshot.entries.map((entry) => entry.toJson()).toList(),
-      }),
-      flush: true,
-    );
+    final encoded = jsonEncode({
+      'schemaVersion': _schemaVersion,
+      'rootPath': rootPath,
+      'generation': snapshot.generation,
+      'savedUtc': snapshot.savedUtc.toIso8601String(),
+      'folders': snapshot.folders,
+      'entries': snapshot.entries.map((entry) => entry.toJson()).toList(),
+    });
+    await temporary.writeAsString(encoded, flush: true);
+    catalogWrites++;
+    catalogWriteBytes += await temporary.length();
     try {
       if (await primary.exists()) {
         var primaryValid = _backupStamp == null && await matchesDisk();

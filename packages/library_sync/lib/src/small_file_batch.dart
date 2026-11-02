@@ -6,21 +6,22 @@ import 'package:crypto/crypto.dart';
 import 'collection.dart';
 import 'replica.dart';
 
-/// Fixed protocol v1 limits. Large objects retain the original streaming path.
+/// Protocol v1 framing; larger objects require advertised peer capability. Large objects retain the original streaming path.
 abstract final class SmallFileBatchLimits {
   static const count = 64;
-  static const objectBytes = 256 * 1024;
+  static const legacyObjectBytes = 256 * 1024;
+  static const objectBytes = 1024 * 1024;
   static const payloadBytes = 4 * 1024 * 1024;
   static const headerBytes = 16 * 1024;
   static const archiveBytes = payloadBytes + count * (headerBytes + 8) + 8;
   static const prepareBytes = 1024 * 1024;
 }
 
-Iterable<List<CatalogItem>> planSmallFileBatches(
-    Iterable<CatalogItem> items) sync* {
+Iterable<List<CatalogItem>> planSmallFileBatches(Iterable<CatalogItem> items,
+    {int objectBytes = SmallFileBatchLimits.objectBytes}) sync* {
   var batch = <CatalogItem>[], bytes = 0;
   for (final item in items) {
-    if (item.length > SmallFileBatchLimits.objectBytes) continue;
+    if (item.length > objectBytes) continue;
     if (batch.length == SmallFileBatchLimits.count ||
         bytes + item.length > SmallFileBatchLimits.payloadBytes) {
       yield batch;

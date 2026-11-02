@@ -99,7 +99,7 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
     }
   }
   private static let batchCount = 64
-  private static let smallObjectBytes: Int64 = 256 * 1024
+  private static let smallObjectBytes: Int64 = 1024 * 1024
   private static let batchPayloadBytes: Int64 = 4 * 1024 * 1024
   private static let batchArchiveBytes: Int64 = 4 * 1024 * 1024 + 64 * (16 * 1024 + 8) + 8
   private let queue = DispatchQueue(label: "score_reader.background-download")
@@ -450,7 +450,9 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
       }
       repairOrphanedBatchMembers(namespace)
       if prepare && args["smallFileBatches"] as? Bool == true {
-        formSmallBatches(namespace, items.compactMap { byNamespace[namespace]?[$0.entryId] })
+        let objectLimit = (args["smallFileObjectBytes"] as? NSNumber)?.int64Value ?? 256 * 1024
+        guard objectLimit >= 256 * 1024, objectLimit <= Self.smallObjectBytes else { throw TransferError.integrity }
+        formSmallBatches(namespace, items.compactMap { byNamespace[namespace]?[$0.entryId] }, objectBytes: objectLimit)
       }
       try save()
       for item in items { if let id = byNamespace[namespace]?[item.entryId] { queueJob(id) } }
@@ -528,7 +530,7 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
     let attributes = try files.attributesOfFileSystem(forPath: root.path)
     guard let free = attributes[.systemFreeSize] as? NSNumber, free.int64Value > count else { throw TransferError.storage }
   }
-  private func formSmallBatches(_ namespace: String, _ ids: [String]) {
+  private func formSmallBatches(_ namespace: String, _ ids: [String], objectBytes: Int64) {
     var group = [String](), bytes: Int64 = 0
     func finish() {
       if group.count > 1, let first = group.first, var leader = jobs[first] {
@@ -543,7 +545,7 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
     for id in ids {
       guard let job = jobs[id], job.namespace == namespace, job.prepare,
         job.state == "queued", job.phase == "prepare", job.batchOwner == nil,
-        job.batchMembers == nil, job.original.length <= Self.smallObjectBytes else { continue }
+        job.batchMembers == nil, job.original.length <= objectBytes else { continue }
       if group.count == Self.batchCount || bytes + job.original.length > Self.batchPayloadBytes { finish() }
       group.append(id); bytes += job.original.length
     }

@@ -20,6 +20,11 @@ abstract interface class BackgroundTransfer {
   Future<void> pause(String namespace);
 }
 
+/// Optional negotiated grouping limit; old native adapters retain 256 KiB.
+abstract interface class BackgroundTransferBatchLimits {
+  set smallFileObjectBytes(int bytes);
+}
+
 abstract interface class BackgroundTransferBatchAcknowledger {
   Future<void> acknowledgeMany(String namespace, List<CatalogItem> items);
 }

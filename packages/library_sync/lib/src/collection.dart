@@ -291,6 +291,11 @@ abstract interface class CollectionLibrarySource {
       String entryId, String revisionId);
 }
 
+/// Optional bounded source preparation. Missing results are isolated failures.
+abstract interface class CollectionBatchPreparation {
+  Future<Map<String, CatalogItem>> prepareMany(Map<String, String> selected);
+}
+
 /// Optional selected-object lookup; generic providers keep the complete-index
 /// fallback. The authenticated request and object checks remain unchanged.
 abstract interface class CollectionObjectLookup {
@@ -310,13 +315,17 @@ class CatalogSourceBinding {
 
 /// Live bindings avoid retaining old catalog snapshots after background scans.
 class CatalogCollectionSource
-    implements CollectionLibrarySource, CollectionObjectLookup {
+    implements
+        CollectionLibrarySource,
+        CollectionObjectLookup,
+        CollectionBatchPreparation {
   const CatalogCollectionSource(
       {required this.id,
       required this.bindings,
       this.legacyLibraryId,
       this.onMaterialized,
-      this.prepareEntry});
+      this.prepareEntry,
+      this.prepareEntries});
   final String id;
   final String? legacyLibraryId;
   final List<CatalogSourceBinding> Function() bindings;
@@ -326,6 +335,9 @@ class CatalogCollectionSource
   /// The wire contract and the selected entry/revision checks stay unchanged.
   final Future<LibraryEntry> Function(String entryId, String revisionId)?
       prepareEntry;
+
+  final Future<Map<String, LibraryEntry>> Function(
+      Map<String, String> selected)? prepareEntries;
 
   CatalogItem _item(CatalogSourceBinding source, LibraryEntry entry) =>
       CatalogItem(
@@ -384,6 +396,63 @@ class CatalogCollectionSource
     }
     onMaterialized?.call();
     return _item(source, ready);
+  }
+
+  @override
+  Future<Map<String, CatalogItem>> prepareMany(
+      Map<String, String> selected) async {
+    if (selected.isEmpty || selected.length > 64) {
+      throw const FormatException('Invalid selected batch.');
+    }
+    final resolved = <String, (CatalogSourceBinding, LibraryEntry)>{};
+    for (final request in selected.entries) {
+      try {
+        final owner = _resolve(request.key);
+        if (owner.$1.online && owner.$2.currentRevisionId == request.value) {
+          resolved[request.key] = owner;
+        }
+      } on StateError {/* Isolate unavailable siblings. */}
+    }
+    final valid = {for (final id in resolved.keys) id: selected[id]!};
+    final ready = <String, LibraryEntry>{};
+    if (prepareEntries != null && valid.isNotEmpty) {
+      ready.addAll(await prepareEntries!(valid));
+    } else if (prepareEntry != null) {
+      for (final request in valid.entries) {
+        try {
+          ready[request.key] = await prepareEntry!(request.key, request.value);
+        } catch (_) {/* Preserve the host's legacy coordination contract. */}
+      }
+    } else {
+      final groups = <LibraryCatalog, Map<String, String>>{};
+      for (final request in resolved.entries) {
+        (groups[request.value.$1.catalog] ??= {})[request.value.$2.id] =
+            selected[request.key]!;
+      }
+      for (final group in groups.entries) {
+        final patch = await group.key
+            .materializeManyForPublication(group.value, group.key.publication);
+        for (final request in resolved.entries
+            .where((e) => identical(e.value.$1.catalog, group.key))) {
+          final entry = patch.entries[request.value.$2.id];
+          if (entry != null) ready[request.key] = entry;
+        }
+      }
+    }
+    final result = <String, CatalogItem>{};
+    for (final value in ready.entries) {
+      final owner = resolved[value.key];
+      if (owner == null) continue;
+      final entry = value.value;
+      if (entry.id == owner.$2.id &&
+          entry.currentRevisionId == selected[value.key] &&
+          entry.availability == ContentAvailability.ready &&
+          entry.currentRevision.contentHash != null) {
+        result[value.key] = _item(owner.$1, entry);
+      }
+    }
+    if (result.isNotEmpty) onMaterialized?.call();
+    return result;
   }
 
   @override

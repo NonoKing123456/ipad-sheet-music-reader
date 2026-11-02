@@ -1324,6 +1324,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
               : null,
           bindings: () => library.sources,
           prepareEntry: library.prepareForRead,
+          prepareEntries: library.prepareManyForRead,
         ),
         readerStore: workspace.store,
         stateDirectory: p.join(

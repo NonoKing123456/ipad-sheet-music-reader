@@ -506,7 +506,10 @@ class SyncServer {
       } else if (collection != null &&
           request.method == 'GET' &&
           path == '/v2/transfer-capabilities') {
-        await _reply(request.response, {'smallFileBatch': 1});
+        await _reply(request.response, {
+          'smallFileBatch': 1,
+          'smallFileObjectBytes': SmallFileBatchLimits.objectBytes
+        });
       } else if (collection != null &&
           request.method == 'POST' &&
           path == '/v2/batch-prepare') {
@@ -628,19 +631,31 @@ class SyncServer {
     final raw = body['items'];
     if (raw is! List || raw.isEmpty || raw.length > SmallFileBatchLimits.count)
       throw const FormatException('Invalid small batch.');
+    final selected = <String, String>{};
+    for (final rawItem in raw) {
+      final value = asMap(rawItem);
+      final id = value['entryId'] as String;
+      if (selected.containsKey(id))
+        throw const FormatException('Duplicate batch object.');
+      selected[id] = value['revisionId'] as String;
+    }
+    final prepared = source is CollectionBatchPreparation
+        ? await (source as CollectionBatchPreparation).prepareMany(selected)
+        : null;
     final items = <CatalogItem?>[], results = <Map<String, Object?>>[];
-    final seen = <String>{};
     var total = 0;
     for (var i = 0; i < raw.length; i++) {
       final value = asMap(raw[i]),
           id = value['entryId'] as String,
           revision = value['revisionId'] as String,
           sourceId = value['sourceId'] as String;
-      if (!seen.add(id)) throw const FormatException('Duplicate batch object.');
       CatalogItem? item;
       var status = 200;
       try {
-        item = await source.prepare(id, revision);
+        item = prepared == null
+            ? await source.prepare(id, revision)
+            : prepared[id];
+        if (item == null) throw StateError('Selected object unavailable.');
         if (item.entryId != id ||
             item.sourceId != sourceId ||
             item.revisionId != revision ||
@@ -849,11 +864,18 @@ class SyncClient {
   BackgroundTransfer? backgroundTransfer;
   bool enableSmallFileBatches = true;
   bool? _smallBatchesAvailable;
+  int _smallBatchObjectBytes = SmallFileBatchLimits.legacyObjectBytes;
   Future<bool> _supportsSmallBatches(HttpClient http) async {
     if (!enableSmallFileBatches) return false;
     if (_smallBatchesAvailable != null) return _smallBatchesAvailable!;
     try {
       final value = await _json(http, '/v2/transfer-capabilities');
+      final limit = value['smallFileObjectBytes'];
+      _smallBatchObjectBytes = limit is int &&
+              limit >= SmallFileBatchLimits.legacyObjectBytes &&
+              limit <= SmallFileBatchLimits.objectBytes
+          ? limit
+          : SmallFileBatchLimits.legacyObjectBytes;
       return _smallBatchesAvailable = value['smallFileBatch'] == 1;
     } on SyncProtocolException catch (error) {
       if (error.status != 404) rethrow;
@@ -1182,6 +1204,10 @@ class SyncClient {
         }
         pendingById
             .addEntries(pending.map((item) => MapEntry(item.entryId, item)));
+        if (transfer is BackgroundTransferBatchLimits) {
+          (transfer as BackgroundTransferBatchLimits).smallFileObjectBytes =
+              _smallBatchObjectBytes;
+        }
         await transfer.enqueue(
             namespace: _transferNamespace,
             origin: baseUri,
@@ -1321,6 +1347,10 @@ class SyncClient {
             pending.add(item);
           }
         }
+        if (transfer is BackgroundTransferBatchLimits) {
+          (transfer as BackgroundTransferBatchLimits).smallFileObjectBytes =
+              _smallBatchObjectBytes;
+        }
         await transfer.enqueue(
             namespace: _transferNamespace,
             origin: baseUri,
@@ -1337,12 +1367,13 @@ class SyncClient {
         };
         for (final item in targets) {
           if (online[item.sourceId] == true &&
-              item.length <= SmallFileBatchLimits.objectBytes &&
+              item.length <= _smallBatchObjectBytes &&
               (item.hash == null ||
                   !await replica.objects.hasVerifiedObject(item.object)))
             pending.add(item);
         }
-        for (final batch in planSmallFileBatches(pending)) {
+        for (final batch in planSmallFileBatches(pending,
+            objectBytes: _smallBatchObjectBytes)) {
           cancellation?.check();
           try {
             final prepared = await _readBody(

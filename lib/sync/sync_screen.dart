@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
@@ -98,7 +100,7 @@ class _SyncScreenState extends State<SyncScreen> {
           padding: const EdgeInsets.all(20),
           children: [
             if (sync.initializationError != null)
-              _status(sync.initializationError!),
+              _status(sync.initializationError!, error: true),
             if (_desktop)
               _card('连接我的 iPad', [
                 Text(
@@ -199,7 +201,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         : '扫描电脑二维码',
                   ),
                 ),
-                if (_scanMessage != null) _status(_scanMessage!),
+                if (_scanMessage != null) _status(_scanMessage!, error: true),
               ]),
             ExpansionTile(
               title: const Text('高级诊断（通常不需要）'),
@@ -384,11 +386,20 @@ class _SyncScreenState extends State<SyncScreen> {
       ),
     ),
   );
-  Widget _status(String message) => Container(
+  Widget _status(String message, {bool error = false}) => Container(
     width: double.infinity,
     padding: const EdgeInsets.all(12),
-    color: const Color(0xffffedcf),
-    child: Text(message),
+    color: error
+        ? ScoreTokens.of(context).dangerBg
+        : ScoreTokens.of(context).warnBg,
+    child: Text(
+      message,
+      style: TextStyle(
+        color: error
+            ? ScoreTokens.of(context).dangerInk
+            : ScoreTokens.of(context).warnInk,
+      ),
+    ),
   );
 }
 

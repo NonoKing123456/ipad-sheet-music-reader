@@ -212,6 +212,36 @@ void main() {
     await root.delete(recursive: true);
   });
 
+  test('negotiated grouping cap crosses the native boundary without changing old defaults', () async {
+    final limits = <int>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          expect(call.method, 'enqueue');
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          limits.add(args['smallFileObjectBytes'] as int);
+          expect(args['smallFileBatches'], isTrue);
+          return null;
+        });
+    Future<void> enqueue() => transfer.enqueue(
+      namespace: client.backgroundTransferNamespace,
+      origin: client.baseUri,
+      bearerToken: 'synthetic-only',
+      items: [source.item('a')],
+      prepare: true,
+      smallFileBatches: true,
+      cancellation: null,
+    );
+    await enqueue();
+    transfer.smallFileObjectBytes = 1024 * 1024;
+    await enqueue();
+    expect(limits, [256 * 1024, 1024 * 1024]);
+    expect(
+      () => transfer.smallFileObjectBytes = 1024 * 1024 + 1,
+      throwsArgumentError,
+    );
+    expect(() => transfer.smallFileObjectBytes = 1, throwsArgumentError);
+  });
+
   test('whole selected batch is queued before waiting; only verified imports are acknowledged', () async {
     final result = await client.syncCollection(view);
     expect(result.status, LibrarySyncStatus.complete);

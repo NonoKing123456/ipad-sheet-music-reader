@@ -5,20 +5,24 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'tokens.dart';
+
 /// App chrome only. Score pixels and annotation colours retain their originals.
+///
+/// 所有颜色都来自 [ScoreTokens]（见 DESIGN.md）。这里不再出现十六进制字面量。
 ThemeData scoreReaderTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
+  final tokens = dark ? ScoreTokens.dark : ScoreTokens.light;
   final scheme = ColorScheme.fromSeed(
-    seedColor: const Color(0xff236459),
+    seedColor: tokens.pine,
     brightness: brightness,
-    surface: dark ? const Color(0xff171c1a) : const Color(0xfffaf9f5),
+    surface: tokens.paper0,
   );
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    scaffoldBackgroundColor: dark
-        ? const Color(0xff111613)
-        : const Color(0xffeeede7),
+    scaffoldBackgroundColor: tokens.paper1,
+    extensions: [tokens],
     visualDensity: VisualDensity.standard,
     materialTapTargetSize: MaterialTapTargetSize.padded,
     appBarTheme: AppBarTheme(
@@ -124,18 +128,21 @@ class ThemeAction extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = ThemeScope.maybeOf(context);
     if (controller == null) return const SizedBox.shrink();
-    return PopupMenuButton<ThemeMode>(
+    bool currentDark() => switch (controller.mode) {
+      ThemeMode.dark => true,
+      ThemeMode.light => false,
+      ThemeMode.system => Theme.of(context).brightness == Brightness.dark,
+    };
+    final dark = currentDark();
+    return IconButton(
       key: const ValueKey('theme-action'),
-      tooltip: controller.mode == ThemeMode.system ? '外观 · 跟随系统' : '外观',
-      icon: Icon(
-        Theme.of(context).brightness == Brightness.dark
-            ? Icons.dark_mode_outlined
-            : Icons.light_mode_outlined,
-      ),
-      initialValue: controller.mode,
-      onSelected: (mode) async {
+      tooltip: dark ? '切换到浅色' : '切换到深色',
+      icon: Icon(dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined),
+      onPressed: () async {
         try {
-          await controller.setMode(mode);
+          await controller.setMode(
+            currentDark() ? ThemeMode.light : ThemeMode.dark,
+          );
         } catch (_) {
           if (context.mounted) {
             ScaffoldMessenger.maybeOf(context)
@@ -143,31 +150,6 @@ class ThemeAction extends StatelessWidget {
           }
         }
       },
-      itemBuilder: (_) => [
-        for (final entry in const [
-          (ThemeMode.system, Icons.brightness_auto_outlined, '跟随系统'),
-          (ThemeMode.light, Icons.light_mode_outlined, '浅色'),
-          (ThemeMode.dark, Icons.dark_mode_outlined, '深色'),
-        ])
-          PopupMenuItem(
-            value: entry.$1,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  width: 24,
-                  child: controller.mode == entry.$1
-                      ? const Icon(Icons.check, size: 18)
-                      : null,
-                ),
-                const SizedBox(width: 8),
-                Icon(entry.$2, size: 20),
-                const SizedBox(width: 12),
-                Text(entry.$3),
-              ],
-            ),
-          ),
-      ],
     );
   }
 }

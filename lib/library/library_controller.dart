@@ -175,6 +175,23 @@ Future<CatalogMaterialization> _materializeInWorker(
   }
 });
 
+Future<CatalogBatchMaterialization> _materializeManyInWorker(
+  String root,
+  String state,
+  Map<String, String> selected,
+  CatalogPublication expected,
+) => Isolate.run(() async {
+  for (var attempt = 0; ; attempt++) {
+    try {
+      final catalog = await _openCatalog(root, state);
+      return await catalog.materializeManyForPublication(selected, expected);
+    } on ConcurrentCatalogWriteException {
+      if (attempt == 3) rethrow;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    }
+  }
+});
+
 class _AddedSource {
   _AddedSource(this.id, this.name, this.root, this.catalog);
   final String id, name, root;
@@ -517,9 +534,147 @@ class LibraryController extends ChangeNotifier {
     return result.future;
   }
 
+  /// Bulk host path shares the scan-yield queue and one worker per source.
+  Future<Map<String, LibraryEntry>> prepareManyForRead(
+    Map<String, String> selected,
+  ) async {
+    if (selected.isEmpty || selected.length > 64) {
+      throw ArgumentError('Invalid preparation batch.');
+    }
+    final epoch = _epoch;
+    snapshot;
+    final groups = <String, Map<String, String>>{};
+    for (final request in selected.entries) {
+      final owner = _owners[request.key];
+      if (owner != null &&
+          owner.$1.online &&
+          owner.$2.currentRevisionId == request.value) {
+        (groups[owner.$1.id] ??= {})[request.key] = request.value;
+      }
+    }
+    final ready = <String, LibraryEntry>{};
+    for (final group in groups.entries) {
+      final pending = <String, String>{};
+      for (final request in group.value.entries) {
+        final owner = _owners[request.key]!;
+        try {
+          final entry = await owner.$1.catalog.readyIfUnchanged(owner.$2.id);
+          if (_disposed || epoch != _epoch) {
+            throw StateError('Source changed.');
+          }
+          if (entry != null) {
+            ready[request.key] = entry;
+          } else {
+            pending[request.key] = request.value;
+          }
+        } catch (_) {
+          /* Worker reports this file without aborting siblings. */
+          pending[request.key] = request.value;
+        }
+      }
+      if (_disposed || epoch != _epoch) {
+        throw StateError('Source changed.');
+      }
+      if (pending.isEmpty) continue;
+      final owner = _owners[pending.keys.first]!;
+      final root = owner.$1.catalog.rootPath,
+          state = owner.$1.catalog.statePath;
+      final key = _catalogJobKey(state);
+      final result = Completer<void>();
+      final previous = _foregroundTasks[key] ?? Future<void>.value();
+      late Future<void> task;
+      task = previous.catchError((Object _) {}).then((_) async {
+        try {
+          if (_disposed || epoch != _epoch) throw StateError('Source changed.');
+          final scan = _scanJobs[key];
+          if (scan != null) {
+            scan.requestYield();
+            try {
+              await scan.done.future;
+            } catch (_) {
+              /* Reload durable base. */
+            }
+          }
+          snapshot;
+          final fresh = _owners[pending.keys.first];
+          if (fresh == null || fresh.$1.catalog.rootPath != root) {
+            throw StateError('Source changed.');
+          }
+          final local = fresh.$1.catalog, before = fresh.$1.catalog.snapshot;
+          final localSelected = <String, String>{};
+          for (final request in pending.entries) {
+            final current = _owners[request.key];
+            if (current != null &&
+                current.$1.id == group.key &&
+                current.$2.currentRevisionId == request.value) {
+              localSelected[current.$2.id] = request.value;
+            }
+          }
+          if (localSelected.isNotEmpty) {
+            final patch = await _materializeManyInWorker(
+              root,
+              state,
+              localSelected,
+              local.publication,
+            );
+            if (_disposed || epoch != _epoch) {
+              throw StateError('Source changed.');
+            }
+            if (await local.applyBatchMaterialization(patch)) {
+              if (!identical(before, local.snapshot)) {
+                _patchCombinedMany(group.key, patch.entries.values, before);
+                notifyListeners();
+              }
+            } else {
+              await _adoptCatalog(
+                group.key,
+                patch.fallback ?? await _openInWorker(root, state),
+              );
+            }
+            snapshot;
+            for (final request in pending.entries) {
+              final current = _owners[request.key];
+              if (current == null ||
+                  current.$2.currentRevisionId != request.value) {
+                continue;
+              }
+              try {
+                final entry = await current.$1.catalog.readyIfUnchanged(
+                  current.$2.id,
+                );
+                if (entry != null) ready[request.key] = entry;
+              } catch (_) {
+                /* Keep successful siblings. */
+              }
+            }
+          }
+          result.complete();
+        } catch (error, stack) {
+          result.completeError(error, stack);
+        }
+      });
+      _foregroundTasks[key] = task;
+      unawaited(
+        task.whenComplete(() {
+          if (identical(_foregroundTasks[key], task)) {
+            _foregroundTasks.remove(key);
+          }
+        }),
+      );
+      await result.future;
+    }
+    return ready;
+  }
+
   void _patchCombined(
     String sourceId,
     LibraryEntry entry,
+    LibrarySnapshot base,
+  ) => _patchCombinedMany(sourceId, [entry], base);
+
+  void _patchCombinedMany(
+    String sourceId,
+    Iterable<LibraryEntry> entries,
     LibrarySnapshot base,
   ) {
     if (_combined == null) return;
@@ -533,13 +688,17 @@ class LibraryController extends ChangeNotifier {
       return;
     }
     final source = currentSources.firstWhere((s) => s.id == sourceId);
-    final external = _external(source, entry);
-    _owners[external.id] = (source, entry);
-    _externalEntries[external.id] = external;
-    _searchText[external.id] = '${source.name}/${entry.relativePath}'
-        .toLowerCase();
-    _combined = _combined!.replacingEntry(
-      external,
+    final replacements = <String, LibraryEntry>{};
+    for (final entry in entries) {
+      final external = _external(source, entry);
+      replacements[external.id] = external;
+      _owners[external.id] = (source, entry);
+      _externalEntries[external.id] = external;
+      _searchText[external.id] = '${source.name}/${entry.relativePath}'
+          .toLowerCase();
+    }
+    _combined = _combined!.replacingEntries(
+      replacements.values,
       generation: currentSources.fold(
         0,
         (n, s) => n + s.catalog.snapshot.generation,
@@ -555,9 +714,7 @@ class LibraryController extends ChangeNotifier {
       _listingKey = (_combined!, listingKey.$2, listingKey.$3);
       _listing = FolderListing(
         folders: _listing!.folders,
-        entries: [
-          for (final e in _listing!.entries) e.id == external.id ? external : e,
-        ],
+        entries: [for (final e in _listing!.entries) replacements[e.id] ?? e],
       );
     }
     final searchKey = _searchKey;
@@ -570,7 +727,7 @@ class LibraryController extends ChangeNotifier {
         searchKey.$5,
       );
       _searchResults = [
-        for (final e in _searchResults) e.id == external.id ? external : e,
+        for (final e in _searchResults) replacements[e.id] ?? e,
       ];
     }
   }

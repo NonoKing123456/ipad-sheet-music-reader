@@ -30,7 +30,11 @@ import '../sync/sync_controller.dart';
 import '../sync/sync_screen.dart';
 import '../sync/offline_library_screen.dart';
 import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../sharing/score_share.dart';
+
+const sidebarWidth = 260.0;
+const dividerWidth = 1.0;
 
 Future<String> _hashExternalFile(String path) async =>
     (await sha256.bind(File(path).openRead()).first).toString();
@@ -61,7 +65,12 @@ class _HostLibraryIcon extends StatelessWidget {
       width: 44,
       height: 44,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(4, 5, 8, 7),
+        padding: const EdgeInsets.fromLTRB(
+          ScoreSpace.xs,
+          ScoreSpace.xs,
+          ScoreSpace.sm,
+          ScoreSpace.sm,
+        ),
         child: Icon(
           isFolder
               ? Icons.folder_outlined
@@ -69,7 +78,7 @@ class _HostLibraryIcon extends StatelessWidget {
               ? Icons.image_outlined
               : Icons.description_outlined,
           size: 32,
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          color: ScoreTokens.of(context).ink500,
         ),
       ),
     );
@@ -631,7 +640,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 ? Row(
                     children: [
                       const SizedBox(
-                        width: 261,
+                        width: sidebarWidth + dividerWidth,
                         child: Text(
                           '曲谱库',
                           style: TextStyle(fontWeight: FontWeight.w600),
@@ -667,12 +676,12 @@ class _LibraryScreenState extends State<LibraryScreen>
                     ],
                   ),
             actions: [
-              const ThemeAction(),
               IconButton(
                 tooltip: _searchOpen ? '关闭搜索' : '搜索',
                 icon: Icon(_searchOpen ? Icons.close : Icons.search),
                 onPressed: _searchOpen ? _closeSearch : _openSearch,
               ),
+              const ThemeAction(),
               IconButton(
                 tooltip: '刷新谱库',
                 icon: const Icon(Icons.refresh),
@@ -749,8 +758,9 @@ class _LibraryScreenState extends State<LibraryScreen>
               ? _welcome(library)
               : Row(
                   children: [
-                    if (wide) SizedBox(width: 260, child: _sidebar(library)),
-                    if (wide) const VerticalDivider(width: 1),
+                    if (wide)
+                      SizedBox(width: sidebarWidth, child: _sidebar(library)),
+                    if (wide) const VerticalDivider(width: dividerWidth),
                     Expanded(
                       child: GestureDetector(
                         behavior: HitTestBehavior.translucent,
@@ -770,32 +780,31 @@ class _LibraryScreenState extends State<LibraryScreen>
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 650),
         child: Padding(
-          padding: const EdgeInsets.all(36),
+          padding: const EdgeInsets.all(ScoreSpace.xxl),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
                 Icons.library_music_outlined,
                 size: 64,
-                color: Theme.of(context).colorScheme.primary,
+                color: ScoreTokens.of(context).pine,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: ScoreSpace.xl),
               Text(
                 _canProvideLibrary ? '你的文件夹，就是你的谱库' : '把整个谱库带在身边',
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w600),
+                style: ScoreText.display,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: ScoreSpace.md),
               Text(
                 _canProvideLibrary
                     ? '选择存放 PDF 或图片的文件夹。'
                     : '连接电脑更新目录，再选择要带走的文件夹或曲谱。\n已下载的曲谱、批注和曲单可断网使用。',
                 textAlign: TextAlign.center,
-                style: TextStyle(
-                  height: 1.8,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                style: ScoreText.body.copyWith(
+                  color: ScoreTokens.of(context).ink500,
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: ScoreSpace.xl),
               FilledButton.icon(
                 onPressed: _selectRoot,
                 icon: const Icon(Icons.folder_open_outlined),
@@ -803,12 +812,10 @@ class _LibraryScreenState extends State<LibraryScreen>
               ),
               if (library.error != null)
                 Padding(
-                  padding: const EdgeInsets.only(top: 18),
+                  padding: const EdgeInsets.only(top: ScoreSpace.lg),
                   child: Text(
                     library.error!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
+                    style: TextStyle(color: ScoreTokens.of(context).dangerInk),
                   ),
                 ),
             ],
@@ -834,25 +841,29 @@ class _LibraryScreenState extends State<LibraryScreen>
       ],
     ];
     return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      color: ScoreTokens.of(context).paper2,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(18, 20, 18, 14),
+            padding: const EdgeInsets.fromLTRB(
+              ScoreSpace.lg,
+              ScoreSpace.xl,
+              ScoreSpace.lg,
+              ScoreSpace.lg,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   '文件夹',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                  style: ScoreText.body.copyWith(fontWeight: FontWeight.w700),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: ScoreSpace.sm),
                 Text(
                   '${library.selectedSourceCount} 份曲谱 · ${library.folders.length - 1} 个文件夹',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    fontSize: 12,
+                  style: ScoreText.caption.copyWith(
+                    color: ScoreTokens.of(context).ink500,
                   ),
                 ),
               ],
@@ -892,7 +903,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
           ),
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(ScoreSpace.lg),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -905,14 +916,13 @@ class _LibraryScreenState extends State<LibraryScreen>
                         p.basename(library.rootPath!),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    style: ScoreText.micro.copyWith(
+                      color: ScoreTokens.of(context).ink700,
                     ),
                   ),
                 ),
                 if (defaultTargetPlatform == TargetPlatform.windows) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: ScoreSpace.md),
                   SigningExpiryChip(
                     pairedDevice: true,
                     pairedStatus: _sync?.signingStatus,
@@ -928,11 +938,6 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  String _parent(String folder) {
-    final index = folder.lastIndexOf('/');
-    return index < 0 ? '' : folder.substring(0, index);
-  }
-
   Widget _folderNode(LibraryController library, String folder, int depth) {
     final children = _hierarchy!.childrenOf(folder);
     final expanded = !_collapsedFolders.contains(folder);
@@ -943,7 +948,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       child: ListTile(
         dense: true,
         selected: selected,
-        selectedTileColor: Theme.of(context).colorScheme.secondaryContainer,
+        selectedTileColor: ScoreTokens.of(context).pineWash,
         leading: const _HostLibraryIcon.folder(),
         title: Tooltip(
           message: folder.isEmpty ? library.rootPath! : folder,
@@ -975,29 +980,24 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  double mathIndent(int depth) => (depth * 12.0).clamp(0, 132);
+  double mathIndent(int depth) => (depth * ScoreSpace.md).clamp(0, 132);
 
   Widget _content(LibraryController library) => Column(
     children: [
       Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.md),
         child: Row(
           children: [
             Expanded(
-              child: DirectoryParentButton(
-                currentPath: library.currentFolder,
-                parentLabel: _parent(library.currentFolder).isEmpty
-                    ? library.selectedSource?.name ?? '谱库'
-                    : p.posix.basename(_parent(library.currentFolder)),
+              child: DirectoryBreadcrumbs(
                 rootLabel: library.selectedSource?.name ?? '谱库',
-                onPressed: library.currentFolder.isEmpty
-                    ? null
-                    : () => _folder(_parent(library.currentFolder)),
+                currentPath: library.currentFolder,
+                onNavigate: _folder,
               ),
             ),
             if (library.searching)
               InkWell(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: ScoreRadius.controlAll,
                 onTap: () =>
                     library.setSearchScope(!library.searchCurrentFolder),
                 child: Semantics(
@@ -1006,10 +1006,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                   child: ExcludeSemantics(
                     child: Row(
                       children: [
-                        const Text(
-                          '当前文件夹及子文件夹',
-                          style: TextStyle(fontSize: 12),
-                        ),
+                        const Text('当前文件夹及子文件夹', style: ScoreText.caption),
                         IgnorePointer(
                           child: Checkbox(
                             value: library.searchCurrentFolder,
@@ -1056,17 +1053,20 @@ class _LibraryScreenState extends State<LibraryScreen>
     child: InkWell(
       onTap: action,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        padding: const EdgeInsets.symmetric(
+          horizontal: ScoreSpace.xl,
+          vertical: ScoreSpace.sm,
+        ),
         child: Row(
           children: [
             Icon(icon, size: 18),
-            const SizedBox(width: 10),
+            const SizedBox(width: ScoreSpace.sm),
             Expanded(
               child: Text(
                 text,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12),
+                style: ScoreText.note,
               ),
             ),
             const Icon(Icons.chevron_right, size: 18),
@@ -1087,9 +1087,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               : library.searching
               ? '没有找到匹配的曲谱'
               : '这个文件夹里还没有曲谱',
-          style: TextStyle(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+          style: TextStyle(color: ScoreTokens.of(context).ink500),
         ),
       );
     }
@@ -1099,16 +1097,22 @@ class _LibraryScreenState extends State<LibraryScreen>
         library.currentFolder,
         library.query,
       )),
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+      padding: const EdgeInsets.fromLTRB(
+        ScoreSpace.lg,
+        ScoreSpace.sm,
+        ScoreSpace.lg,
+        ScoreSpace.xl,
+      ),
       itemCount: subfolders.length + entries.length,
-      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
+      separatorBuilder: (_, _) =>
+          const Divider(height: 1, indent: ScoreSpace.huge + ScoreSpace.sm),
       itemBuilder: (context, index) {
         if (index < subfolders.length) {
           final folder = subfolders[index];
           return ListTile(
             leading: const _HostLibraryIcon.folder(),
             title: Text(p.posix.basename(folder)),
-            subtitle: Text(folder, style: const TextStyle(fontSize: 12)),
+            subtitle: Text(folder, style: ScoreText.caption),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => _folder(folder),
           );
@@ -1117,7 +1121,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         return ListTile(
           minTileHeight: 72,
           contentPadding: const EdgeInsets.symmetric(
-            horizontal: 12,
+            horizontal: ScoreSpace.md,
             vertical: 0,
           ),
           leading: _HostLibraryIcon(path: entry.relativePath),
@@ -1133,9 +1137,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              style: ScoreText.caption.copyWith(
+                color: ScoreTokens.of(context).ink500,
               ),
             ),
           ),

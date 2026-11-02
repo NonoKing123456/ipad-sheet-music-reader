@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -143,6 +145,9 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                           painter: ReaderPageDotsPainter(
                             page: widget.currentPage,
                             pages: widget.pageCount,
+                            ink: ScoreTokens.of(context).ink300,
+                            markerFill: ScoreTokens.of(context).pine,
+                            markerOutline: ScoreTokens.of(context).ink900,
                           ),
                         ),
                       ),
@@ -151,9 +156,9 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                           alignment: Alignment.topCenter,
                           child: Text(
                             '$_preview / ${widget.pageCount}',
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Color(0xff52615c),
+                            style: ScoreText.micro.copyWith(
+                              color: ScoreTokens.of(context).ink900,
+                              backgroundColor: ScoreTokens.of(context).paper0,
                             ),
                           ),
                         ),
@@ -170,30 +175,37 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
 }
 
 class ReaderPageDotsPainter extends CustomPainter {
-  const ReaderPageDotsPainter({required this.page, required this.pages});
+  const ReaderPageDotsPainter({
+    required this.page,
+    required this.pages,
+    required this.ink,
+    required this.markerFill,
+    required this.markerOutline,
+  });
   final int page, pages;
+  final Color ink, markerFill, markerOutline;
   int get dotCount => pages.clamp(1, 60);
   @override
   void paint(Canvas canvas, Size size) {
     final dots = readerSeekDotCount(pages, size.width),
         length = (dots - 1) * 18.0;
     final left = (size.width - length) / 2;
-    final ink = Paint()..color = const Color(0x9952615c);
+    final paint = Paint()..color = ink;
     for (var dot = 0; dot < dots; dot++) {
       final x = dots == 1 ? size.width / 2 : left + length * dot / (dots - 1);
-      canvas.drawCircle(Offset(x, 28), 3, ink);
+      canvas.drawCircle(Offset(x, 28), 3, paint);
     }
     final progress = pages <= 1 ? .5 : (page - 1) / (pages - 1);
     final centre = Offset(
       pages <= 1 ? size.width / 2 : left + length * progress,
       28,
     );
-    canvas.drawCircle(centre, 5, Paint()..color = Colors.white);
+    canvas.drawCircle(centre, 5, Paint()..color = markerFill);
     canvas.drawCircle(
       centre,
       5,
       Paint()
-        ..color = const Color(0xff52615c)
+        ..color = markerOutline
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1,
     );
@@ -201,5 +213,9 @@ class ReaderPageDotsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant ReaderPageDotsPainter oldDelegate) =>
-      page != oldDelegate.page || pages != oldDelegate.pages;
+      page != oldDelegate.page ||
+      pages != oldDelegate.pages ||
+      ink != oldDelegate.ink ||
+      markerFill != oldDelegate.markerFill ||
+      markerOutline != oldDelegate.markerOutline;
 }

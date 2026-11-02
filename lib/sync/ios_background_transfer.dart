@@ -7,7 +7,10 @@ import 'package:library_sync/library_sync.dart';
 /// The OS owns the whole batch before any file is awaited. Polling only updates
 /// the foreground UI; URLSession and its native delegates advance without Dart.
 class IosBackgroundTransfer
-    implements BackgroundTransfer, BackgroundTransferBatchAcknowledger {
+    implements
+        BackgroundTransfer,
+        BackgroundTransferBatchAcknowledger,
+        BackgroundTransferBatchLimits {
   IosBackgroundTransfer({
     MethodChannel? channel,
     this.pollInterval = const Duration(milliseconds: 300),
@@ -17,6 +20,15 @@ class IosBackgroundTransfer
       if (call.method == 'changed') onChanged?.call();
     });
   }
+  int _smallFileObjectBytes = 256 * 1024;
+  @override
+  set smallFileObjectBytes(int bytes) {
+    if (bytes < 256 * 1024 || bytes > 1024 * 1024) {
+      throw ArgumentError('Invalid batch object limit.');
+    }
+    _smallFileObjectBytes = bytes;
+  }
+
   final MethodChannel channel;
   final Duration pollInterval;
   void Function()? onChanged;
@@ -65,6 +77,7 @@ class IosBackgroundTransfer
       'token': bearerToken,
       'prepare': prepare,
       'smallFileBatches': smallFileBatches,
+      'smallFileObjectBytes': _smallFileObjectBytes,
       'selection': selection?.toJson(),
       'items': items.map((item) => item.toJson()).toList(),
     });

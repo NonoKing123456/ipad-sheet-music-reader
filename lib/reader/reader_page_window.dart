@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import '../theme/tokens.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -548,14 +550,14 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                   _incoming == null &&
                   !(_surfaces[_requested]?.ready ?? false) &&
                   _surfaces[_requested]?.error == null)
-                const Positioned(
-                  key: ValueKey('reader-render-loading'),
+                Positioned(
+                  key: const ValueKey('reader-render-loading'),
                   right: 12,
                   bottom: 12,
                   child: Material(
-                    color: Color(0xddeeeeee),
-                    shape: CircleBorder(),
-                    child: Padding(
+                    color: ScoreTokens.of(context).paper0,
+                    shape: const CircleBorder(),
+                    child: const Padding(
                       padding: EdgeInsets.all(10),
                       child: SizedBox(
                         width: 16,
@@ -591,15 +593,24 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   Widget _renderErrorDetails() {
     final surface = _surfaces[_requested]!;
     return Material(
-      color: const Color(0xffffedcf),
+      color: ScoreTokens.of(context).dangerBg,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Flexible(child: Text(surface.error!, textAlign: TextAlign.center)),
+            Flexible(
+              child: Text(
+                surface.error!,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: ScoreTokens.of(context).dangerInk),
+              ),
+            ),
             TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: ScoreTokens.of(context).dangerInk,
+              ),
               onPressed: () => setState(() {
                 final s = surface;
                 s.error = null;
