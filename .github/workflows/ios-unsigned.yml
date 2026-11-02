@@ -22,7 +22,7 @@ concurrency:
 jobs:
   build:
     if: ${{ github.repository == 'NonoKing123456/ipad-sheet-music-reader' && github.repository_owner == 'NonoKing123456' && github.event.repository.private == false && (github.event_name == 'push' || (github.actor == github.repository_owner && inputs.public_source_confirmed == true)) }}
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 25
     permissions:
       contents: write # Only needed to publish the unsigned prerelease assets.
@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: ff1571c1eb0d33fc4b06a51a818e7ad8ed144b0f83a4559e60a24162ffd4ffee
+      REVIEWED_SOURCE_SHA256: f71ba4c052018077659767a89c7b15a890004ed4c81392de8fa424ea65bc6a33
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,7 +44,7 @@ jobs:
       - name: Install the fixed official Flutter SDK
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = x86_64
           test -d "$DEVELOPER_DIR"
           test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.6'
           git clone --depth 1 --branch "$FLUTTER_VERSION" \

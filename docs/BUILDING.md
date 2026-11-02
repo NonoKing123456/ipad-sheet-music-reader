@@ -11,7 +11,7 @@
 | Dart SDK 约束 | `^3.13.0` |
 | Windows | Windows x64、Visual Studio C++ 桌面开发组件、Windows SDK |
 | iOS 本地构建 | macOS、Xcode `26.6` |
-| iOS 云构建 | `macos-26` arm64、Xcode `26.6`，设备目标 iOS / arm64 |
+| iOS 云构建 | `macos-26-intel` x86_64 主机、同 Xcode `26.6`，设备目标仍为 iOS / arm64 |
 | 依赖版本 | 根 `pubspec.lock`，按锁文件解析 |
 
 这些是当前项目配置，不是对最新工具版本的推荐。升级 SDK、Xcode 或锁文件应单独审查。以下命令在仓库根目录运行，`flutter`、`dart` 应在 PATH 中。

@@ -284,6 +284,8 @@ class AnnotationCanvas extends StatefulWidget {
     this.mouseControlKey,
     this.textPreview,
     this.hiddenTextId,
+    this.onInteractionStart,
+    this.clipToPage = false,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -291,6 +293,8 @@ class AnnotationCanvas extends StatefulWidget {
   final StrokeStyle style;
   final bool eraser;
   final bool suspended;
+  final bool clipToPage;
+  final VoidCallback? onInteractionStart;
   final GlobalKey? mouseControlKey;
   final TextAnnotation? textPreview;
   final String? hiddenTextId;
@@ -428,6 +432,16 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
 
   void _sample(Offset position, Size size, {bool exact = false}) {
     if (_paused || size.isEmpty) return;
+    if (widget.clipToPage &&
+        (position.dx < 0 ||
+            position.dx > size.width ||
+            position.dy < 0 ||
+            position.dy > size.height)) {
+      _finishSegment();
+      _previousErase = null;
+      _cursor = null;
+      return;
+    }
     final clamped = Offset(
       position.dx.clamp(0.0, size.width),
       position.dy.clamp(0.0, size.height),
@@ -491,6 +505,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     _style = widget.style;
     _erasing = widget.eraser || event.kind == PointerDeviceKind.invertedStylus;
     _radius = widget.eraserRadiusFraction;
+    widget.onInteractionStart?.call();
     widget.onWritingChanged?.call(true);
     setState(() => _sample(event.localPosition, size));
   }

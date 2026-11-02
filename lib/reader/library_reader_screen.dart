@@ -105,6 +105,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   int _direction = 1;
   Duration? _requestedAt;
   PageKey? _visiblePage;
+  // The spread remains one reading position; undo and text selection follow
+  // the paper that actually accepted the most recent annotation interaction.
+  PageKey? _annotationPage;
+  PageKey? get _annotationTarget => _annotationPage ?? _visiblePage;
   LoadedScore? _visibleDocument;
   final _imageInfos = <PageKey, ImageDisplayInfo>{};
   LoadedScore? _prewarmScore;
@@ -392,7 +396,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _sampleButtonKey.currentContext!.findRenderObject()! as RenderBox;
     final overlay =
         Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
-    final page = _visiblePage, generation = _inputGeneration;
+    final page = _annotationTarget, generation = _inputGeneration;
     final sample = _lastSample!;
     setState(() => _sampleMenuOpen = true);
     final choice = await showMenu<String>(
@@ -428,7 +432,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
     if (!mounted) return;
     setState(() => _sampleMenuOpen = false);
-    if (!_editing || generation != _inputGeneration || page != _visiblePage) {
+    if (!_editing ||
+        generation != _inputGeneration ||
+        page != _annotationTarget) {
       return;
     }
     if (choice == 'pick') {
@@ -448,6 +454,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     editing = editing && widget.allowAnnotations;
     setState(() {
       _editing = editing;
+      _annotationPage = editing ? _visiblePage : null;
       if (!editing) {
         _textTool = false;
         _tool = null;
@@ -483,7 +490,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _pickColor(PageKey page, Offset normalized) async {
-    if (!_picking || _sampling || page != _visiblePage) return;
+    if (!_picking || _sampling || page != _annotationTarget) return;
     final epoch = ++_pickEpoch;
     setState(() {
       _sampling = true;
@@ -494,7 +501,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       if (!mounted ||
           epoch != _pickEpoch ||
           !_picking ||
-          page != _visiblePage) {
+          page != _annotationTarget) {
         return;
       }
       if (color == null) {
@@ -746,7 +753,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   ReaderViewMode get _effectiveDesktopMode =>
-      _editing ? ReaderViewMode.single : _desktopMode;
+      _editing && _desktopMode == ReaderViewMode.continuous
+      ? ReaderViewMode.single
+      : _desktopMode;
   FirstPageArrangement _arrangementFor(String entryId) =>
       widget.allowAnnotations
       ? _desktopPreferences?.arrangementFor(entryId) ??
@@ -795,10 +804,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
-  Future<void> _annotationAction({
-    int? pageNumber,
-    DocumentKey? expectedDocument,
-  }) async {
+  Future<void> _annotationAction() async {
     if (_writing) return;
     if (_editing) {
       await _finishAnnotation();
@@ -811,21 +817,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _session.sourceChanged) {
       return;
     }
-    if (expectedDocument != null && expectedDocument != document.target.key) {
-      return;
-    }
-    var selected = pageNumber ?? visible.pageNumber;
-    if (_desktopMode == ReaderViewMode.spread) {
-      final spread = ReaderSpreads(
-        pageCount: document.pageCount,
-        doublePage: true,
-        arrangement: _arrangementFor(document.target.entryId),
-      ).forPage(selected);
-      if (!spread.contains(selected) ||
-          (spread.first != spread.last && pageNumber == null)) {
-        return;
-      }
-    }
+    final selected = visible.pageNumber;
     if (_desktopMode == ReaderViewMode.continuous) {
       _continuousRestore = _continuous.anchor;
       _continuousEditStart = visible;
@@ -966,14 +958,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           pageLabel: pageLabel,
           mode: _effectiveDesktopMode,
           arrangement: grouping.arrangement,
-          annotationPages:
-              !_editing && _effectiveDesktopMode == ReaderViewMode.spread
-              ? shown.pages.toList()
-              : const [],
-          onAnnotatePage: (number) => _annotationAction(
-            pageNumber: number,
-            expectedDocument: document?.target.key,
-          ),
           onMenuChanged: (open) {
             if (mounted && _desktopMenuOpen != open) {
               setState(() => _desktopMenuOpen = open);
@@ -1005,7 +989,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               ? null
               : IgnorePointer(
                   ignoring: _visiblePage != page,
-                  child: _tools(_visiblePage ?? page),
+                  child: _tools(_annotationPage ?? _visiblePage ?? page),
                 ),
           bottom: _footer(),
           notices: _desktopNotices(),
@@ -1228,6 +1212,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _cancelPick();
         _visiblePage = visible;
         _visibleDocument = document;
+        _annotationPage = _editing ? visible : null;
       });
     }
   }
@@ -1271,6 +1256,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       revisionId: document.target.revisionId,
       pageNumber: number,
     );
+    final editableSpread =
+        !isMobileReader &&
+        _effectiveDesktopMode == ReaderViewMode.spread &&
+        identical(document, _visibleDocument) &&
+        _visiblePage != null &&
+        _session.current == document &&
+        ReaderSpreads(
+          pageCount: document.pageCount,
+          doublePage: true,
+          arrangement: _arrangementFor(document.target.entryId),
+        ).forPage(_visiblePage!.pageNumber).contains(number) &&
+        ReaderSpreads(
+          pageCount: document.pageCount,
+          doublePage: true,
+          arrangement: _arrangementFor(document.target.entryId),
+        ).forPage(_session.page).contains(number);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -1330,7 +1331,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             textControls: _textControls,
             topControlsKey: _textToolsKey,
             viewportKey: _viewportKey,
-            selectionKey: surfacePage == _visiblePage
+            selectionKey: surfacePage == (_annotationPage ?? _visiblePage)
                 ? _textSelectionKey
                 : null,
             mouseControlKey: _seekRegionKey,
@@ -1341,11 +1342,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 _editing &&
                 (_tool != null || _textTool) &&
                 (isMobileReader ||
+                    editableSpread ||
                     (_editing &&
                         surfacePage == _visiblePage &&
                         surfacePage == _session.pageKey)) &&
                 !_session.sourceChanged &&
-                (!_textTool || (_editing && surfacePage == _visiblePage)),
+                (!_textTool || editableSpread || surfacePage == _visiblePage),
             textTool: _textTool,
             style: _textTool
                 ? StrokeStyle(
@@ -1357,9 +1359,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             eraser: _tool == ReaderTool.eraser,
             eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
             suspended: _touchTransforming || _picking,
+            clipToPage: editableSpread,
+            transferTextOnTap: editableSpread,
+            onInteractionStart: () {
+              if (editableSpread && _annotationPage != surfacePage) {
+                setState(() => _annotationPage = surfacePage);
+              }
+            },
             onWritingChanged: _writingChanged,
           ),
-        if (_picking && surfacePage == _visiblePage)
+        if (_picking && surfacePage == _annotationTarget)
           PaperColorPickLayer(
             onPick: (point) => unawaited(_pickColor(surfacePage, point)),
           ),
@@ -1541,7 +1550,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return;
     }
     _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
-    if (!isMobileReader && !_editing && _desktopMode == ReaderViewMode.spread) {
+    if (!isMobileReader && _effectiveDesktopMode == ReaderViewMode.spread) {
       final arrangements =
           _desktopPreferences?.arrangements ??
           const <String, FirstPageArrangement>{};
@@ -1583,10 +1592,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       pageCount: _visibleDocument?.pageCount ?? 1,
       enabled: _session.current?.target.key == _visibleDocument?.target.key,
       onCancel: _session.cancelSeek,
-      onSeek: (number, gesture) {
+      onSeek: (number, gesture) async {
         if (_writing ||
             (!_editing && !continuous) ||
             _session.current?.target.key != _visibleDocument?.target.key) {
+          return;
+        }
+        final document = _visibleDocument;
+        if (!await _textControls.finish() ||
+            !mounted ||
+            _visibleDocument != document ||
+            _writing) {
           return;
         }
         if (_picking) setState(_cancelPick);

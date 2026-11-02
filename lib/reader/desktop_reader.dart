@@ -26,8 +26,6 @@ class DesktopReaderShell extends StatefulWidget {
     required this.onJump,
     required this.contentBuilder,
     this.onAnnotate,
-    this.onAnnotatePage,
-    this.annotationPages = const [],
     this.onMenuChanged,
     this.onFinishEditing,
     this.beforeHideTools,
@@ -51,8 +49,6 @@ class DesktopReaderShell extends StatefulWidget {
   final ValueChanged<double> onZoom;
   final VoidCallback? onAnnotate, onFinishEditing;
   final Future<bool> Function()? beforeHideTools;
-  final ValueChanged<int>? onAnnotatePage;
-  final List<int> annotationPages;
   final ValueChanged<bool>? onMenuChanged;
   final Widget? annotationTools;
   final List<Widget> actions;
@@ -79,10 +75,9 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     _hoverAnimation,
   ]);
   final _barKey = GlobalKey();
-  final _arrangementMenu = MenuController(), _annotationMenu = MenuController();
-  ValueChanged<int>? _openAnnotationChoice;
+  final _arrangementMenu = MenuController();
   final _arrangementFocus = FocusNode(debugLabel: 'spread arrangement');
-  final _annotationFocus = FocusNode(debugLabel: 'annotation page picker');
+  final _annotationFocus = FocusNode(debugLabel: 'annotation');
   bool _pinned = true, _hover = false, _menu = false, _measureScheduled = false;
   double _height = 56;
   void _pin(bool value) {
@@ -380,104 +375,13 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                     controller.isOpen ? controller.close() : controller.open(),
         ),
       );
-      final annotate = MenuAnchor(
-        controller: _annotationMenu,
-        childFocusNode: _annotationFocus,
-        reservedPadding: const EdgeInsets.all(12),
-        style: MenuStyle(
-          backgroundColor: WidgetStatePropertyAll(
-            Theme.of(context).colorScheme.surface,
-          ),
-          surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-          side: WidgetStatePropertyAll(
-            BorderSide(color: ScoreTokens.of(context).ink500),
-          ),
-          shape: WidgetStatePropertyAll(
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          ),
-          elevation: const WidgetStatePropertyAll(6),
-          shadowColor: const WidgetStatePropertyAll(Color(0x24000000)),
-          padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
-        ),
-        consumeOutsideTap: true,
-        alignmentOffset: const Offset(0, 8),
-        onOpen: () {
-          _openAnnotationChoice = widget.onAnnotatePage;
-          _overlayChanged(menu: true);
-        },
-        onClose: () => _overlayChanged(menu: false),
-        menuChildren: [
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: SizedBox(
-              width: 300,
-              child: Row(
-                children: [
-                  for (var i = 0; i < widget.annotationPages.length; i++) ...[
-                    if (i > 0) const SizedBox(width: 8),
-                    Expanded(
-                      child: MenuItemButton(
-                        key: ValueKey(
-                          'annotate-page-${widget.annotationPages[i]}',
-                        ),
-                        style: ButtonStyle(
-                          minimumSize: const WidgetStatePropertyAll(
-                            Size(0, 88),
-                          ),
-                          backgroundColor: WidgetStatePropertyAll(
-                            Theme.of(context).colorScheme.surfaceContainerLow,
-                          ),
-                          shape: WidgetStatePropertyAll(
-                            RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                          ),
-                        ),
-                        onPressed: () {
-                          final choose = _openAnnotationChoice;
-                          _annotationMenu.close();
-                          choose?.call(widget.annotationPages[i]);
-                        },
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.description_outlined, size: 26),
-                              const SizedBox(height: 8),
-                              Text(
-                                '${i == 0 ? '左页' : '右页'} · 第${widget.annotationPages[i]}页',
-                                style: const TextStyle(fontSize: 13),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ],
-        builder: (context, controller, _) => _ReaderBarButton(
-          icon: widget.editing ? Icons.check : Icons.edit_outlined,
-          label: widget.editing ? '完成' : '批注',
-          focusNode: _annotationFocus,
-          tooltip: widget.editing ? '完成批注' : '批注',
-          filled: true,
-          onPressed: disabled
-              ? null
-              : () {
-                  if (!widget.editing &&
-                      widget.annotationPages.length == 2 &&
-                      widget.onAnnotatePage != null) {
-                    controller.isOpen ? controller.close() : controller.open();
-                  } else {
-                    widget.onAnnotate?.call();
-                  }
-                },
-        ),
+      final annotate = _ReaderBarButton(
+        icon: widget.editing ? Icons.check : Icons.edit_outlined,
+        label: widget.editing ? '完成' : '批注',
+        focusNode: _annotationFocus,
+        tooltip: widget.editing ? '完成批注' : '批注',
+        filled: true,
+        onPressed: disabled ? null : widget.onAnnotate,
       );
       final back = _ReaderBarButton(
         icon: Icons.arrow_back,
@@ -489,7 +393,6 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         tooltip: '收起工具栏',
         onPressed: () async {
           _arrangementMenu.close();
-          _annotationMenu.close();
           if (widget.beforeHideTools != null &&
               !await widget.beforeHideTools!()) {
             return;

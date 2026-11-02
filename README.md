@@ -8,7 +8,13 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码版本：`0.8.10+32`。Windows `+32` 已交付，完整19成员及 share-v1 校验通过，固定入口、启动器和身份保持；根 iPad 已交付 `+31`，`+32` 等待 Mac 构建。真实 iPad 交互、后台调度和系统分享仍待装机验证。仓库只包含应用与合成测试源码，不附带原谱或用户状态。
+> 当前源码版本：`0.8.10+33`。Windows `+33` 已交付：唯一构建114.2秒，完整19成员逐SHA及share-v1发布通过，固定入口/launcher/Start/cmd保持；根 iPad 为 `+31`。上次 +32 的 run23 因 macOS ARM64 hosted runner 容量限制未开始编译即结束；本轮拟在同 Flutter/Xcode 的 Intel host 构建，iOS 目标仍为 arm64。真实 iPad 交互、后台调度和系统分享仍待装机验证。
+
+## +33 更新
+
+目录路径按真实剩余宽度、字体与系统文字缩放测量：有空间时完整显示所有层级，不再按层数提前折叠；放不下才折叠必要中间层，优先保留根、最近父目录和当前。窄宽文字可省略并提供完整 Tooltip，返回上级为独立48×48触区，省略菜单使用完整路径跳转，窗口变化不会把选择映射到别的目录。公开生产输入已明确补齐共用目录组件，避免只有本机源码具备新API。
+
+桌面双页点击“批注”直接显示工具栏，不再问批注哪页，也不切成左页放大；选工具后按实际落点所在左右页保存，首次落笔即有效，纸间空隙不画。文字、橡皮和撤销按页归属，单页与iPad既有操作保持。
 
 ## +32 更新
 

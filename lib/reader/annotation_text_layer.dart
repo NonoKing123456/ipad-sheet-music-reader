@@ -36,6 +36,9 @@ class AnnotationTextLayer extends StatefulWidget {
     this.textControls,
     this.topControlsKey,
     this.viewportKey,
+    this.onInteractionStart,
+    this.clipToPage = false,
+    this.transferTextOnTap = false,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -46,6 +49,8 @@ class AnnotationTextLayer extends StatefulWidget {
   final TransformationController? transform;
   final ReaderTextEditorController? textControls;
   final ValueChanged<bool>? onWritingChanged;
+  final VoidCallback? onInteractionStart;
+  final bool clipToPage, transferTextOnTap;
   @override
   State<AnnotationTextLayer> createState() => _AnnotationTextLayerState();
 }
@@ -72,6 +77,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   double _slop = kTouchSlop;
   final _touches = <int>{};
   final _paperSessionPointers = <int>{};
+  PointerDownEvent? _transferDown;
   Size _lastSize = Size.zero;
   bool _committing = false;
   int? _pointer, _handlePointer;
@@ -170,10 +176,12 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       _selected = null;
       _controls.release(this);
       _touches.clear();
+      _transferDown = null;
       _cancelPointer(defer: true);
       _cancelHandle(defer: true);
     } else if (!oldWidget.suspended && widget.suspended) {
       _controls.cancelPaperTap();
+      _transferDown = null;
       _cancelPointer(defer: true);
       _cancelHandle(defer: true);
     }
@@ -319,6 +327,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           !_inside(_deleteKey, event.position) &&
           !_handleKeys.values.any((key) => _inside(key, event.position));
       _paperSessionPointers.add(event.pointer);
+      if (widget.transferTextOnTap && !_controls.availableTo(this)) {
+        _transferDown = _paperSessionPointers.length == 1 ? event : null;
+      }
       _controls.paperDown(event, blank: blank);
       return;
     }
@@ -343,6 +354,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       }
     }
     if (_pointer != null) return;
+    widget.onInteractionStart?.call();
     final hit = widget.workspace
         .annotationsFor(widget.page)
         .reversed
@@ -391,6 +403,13 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   void _move(PointerMoveEvent event, Size size) {
     if (_paperSessionPointers.contains(event.pointer)) {
+      final transfer = _transferDown;
+      if (transfer != null &&
+          transfer.pointer == event.pointer &&
+          (event.position - transfer.position).distance >=
+              (event.kind == PointerDeviceKind.touch ? kTouchSlop : 6)) {
+        _transferDown = null;
+      }
       _controls.paperMove(event);
       return;
     }
@@ -418,7 +437,16 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   void _up(PointerUpEvent event, Size size) {
     if (_paperSessionPointers.remove(event.pointer)) {
+      final transfer = _transferDown;
+      if (transfer?.pointer == event.pointer) _transferDown = null;
       _controls.paperUp(event);
+      if (transfer != null &&
+          transfer.pointer == event.pointer &&
+          (event.position - transfer.position).distance <
+              (event.kind == PointerDeviceKind.touch ? kTouchSlop : 6) &&
+          (Offset.zero & size).contains(event.localPosition)) {
+        unawaited(_transferText(transfer.localPosition, size));
+      }
       return;
     }
     _touches.remove(event.pointer);
@@ -439,7 +467,13 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _lastTapId = selected?.id;
     _lastTapTime = selected == null ? null : event.timeStamp;
     _lastTapPosition = selected == null ? null : event.position;
-    final point = _candidate == null && !_dragged ? _origin : null;
+    final point =
+        _candidate == null &&
+            !_dragged &&
+            (!widget.clipToPage ||
+                (Offset.zero & size).contains(event.localPosition))
+        ? _origin
+        : null;
     setState(() {
       _cancelPointer();
       if (selected != null) _selected = selected.id;
@@ -467,6 +501,37 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           (point.dx / size.width).clamp(0.0, 1.0),
           (point.dy / size.height).clamp(0.0, 1.0),
         ),
+      );
+    }
+  }
+
+  // A tap on the other paper first commits the shared controller's owner.
+  // Only a successful commit may acquire this page or open its next draft.
+  Future<void> _transferText(Offset point, Size size) async {
+    final page = widget.page;
+    if (!await _controls.finish() ||
+        !mounted ||
+        widget.page != page ||
+        !_enabled ||
+        !_controls.availableTo(this)) {
+      return;
+    }
+    final hit = widget.workspace
+        .annotationsFor(page)
+        .reversed
+        .whereType<TextAnnotation>()
+        .where(
+          (item) => textAnnotationHit(item, point, size, fontFamily: _family),
+        )
+        .firstOrNull;
+    widget.onInteractionStart?.call();
+    if (hit != null) {
+      setState(() => _selected = hit.id);
+      _bindSelection(hit, size);
+    } else {
+      _editor(
+        size,
+        anchor: NormalizedPoint(point.dx / size.width, point.dy / size.height),
       );
     }
   }
@@ -1230,6 +1295,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           onPointerMove: (e) => _move(e, size),
           onPointerUp: (e) => _up(e, size),
           onPointerCancel: (e) {
+            if (_transferDown?.pointer == e.pointer) _transferDown = null;
             if (_paperSessionPointers.remove(e.pointer)) {
               _controls.paperCancel(e.pointer);
             }
@@ -1252,6 +1318,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                 onWritingChanged: widget.onWritingChanged,
                 textPreview: _editorOpen ? null : _preview,
                 hiddenTextId: _editorOpen ? _draft?.id : null,
+                onInteractionStart: widget.onInteractionStart,
+                clipToPage: widget.clipToPage,
               ),
               if (value != null && frame != null && bounds != null) ...[
                 Positioned.fromRect(
