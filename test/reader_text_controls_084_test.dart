@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/reader/annotation_text_layer.dart';
@@ -94,6 +95,7 @@ class ControlsState extends State<ControlsHarness> {
         panInsets: obstruction,
         textTool: textTool,
         textSelectionKey: selectionKey,
+        textControls: textControls,
         touchControlKey: controlKey,
         mouseInk: true,
         gestureGeneration: generation,
@@ -360,7 +362,7 @@ void main() {
         await tester.pump();
         expect(workspace.store.snapshot.annotationsFor(initialPage), isEmpty);
         await tester.enterText(find.byType(TextField), '中文，Hello! “标点”\n第二行。');
-        await tester.tap(find.byTooltip('完成文字编辑'));
+        await tester.tapAt(const Offset(520, 650));
         await until(
           tester,
           () =>
@@ -527,7 +529,7 @@ void main() {
         await tester.tap(find.byTooltip('编辑文字'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '取消的文字');
-        await tester.tap(find.byTooltip('取消文字编辑'));
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
         expect(workspace.store.snapshot.generation, generation);
         await tester.tap(find.byTooltip('删除文字'));

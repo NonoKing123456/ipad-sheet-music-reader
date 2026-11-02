@@ -3,11 +3,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:reader_state/reader_state.dart';
 
 import 'annotation_canvas.dart';
 import 'reader_text_editing.dart';
 import 'reader_workspace.dart';
+import 'text_rotation_snap.dart';
 
 /// Paper-relative text. Only explicit T mode accepts finger/mouse text actions.
 class AnnotationTextLayer extends StatefulWidget {
@@ -60,9 +62,14 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   Offset? _origin, _globalOrigin;
   double _slop = kTouchSlop;
   final _touches = <int>{};
+  final _paperSessionPointers = <int>{};
+  Size _lastSize = Size.zero;
+  bool _committing = false;
   int? _pointer, _handlePointer;
   bool _dragged = false;
   _TextHandle? _handle;
+  final _rotationSnap = TextRotationSnap();
+  bool _handleMoved = false;
   TextAnnotation? _handleBase;
   Offset? _handleOrigin;
   VoidCallback? _endEditing, _endHandle;
@@ -101,12 +108,14 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     double? width,
     double? rotation,
     AnnotationTextFont? font,
+    int? argb,
   }) => value.revise(
     anchor: anchor,
     fontSizeFraction: size,
     widthFraction: width,
     rotation: rotation,
     font: font,
+    argb: argb,
     now: value.updatedUtc,
     version: value.version,
   );
@@ -116,6 +125,19 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.transform?.addListener(_transformChanged);
+    _focus.onKeyEvent = (_, event) {
+      if (event is KeyDownEvent &&
+          event.logicalKey == LogicalKeyboardKey.escape &&
+          !_committing) {
+        if (_controller.value.composing.isValid &&
+            !_controller.value.composing.isCollapsed) {
+          return KeyEventResult.ignored;
+        }
+        _cancelEditor();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    };
   }
 
   @override
@@ -128,11 +150,15 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (oldWidget.textControls != widget.textControls) {
       oldWidget.textControls?.release(this);
     }
-    if (oldWidget.page != widget.page || !_enabled) {
+    if (oldWidget.page != widget.page || !widget.enabled || !widget.textTool) {
       _closeEditor();
       _selected = null;
       _controls.release(this);
       _touches.clear();
+      _cancelPointer(defer: true);
+      _cancelHandle(defer: true);
+    } else if (!oldWidget.suspended && widget.suspended) {
+      _controls.cancelPaperTap();
       _cancelPointer(defer: true);
       _cancelHandle(defer: true);
     }
@@ -244,6 +270,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _endHandle = null;
     _handlePointer = null;
     _handle = null;
+    _rotationSnap.reset();
+    _handleMoved = false;
     _handleBase = null;
     _handleOrigin = null;
     _preview = null;
@@ -263,10 +291,25 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       (event.kind == PointerDeviceKind.mouse &&
           event.buttons == kPrimaryButton);
   void _down(PointerDownEvent event, Size size) {
+    if (widget.textTool && _controls.editing) {
+      if (readerTextHandleActive ||
+          !_primary(event) ||
+          _inside(widget.topControlsKey, event.position) ||
+          _inside(widget.mouseControlKey, event.position)) {
+        return;
+      }
+      final blank =
+          !_inside(_inputKey, event.position) &&
+          !_handleKeys.values.any((key) => _inside(key, event.position));
+      _paperSessionPointers.add(event.pointer);
+      _controls.paperDown(event, blank: blank);
+      return;
+    }
     if (!_enabled ||
         size.isEmpty ||
         _editorOpen ||
         _handlePointer != null ||
+        _committing ||
         !_controls.availableTo(this) ||
         widget.workspace.savingAnnotations ||
         _handleKeys.values.any((key) => _inside(key, event.position)) ||
@@ -329,6 +372,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   }
 
   void _move(PointerMoveEvent event, Size size) {
+    if (_paperSessionPointers.contains(event.pointer)) {
+      _controls.paperMove(event);
+      return;
+    }
     if (_pointer != event.pointer || _origin == null || _globalOrigin == null) {
       return;
     }
@@ -352,6 +399,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   }
 
   void _up(PointerUpEvent event, Size size) {
+    if (_paperSessionPointers.remove(event.pointer)) {
+      _controls.paperUp(event);
+      return;
+    }
     _touches.remove(event.pointer);
     if (_pointer != event.pointer) return;
     if (_globalOrigin != null &&
@@ -400,16 +451,43 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   void _bindSelection(TextAnnotation value, Size size) {
     _controls.bind(
       this,
-      font: value.font,
+      argb: value.argb,
       editing: false,
       release: _releaseSelection,
       onEdit: () => _editor(size),
       onDelete: _deleteSelection,
-      onFont: (font) {
-        _editor(size);
-        if (_editorOpen) _changeFont(font);
-      },
+      onColor: _colorSelection,
     );
+  }
+
+  Future<bool> _colorSelection(int argb) async {
+    final value = _selection;
+    if (value == null || value.argb == argb) return true;
+    final desired = _revise(value, argb: argb);
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      desired,
+      expected: TextEditBase(value),
+    );
+    if (!saved && mounted) {
+      _editor(_lastSize);
+      setState(() => _error = '未能保存，内容已保留。请再次点谱面重试。');
+    }
+    return saved;
+  }
+
+  Future<bool> _changeColor(int argb) async {
+    if (!_editorOpen || _committing) return false;
+    _controls.argb = argb;
+    setState(() => _draft = _revise(_draft!, argb: argb));
+    _focus.requestFocus();
+    return true;
+  }
+
+  void _cancelEditor() {
+    if (!_editorOpen || _committing) return;
+    setState(_closeEditor);
+    if (_selection case final selected?) _bindSelection(selected, _lastSize);
   }
 
   void _deleteSelection() {
@@ -450,18 +528,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _revealWaitingForPaint = false;
   }
 
-  void _changeFont(AnnotationTextFont font) {
-    if (!_editorOpen) return;
-    _controls.font = font;
-    setState(() => _draft = _revise(_draft!, font: font));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _editorOpen) {
-        _focus.requestFocus();
-        _revealEditor();
-      }
-    });
-  }
-
   void _editor(Size size, {NormalizedPoint? anchor}) {
     if (_editorOpen || !_enabled || !_controls.availableTo(this)) return;
     final selected = anchor == null ? _selection : null;
@@ -472,22 +538,19 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         widget.workspace.store.newText(
           text: '输入文字',
           anchor: anchor!,
-          argb: widget.style.argb,
+          argb: _controls.argb | 0xff000000,
           fontSizeFraction: _nextSize,
-          font: _controls.font,
         );
-    _draft = _fit(_draft!, size);
+    if (selected == null) _draft = _fit(_draft!, size);
     final bound = _controls.bind(
       this,
-      font: _draft!.font,
+      argb: _draft!.argb,
       editing: true,
       release: _releaseSelection,
-      onFont: _changeFont,
-      onCancel: () {
-        setState(_closeEditor);
-        if (_selection case final selected?) _bindSelection(selected, size);
-      },
-      onDone: () => _finishEditor(size),
+      onColor: _changeColor,
+      onCancel: _cancelEditor,
+      onDelete: selected == null ? null : _deleteEditing,
+      onDone: () => _finishEditor(_lastSize),
     );
     if (!bound) {
       _draft = _editBase = null;
@@ -503,29 +566,60 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     });
   }
 
-  void _finishEditor(Size size) {
-    if (_controller.text.trim().isEmpty || _controller.text.length > 8192) {
-      setState(
-        () => _error = _controller.text.trim().isEmpty
-            ? '请输入文字。'
-            : '文字过长，请缩短至 8192 字以内。',
-      );
-      return;
+  Future<bool> _finishEditor(Size size) async {
+    if (!_editorOpen) return true;
+    if (_controller.text.trim().isEmpty) {
+      if (_editBase != null) return _deleteEditing();
+      _cancelEditor();
+      return true;
+    }
+    if (_controller.text.length > 8192) {
+      setState(() => _error = '文字过长，请缩短至 8192 字以内。');
+      return false;
     }
     final desired = _editingValue(size)!, base = _editBase;
+    setState(() => _committing = true);
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      desired,
+      expected: TextEditBase(base),
+    );
+    if (!mounted) return saved;
+    setState(() => _committing = false);
+    if (!saved) {
+      setState(() => _error = '未能保存，内容已保留。请再次点谱面重试。');
+      _focus.requestFocus();
+      return false;
+    }
     _nextSize = desired.fontSizeFraction;
     setState(() {
       _selected = desired.id;
       _closeEditor();
     });
-    _bindSelection(desired, size);
-    unawaited(
-      widget.workspace.saveText(
-        widget.page,
-        desired,
-        expected: TextEditBase(base),
-      ),
+    _bindSelection(desired, _lastSize);
+    return true;
+  }
+
+  Future<bool> _deleteEditing() async {
+    final base = _editBase;
+    if (base == null || _committing) return false;
+    setState(() => _committing = true);
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      base.withDeletion(true, DateTime.now().toUtc()),
+      expected: TextEditBase(base),
     );
+    if (!mounted) return saved;
+    setState(() {
+      _committing = false;
+      if (saved) {
+        _selected = null;
+        _closeEditor();
+      } else {
+        _error = '未能保存，内容已保留。请再次点谱面重试。';
+      }
+    });
+    return saved;
   }
 
   Offset _paperPoint(Offset global) =>
@@ -534,6 +628,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (!_enabled ||
         !_primary(event) ||
         _handlePointer != null ||
+        _committing ||
         !_controls.availableTo(this) ||
         widget.workspace.savingAnnotations) {
       return;
@@ -542,10 +637,13 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (value == null) return;
     _handlePointer = event.pointer;
     _handle = handle;
+    _rotationSnap.reset();
+    _handleMoved = false;
     _handleBase = value;
     _handleOrigin = _paperPoint(event.position);
     _cancelPointer();
-    _endHandle = beginReaderTextEditing();
+    _controls.cancelPaperTap();
+    _endHandle = beginReaderTextEditing(blockPaperGestures: true);
     widget.onWritingChanged?.call(true);
   }
 
@@ -557,6 +655,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     }
     final base = _handleBase!, frame = _frame(_handleBase!, size);
     final point = _paperPoint(event.position), delta = point - _handleOrigin!;
+    if (!_handleMoved && delta.distance * _screenScale < 2) return;
+    _handleMoved = true;
     TextAnnotation value;
     switch (_handle!) {
       case _TextHandle.move:
@@ -614,7 +714,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           base,
           size: base.fontSizeFraction * factor,
           width: base.widthFraction * factor,
-          rotation: angle,
+          rotation: _rotationSnap.update(angle),
         );
         final nextFrame = _frame(value, size);
         value = _revise(
@@ -651,6 +751,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _endHandle = null;
     _handlePointer = null;
     _handle = null;
+    _rotationSnap.reset();
+    _handleMoved = false;
     _handleBase = null;
     _handleOrigin = null;
     _writingEnd();
@@ -693,6 +795,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           child: TextField(
             key: _inputKey,
             controller: _controller,
+            readOnly: _committing,
             focusNode: _focus,
             style: textAnnotationStyle(value, size, fontFamily: _family),
             minLines: 1,
@@ -754,7 +857,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     };
     final icon = switch (handle) {
       _TextHandle.move => Icons.open_with,
-      _TextHandle.transform => Icons.transform,
+      _TextHandle.transform => Icons.rotate_right,
       _TextHandle.width => Icons.swap_horiz,
     };
     return Positioned(
@@ -774,19 +877,25 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           child: Semantics(
             label: label,
             button: true,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: const Color(0xfffaf9f5),
-                borderRadius: BorderRadius.circular(8 / scale),
-                border: Border.all(
-                  color: const Color(0xff236459),
-                  width: 1 / scale,
+            child: Center(
+              child: SizedBox(
+                width: 28 / scale,
+                height: 28 / scale,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xfffaf9f5),
+                    borderRadius: BorderRadius.circular(7 / scale),
+                    border: Border.all(
+                      color: const Color(0xff52615c),
+                      width: 1 / scale,
+                    ),
+                  ),
+                  child: Icon(
+                    icon,
+                    size: 16 / scale,
+                    color: const Color(0xff52615c),
+                  ),
                 ),
-              ),
-              child: Icon(
-                icon,
-                size: 22 / scale,
-                color: const Color(0xff236459),
               ),
             ),
           ),
@@ -801,15 +910,22 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     builder: (context, _) => LayoutBuilder(
       builder: (context, constraints) {
         final size = constraints.biggest;
-        final value = _enabled ? (_editingValue(size) ?? _selection) : null;
+        _lastSize = size;
+        final value = widget.enabled && widget.textTool
+            ? (_editingValue(size) ?? _selection)
+            : null;
         final frame = value == null ? null : _frame(value, size);
         final bounds = value == null ? null : _bounds(value, size);
         return Listener(
           behavior: HitTestBehavior.opaque,
+          onPointerSignal: (_) => _controls.cancelPaperTap(),
           onPointerDown: (e) => _down(e, size),
           onPointerMove: (e) => _move(e, size),
           onPointerUp: (e) => _up(e, size),
           onPointerCancel: (e) {
+            if (_paperSessionPointers.remove(e.pointer)) {
+              _controls.paperCancel(e.pointer);
+            }
             _touches.remove(e.pointer);
             if (_pointer == e.pointer) setState(_cancelPointer);
           },
@@ -854,6 +970,22 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                   ),
                 ),
                 if (_editorOpen) _input(value, frame, size),
+                if (_handle == _TextHandle.transform &&
+                    _rotationSnap.guideAngle != null)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: CustomPaint(
+                        key: const ValueKey('text-rotation-guide'),
+                        painter: _RotationGuide(
+                          frame.center,
+                          math.max(frame.width, frame.height) / 2 +
+                              36 / _screenScale,
+                          _rotationSnap.guideAngle!,
+                          _screenScale,
+                        ),
+                      ),
+                    ),
+                  ),
                 for (final handle in _TextHandle.values)
                   _handleWidget(handle, value, frame, size, _screenScale),
               ],
@@ -863,4 +995,32 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       },
     ),
   );
+}
+
+class _RotationGuide extends CustomPainter {
+  const _RotationGuide(this.centre, this.length, this.angle, this.scale);
+  final Offset centre;
+  final double length, angle, scale;
+  @override
+  void paint(Canvas canvas, Size size) {
+    final vertical = math.sin(angle).abs() > .5;
+    final direction = vertical ? const Offset(0, 1) : const Offset(1, 0);
+    final paint = Paint()
+      ..color = const Color(0xaa39796d)
+      ..strokeWidth = 1 / scale;
+    for (var distance = -length; distance < length; distance += 8 / scale) {
+      canvas.drawLine(
+        centre + direction * distance,
+        centre + direction * math.min(length, distance + 4 / scale),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RotationGuide old) =>
+      old.centre != centre ||
+      old.length != length ||
+      old.angle != angle ||
+      old.scale != scale;
 }

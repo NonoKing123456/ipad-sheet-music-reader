@@ -65,6 +65,7 @@ class ReaderInput extends StatefulWidget {
     this.gestureGeneration = 0,
     this.textTool = false,
     this.textSelectionKey,
+    this.textControls,
     this.mouseWheel = false,
   });
 
@@ -85,6 +86,7 @@ class ReaderInput extends StatefulWidget {
   final int gestureGeneration;
   final bool textTool;
   final GlobalKey? textSelectionKey;
+  final ReaderTextEditorController? textControls;
   final bool mouseWheel;
 
   @override
@@ -231,7 +233,7 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _down(PointerDownEvent event) {
-    if (readerTextEditorActive) return;
+    if (readerTextHandleActive) return;
     if (event.kind == PointerDeviceKind.touch ||
         event.kind == PointerDeviceKind.mouse) {
       final box = widget.touchControlKey?.currentContext?.findRenderObject();
@@ -243,9 +245,11 @@ class _ReaderInputState extends State<ReaderInput> {
         return;
       }
     }
-    if (event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus ||
-        (widget.mouseInk && event.kind == PointerDeviceKind.mouse)) {
+    widget.textControls?.paperDown(event, blank: true);
+    if (!readerTextEditorActive &&
+        (event.kind == PointerDeviceKind.stylus ||
+            event.kind == PointerDeviceKind.invertedStylus ||
+            (widget.mouseInk && event.kind == PointerDeviceKind.mouse))) {
       _inkPointers.add(event.pointer);
       if (_pointers.isNotEmpty) _cancelled = true;
       return;
@@ -283,10 +287,11 @@ class _ReaderInputState extends State<ReaderInput> {
         _inkPointers.isNotEmpty ||
         (event.kind == PointerDeviceKind.mouse &&
             event.buttons != kPrimaryButton);
-    _focus.requestFocus();
+    if (!readerTextEditorActive) _focus.requestFocus();
   }
 
   void _move(PointerMoveEvent event) {
+    widget.textControls?.paperMove(event);
     if (!_pointers.contains(event.pointer)) return;
     if (_touches.containsKey(event.pointer)) {
       _touches[event.pointer] = event.localPosition;
@@ -341,7 +346,8 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _up(PointerUpEvent event, double width) {
-    if (readerTextEditorActive) {
+    widget.textControls?.paperUp(event);
+    if (readerTextHandleActive) {
       _pointers.remove(event.pointer);
       _inkPointers.remove(event.pointer);
       _touches.remove(event.pointer);
@@ -358,7 +364,8 @@ class _ReaderInputState extends State<ReaderInput> {
     }
     _touches.remove(event.pointer);
     if (_touches.isEmpty) _pinching = false;
-    if (_cancelled ||
+    if (readerTextEditorActive ||
+        _cancelled ||
         origin == null ||
         movingText ||
         _pointers.isNotEmpty ||
@@ -385,7 +392,8 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _signal(PointerSignalEvent event) {
-    if (readerTextEditorActive ||
+    widget.textControls?.cancelPaperTap();
+    if (readerTextHandleActive ||
         !widget.mouseWheel ||
         !widget.enabled ||
         event is! PointerScrollEvent ||
@@ -411,7 +419,7 @@ class _ReaderInputState extends State<ReaderInput> {
           scale,
           Offset(matrix.storage[12], matrix.storage[13]) - event.scrollDelta,
         );
-      } else if (widget.allowPointerPageTurns) {
+      } else if (widget.allowPointerPageTurns && !readerTextEditorActive) {
         if (_wheelTravel.sign != event.scrollDelta.dy.sign) _wheelTravel = 0;
         _wheelTravel += event.scrollDelta.dy;
         if (_wheelTravel.abs() >= 48) {
@@ -459,6 +467,7 @@ class _ReaderInputState extends State<ReaderInput> {
             onPointerMove: _move,
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {
+              widget.textControls?.paperCancel(event.pointer);
               _inkPointers.remove(event.pointer);
               _textMoves.remove(event.pointer);
               _pointers.remove(event.pointer);

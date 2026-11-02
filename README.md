@@ -8,7 +8,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码候选版本：`0.8.10+28`，已完成原位文字批注、iPad 后台下载队列及顶部操作改进。Windows 已交付版本为 `0.8.10+27`；iPad 候选包的构建状态以对应 Release 及 `build-info.txt` 为准，尚未完成新版本真机验证。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。项目不附带曲谱资源。
+> 当前源码候选版本：`0.8.10+29`，已完成文字颜色常驻、点框外保存和正交旋转吸附，移除字体选择，保留旧批注数据兼容。此前 Windows `0.8.10+27` 与 iPad `0.8.10+28` 已交付；本轮两端候选包的构建与交付状态以对应记录及 Release 的 `build-info.txt` 为准，尚未完成新版本真机验证。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。项目不附带曲谱资源。
 
 ## 能做什么
 
@@ -18,7 +18,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 | 文件阅读 | PDF、JPG / JPEG、PNG、WebP；图片作为单页曲谱 |
 | 电脑看谱 | 单页、双页、连续阅读；缩放、翻页和页码定位 |
 | iPad 看谱 | 整页适配、点按边缘翻页、手势缩放与移动、可收起工具栏 |
-| 做笔记 | 画笔、荧光笔、橡皮和谱面原位文字批注，选择字体、拖动调整，支持撤销与重做 |
+| 做笔记 | 画笔、荧光笔、橡皮和谱面原位文字批注，选色、拖动及旋转吸附，支持撤销与重做 |
 | 排练与演出 | 创建、排序曲单，按顺序跨曲阅读，首尾不循环 |
 | 连接两端 | 扫描电脑二维码配对，记住连接，更新目录及所选内容 |
 | 离线携带 | 按曲谱或文件夹选择下载，iPad 系统后台队列、暂停与继续，保留已核验完整文件 |

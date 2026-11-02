@@ -237,8 +237,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _textControlsChanged() {
-    if (mounted && _textDraftActive != _textControls.editing) {
-      setState(() => _textDraftActive = _textControls.editing);
+    if (mounted && (_textDraftActive != _textControls.editing || (_textTool && _color != _textControls.argb))) {
+      setState(() { _textDraftActive = _textControls.editing;
+        if (_textTool) { _color = _textControls.argb; _usingSample = false; }
+      });
     }
   }
 
@@ -286,7 +288,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<bool> _leaveSafely() async {
-    if (!mounted || (widget.allowAnnotations && !await _confirmLeaving())) {
+    if (!mounted || !await _textControls.finish() || (widget.allowAnnotations && !await _confirmLeaving())) {
       return false;
     }
     await widget.workspace.flushPositions();
@@ -313,11 +315,18 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _pickMessage = null;
   }
 
-  void _selectTool(ReaderTool tool) => setState(() {
-    _cancelPick();
-    _textTool = false;
-    _tool = tool;
-  });
+  Future<void> _selectTool(ReaderTool tool) async {
+    if (!await _textControls.finish() || !mounted) return;
+    setState(() { _cancelPick(); _textTool = false; _tool = tool; });
+  }
+  Future<void> _toggleTextTool() async {
+    if (!await _textControls.finish() || !mounted) return;
+    setState(() { _cancelPick();
+      if (!_textTool) _textControls.argb = _color;
+      _textTool = !_textTool;
+    });
+  }
+
 
   Future<void> _sampleAction() async {
     if (_writing) return;
@@ -380,7 +389,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
-  void _setEditing(bool editing) {
+  Future<bool> _setEditing(bool editing) async {
+    if (!editing && (!await _textControls.finish() || !mounted)) return false;
     editing = editing && widget.allowAnnotations;
     setState(() {
       _editing = editing;
@@ -392,6 +402,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _transform.value = Matrix4.identity();
       }
     });
+    return true;
   }
 
   void _resetViewport() {
@@ -470,6 +481,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             ? '${workspace.unsavedCount} 项未保存'
             : '阅读状态',
         onToolsVisibilityChanged: _setEditing,
+        beforeHideTools: _textControls.finish,
         allowOverlayPageKeys: _sampleMenuOpen,
         onObstructionChanged: (insets) => setState(() => _panInsets = insets),
         onPrevious: () => _navigate(NavigationDirection.backward),
@@ -642,6 +654,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   touchControlKey: _seekRegionKey,
                   textTool: _textTool,
                   textSelectionKey: _textSelectionKey,
+                  textControls: _textControls,
                   child: ReaderPageWindow(
                     documentKey: current.target.key,
                     pageNumber: _session.page,
@@ -732,7 +745,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }) async {
     if (_writing) return;
     if (_editing) {
-      _finishAnnotation();
+      await _finishAnnotation();
       return;
     }
     final document = _visibleDocument, visible = _visiblePage;
@@ -770,8 +783,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _setEditing(true);
   }
 
-  void _finishAnnotation() {
-    if (_writing || !_editing) return;
+  Future<void> _finishAnnotation() async {
+    if (_writing || !_editing || !await _textControls.finish() || !mounted) return;
     if (_desktopMode == ReaderViewMode.continuous &&
         _session.pageKey != _continuousEditStart) {
       _continuousRestore = null;
@@ -780,6 +793,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _jumpDialog() async {
+    if (!await _textControls.finish() || !mounted) return;
     final document = _session.current;
     if (document == null || _writing) return;
     final key = document.target.key;
@@ -1055,6 +1069,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               touchControlKey: _seekRegionKey,
               textTool: _textTool,
               textSelectionKey: _textSelectionKey,
+              textControls: _textControls,
               onTransformGestureChanged: (active) =>
                   setState(() => _touchTransforming = active),
               child: ReaderPageWindow(
@@ -1370,10 +1385,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               tooltip: '文字批注',
               isSelected: _textTool,
               icon: const Icon(Icons.text_fields),
-              onPressed: () => setState(() {
-                _cancelPick();
-                _textTool = !_textTool;
-              }),
+              onPressed: _toggleTextTool,
             ),
             if (_textTool) ReaderTextFormatControls(controller: _textControls),
             if (!_textTool) ReaderSampleColorButton(
@@ -1458,7 +1470,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     ),
   );
 
-  void _navigate(NavigationDirection direction) {
+  Future<void> _navigate(NavigationDirection direction) async {
+    if (!await _textControls.finish() || !mounted) return;
     if (_sampleMenuOpen) {
       _sampleMenuOpen = false;
       Navigator.of(context).pop();

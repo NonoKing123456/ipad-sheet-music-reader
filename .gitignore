@@ -214,3 +214,6 @@
 !/test/ios_background_transfer_test.dart
 !/test/offline_header_sync_test.dart
 !/test/text_annotation_font_0810_test.dart
+!/lib/reader/text_rotation_snap.dart
+!/test/text_annotation_outside_0810_test.dart
+!/test/text_rotation_snap_test.dart

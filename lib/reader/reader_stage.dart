@@ -78,6 +78,7 @@ class ReaderStage extends StatefulWidget {
     this.blockArrowKeys = false,
     this.onObstructionChanged,
     this.onToolsVisibilityChanged,
+    this.beforeHideTools,
     this.hasReadablePage = false,
     this.statusLabel = '阅读状态',
     this.loading = false,
@@ -93,6 +94,7 @@ class ReaderStage extends StatefulWidget {
   final bool blockArrowKeys;
   final ValueChanged<EdgeInsets>? onObstructionChanged;
   final ValueChanged<bool>? onToolsVisibilityChanged;
+  final Future<bool> Function()? beforeHideTools;
   final bool hasReadablePage, loading;
   final String statusLabel;
   final ReaderStageController? controller;
@@ -155,7 +157,13 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   void _toggle() => _show(!_tools);
-  void _show(bool show) {
+  Future<void> _show(bool show) async {
+    if (!show &&
+        widget.beforeHideTools != null &&
+        !await widget.beforeHideTools!()) {
+      return;
+    }
+    if (!mounted) return;
     setState(() => _tools = show);
     widget.onToolsVisibilityChanged?.call(show);
     if (_reduceMotion) {
