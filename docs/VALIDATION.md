@@ -2,9 +2,9 @@
 
 验证日期：2026-11-02。构建、安装和真机验证分别记录；下方保留 `0.8.10+26` 公开副本的历史测试结果，不把后续定向验证视为全量通过。
 
-## 0.8.10+31 候选：定向证据与未验证边界
+## 0.8.10+31 已交付：定向证据与未验证边界
 
-Windows `+31` 已交付：唯一release构建57.2秒，19成员完整校验后通过share-v1发布。根iPad仍为`+30`，Mac `+31` 构建未触发。
+Windows `+31` 已交付：唯一release构建57.2秒，19成员完整校验后通过share-v1发布。唯一Mac [run22](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases/tag/unsigned-ipad-22-1) 已成功，三件套来源与包门禁核验通过；根iPad IPA已提升`+31`并保留旧30，用户装机与真实交互仍待验。
 
 | 范围 | 现有证据及限制 |
 | --- | --- |
@@ -15,7 +15,8 @@ Windows `+31` 已交付：唯一release构建57.2秒，19成员完整校验后�
 | 定向分析 | reader/theme/share20项和微批6个Dart产品分析无问题，不当作全仓库分析 |
 | 发布布局 | 17 项非启动检查通过：legacy30/18、新share-v1/19及缺/多DLL、profile、hash、相对路径、junction拒绝；31使用版本stub和不可加载合成DLL，不是应用构建或插件ABI验证。这些检查运行时生产pointer/launcher/Start快捷方式未改 |
 | Windows真实构建及交付 | 随后PM唯一release构建57.2秒成功；完整19成员build/copy逐SHA一致，share-v1安装与发布成功。支持新布局的启动器已显式升级、pointer已原子切31，固定路径/AppID/cmd保持、用户旧窗口未关闭；不作为iPad或Windows真实分享操作验收 |
-| Mac与包门禁 | 新workflow编译实际BackgroundDownloadBridge中的同一Foundation schema并检查旧jobs/journal及batch checkpoint；本机Windows不能执行。保留Apple alias、ImageIO共享生产core、CMS15与arm64/iOS平台门禁，新IPA还须精确7个Mach-O（含share_plus） |
+| Mac与包门禁 | run22实际设备Release编译成功；Apple真实alias、ImageIO共享生产core、CMS15、真实BackgroundDownloadBridge共享schema的旧jobs/journal及batch checkpoint均通过。实际包为精确6个独立arm64/iOS Mach-O；share_plus静态链接在Runner，以4个真实非STAB/非UNDF的N_SECT定义（class/metaclass/register/shareFiles，地址落有效数据/代码section）、native channel/selector及privacy资源作强制证据，不能只接受任意6个二进制 |
+| 原7布局假设纠正 | 首次严格7集合门禁失败记录保留。独立解析同IPA证实Runner内插件真实定义后，修正私有门禁为上述精确6+静态插件证据；全部原来源/run/版本/iPad/alias/CMS/ImageIO/schema/旧包备份和原子提升门禁保留，9个内存负向样本全部拒绝，同一IPA完整复核后提升。未重新构建或触发第二次CI；包内有代码不等于OS分享真机测试 |
 | 真机边界 | +31尚无装机、键盘/系统状态栏、单指/笔、防手掌误触、后台/息屏/恢复或系统分享验收；纯黑/删顶部zoom只完成源码、必要widget及分析，不凭旧截图冒称最终真机通过 |
 
 原失败记录和此前验证历史保留如下。原9个私有历史截图测试及新增reader31本机字体预览不在公开候选；主题截图位于本地artifacts，同样不发布。
