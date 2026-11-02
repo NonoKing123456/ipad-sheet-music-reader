@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -14,6 +16,84 @@ internal static class StableLauncher
     private static extern int SetCurrentProcessExplicitAppUserModelID(string id);
     [DllImport("kernel32.dll")]
     private static extern bool AttachConsole(uint processId);
+
+    private static readonly string[] LegacyMembers = {
+        "dartjni.dll", "file_selector_windows_plugin.dll", "flutter_windows.dll",
+        "native_assets.json", "pdfium.dll", "pdfrx_pdfium_gate.dll", "score_reader.exe",
+        "url_launcher_windows_plugin.dll", "data\\app.so", "data\\icudtl.dat",
+        "data\\flutter_assets\\AssetManifest.bin", "data\\flutter_assets\\FontManifest.json",
+        "data\\flutter_assets\\NativeAssetsManifest.json", "data\\flutter_assets\\NOTICES.Z",
+        "data\\flutter_assets\\fonts\\MaterialIcons-Regular.otf",
+        "data\\flutter_assets\\packages\\material_ui\\shaders\\ink_sparkle.frag",
+        "data\\flutter_assets\\shaders\\ink_sparkle.frag",
+        "data\\flutter_assets\\shaders\\stretch_effect.frag"
+    };
+
+    private static string ValidateRelease(Dictionary<string, object> deployment, string directory,
+        JavaScriptSerializer serializer, bool verifyHashes)
+    {
+        string version = (string)deployment["version"];
+        if (!Regex.IsMatch(version, @"^\d+\.\d+\.\d+\+\d+$"))
+            throw new InvalidDataException("Invalid release version.");
+        string profile = deployment.ContainsKey("layoutProfile") ? (string)deployment["layoutProfile"] : "legacy";
+        if (profile != "legacy" && profile != "share-v1") throw new InvalidDataException("Unknown release layout profile.");
+        if (profile == "legacy" && new Version(version.Replace('+', '.')) >= new Version(0, 8, 10, 31))
+            throw new InvalidDataException("Release 0.8.10+31 and later requires share-v1.");
+        var expected = new HashSet<string>(LegacyMembers, StringComparer.OrdinalIgnoreCase);
+        if (profile == "share-v1") expected.Add("share_plus_plugin.dll");
+        var members = serializer.ConvertToType<string[]>(deployment["members"]);
+        if (members.Length != expected.Count || !expected.SetEquals(members))
+            throw new InvalidDataException("Release members do not match the layout profile.");
+        // Walk only after rejecting each directory link, so verification never follows a junction.
+        var actual = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pending = new Stack<string>();
+        pending.Push(directory);
+        while (pending.Count != 0)
+        {
+            string current = pending.Pop();
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Release contains a reparse point.");
+            foreach (string path in Directory.GetFileSystemEntries(current))
+            {
+                FileAttributes attributes = File.GetAttributes(path);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("Release contains a reparse point.");
+                if ((attributes & FileAttributes.Directory) != 0) pending.Push(path);
+                else
+                {
+                    string relative = path.Substring(directory.TrimEnd(Path.DirectorySeparatorChar).Length + 1);
+                    if (!expected.Contains(relative) || new FileInfo(path).Length == 0)
+                        throw new InvalidDataException("Unexpected or empty release member.");
+                    actual.Add(relative);
+                }
+            }
+        }
+        if (!expected.SetEquals(actual)) throw new InvalidDataException("Release member is missing.");
+        if (FileVersionInfo.GetVersionInfo(Path.Combine(directory, "score_reader.exe")).ProductVersion != version)
+            throw new InvalidDataException("Executable product version does not match the deployment.");
+        if (profile == "share-v1")
+        {
+            var hashes = serializer.ConvertToType<Dictionary<string, string>>(deployment["sha256"]);
+            if (hashes.Count != expected.Count || !expected.SetEquals(hashes.Keys))
+                throw new InvalidDataException("Release hash manifest does not match the layout.");
+            foreach (string member in members)
+            {
+                if (!Regex.IsMatch(hashes[member], "^[a-fA-F0-9]{64}$"))
+                    throw new InvalidDataException("Invalid release SHA256.");
+                if (verifyHashes)
+                {
+                    using (var stream = File.OpenRead(Path.Combine(directory, member)))
+                    using (var algorithm = SHA256.Create())
+                    {
+                        string digest = BitConverter.ToString(algorithm.ComputeHash(stream)).Replace("-", "");
+                        if (!String.Equals(digest, hashes[member], StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidDataException("Release SHA256 mismatch.");
+                    }
+                }
+            }
+        }
+        return profile;
+    }
 
     // Exactly the Windows command-line quoting rules, including trailing slashes.
     private static string Quote(string value)
@@ -56,22 +136,12 @@ internal static class StableLauncher
             directory = Path.GetFullPath(directory);
             string executable = Path.Combine(directory, "score_reader.exe");
             if (!File.Exists(executable)) throw new FileNotFoundException("Release executable is missing.");
+            string profile = null;
+            if (!inspect || args[0] == "--verify") profile = ValidateRelease(deployment, directory, serializer, inspect);
             if (inspect)
             {
-                if (args[0] == "--verify")
-                {
-                    var files = serializer.ConvertToType<string[]>(deployment["members"]);
-                    if (files.Length != 18) throw new InvalidDataException("Expected 18 release members.");
-                    foreach (object member in files)
-                    {
-                        string path = Path.GetFullPath(Path.Combine(directory, (string)member));
-                        if (!path.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                            !File.Exists(path) || new FileInfo(path).Length == 0)
-                            throw new InvalidDataException("Release member is missing or invalid.");
-                    }
-                }
                 string json = serializer.Serialize(new { ok = true, appId = AppId,
-                    version = deployment["version"], executable = executable, pointer = pointer });
+                    version = deployment["version"], executable = executable, pointer = pointer, layoutProfile = profile });
                 if (output != null) File.WriteAllText(output, json, new UTF8Encoding(false));
                 else { AttachConsole(0xffffffff); Console.WriteLine(json); }
                 return 0;

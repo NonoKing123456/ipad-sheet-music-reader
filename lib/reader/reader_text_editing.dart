@@ -26,7 +26,8 @@ class ReaderTextEditorController extends ChangeNotifier {
   int argb = 0xffc12b32;
   bool editing = false;
   Object? _owner;
-  VoidCallback? _releaseSelection, onEdit, onDelete, onCancel;
+  VoidCallback? _releaseSelection, onEdit, onCancel;
+  Future<bool> Function()? onDelete;
   Future<bool> Function()? onDone;
   Future<bool> Function(int)? onColor;
   bool _disposed = false;
@@ -45,7 +46,7 @@ class ReaderTextEditorController extends ChangeNotifier {
     required VoidCallback release,
     Future<bool> Function(int)? onColor,
     VoidCallback? onEdit,
-    VoidCallback? onDelete,
+    Future<bool> Function()? onDelete,
     VoidCallback? onCancel,
     Future<bool> Function()? onDone,
   }) {
@@ -75,7 +76,8 @@ class ReaderTextEditorController extends ChangeNotifier {
     _releaseSelection = null;
     editing = false;
     onColor = null;
-    onEdit = onDelete = onCancel = null;
+    onEdit = onCancel = null;
+    onDelete = null;
     onDone = null;
     cancelPaperTap();
     _paperPointers.clear();
@@ -113,6 +115,18 @@ class ReaderTextEditorController extends ChangeNotifier {
       });
     }
     _changed();
+  }
+
+  Future<bool> delete() {
+    if (saving || onDelete == null) return Future.value(false);
+    cancelPaperTap();
+    final result = onDelete!();
+    _formatting = result;
+    _changed();
+    return result.whenComplete(() {
+      _formatting = null;
+      _changed();
+    });
   }
 
   void paperDown(PointerDownEvent event, {required bool blank}) {
@@ -230,7 +244,9 @@ class ReaderAnnotationColors extends StatelessWidget {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 border: Border.all(
-                                  color: const Color(0xff52615c),
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurface,
                                   width: 1.5,
                                 ),
                               ),
@@ -244,12 +260,10 @@ class ReaderAnnotationColors extends StatelessWidget {
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               color: Color(color),
-                              border: color == 0xffffffff
-                                  ? Border.all(
-                                      color: const Color(0xff9a9e9b),
-                                      width: .75,
-                                    )
-                                  : null,
+                              border: Border.all(
+                                color: Theme.of(context).colorScheme.outline,
+                                width: .75,
+                              ),
                             ),
                           ),
                         ),
@@ -280,18 +294,6 @@ class ReaderTextFormatControls extends StatelessWidget {
           argb: controller.argb,
           onChanged: controller.saving ? null : controller.changeColor,
         ),
-        if (!controller.editing && controller.onEdit != null)
-          IconButton(
-            tooltip: '编辑文字',
-            onPressed: controller.onEdit,
-            icon: const Icon(Icons.edit_outlined, size: 18),
-          ),
-        if (controller.onDelete != null)
-          IconButton(
-            tooltip: '删除文字',
-            onPressed: controller.saving ? null : controller.onDelete,
-            icon: const Icon(Icons.delete_outline, size: 18),
-          ),
       ],
     ),
   );

@@ -79,6 +79,9 @@ class ReplicaCollectionView {
 
   int _generation = 0;
   int _journalBytes = 0;
+  final _durableResolutions = <String, String>{};
+  int metadataJournalFlushes = 0;
+  String _resolutionKey(CatalogItem item) => jsonEncode(item.toJson());
   bool persistenceFailed = false;
   String get _path => p.join(objects.rootDirectory, 'collection-v2.json');
   String get _journalPath =>
@@ -224,28 +227,57 @@ class ReplicaCollectionView {
     }
   }
 
-  Future<void> _journalResolution(CatalogItem item) async {
-    final body = utf8
-        .encode(jsonEncode({'collection': index!.id, 'item': item.toJson()}));
-    if (body.length > 60 * 1024)
-      throw const FormatException('Selected metadata is too large.');
-    final bytes = utf8.encode(
-        '${body.length}:${sha256.convert(body)}:${utf8.decode(body)}\n');
-    if (_journalBytes + bytes.length > 32 * 1024 * 1024) await _persist();
+  Future<void> _journalResolution(CatalogItem item) =>
+      _journalResolutions([item]);
+
+  /// One metadata checkpoint for a bounded transport batch. Each object still
+  /// gets its own SHA check, flushed temporary file and atomic rename.
+  Future<void> prepareReceiveBatch(List<CatalogItem> items) async {
+    items = items
+        .where(
+            (item) => _durableResolutions[item.entryId] != _resolutionKey(item))
+        .toList();
+    if (items.isEmpty) return;
+    if (items.length > 64)
+      throw ArgumentError('Resolution batch exceeds limit.');
+    final lease = await DirectoryLease.acquire(objects.rootDirectory);
+    try {
+      await _journalResolutions(items);
+    } finally {
+      await lease.close();
+    }
+  }
+
+  Future<void> _journalResolutions(List<CatalogItem> items) async {
+    final combined = <int>[];
+    for (final item in items) {
+      final body = utf8
+          .encode(jsonEncode({'collection': index!.id, 'item': item.toJson()}));
+      if (body.length > 60 * 1024)
+        throw const FormatException('Selected metadata is too large.');
+      final bytes = utf8.encode(
+          '${body.length}:${sha256.convert(body)}:${utf8.decode(body)}\n');
+      combined.addAll(bytes);
+    }
+    if (_journalBytes + combined.length > 32 * 1024 * 1024) await _persist();
     assertSafePath(objects.rootDirectory, _journalPath);
     final file = await File(_journalPath).open(mode: FileMode.append);
     try {
       await file.truncate(_journalBytes);
       await file.setPosition(_journalBytes);
-      await file.writeFrom(bytes);
+      await file.writeFrom(combined);
       await file.flush();
-      _journalBytes += bytes.length;
+      metadataJournalFlushes++;
+      _journalBytes += combined.length;
     } finally {
       await file.close();
     }
-    _resolved[item.entryId] = item;
-    _dirty = true;
-    _contentChanged(item);
+    for (final item in items) {
+      _durableResolutions[item.entryId] = _resolutionKey(item);
+      _resolved[item.entryId] = item;
+      _dirty = true;
+      _contentChanged(item);
+    }
     if (_directory == null) await _prepareDirectory();
   }
 
@@ -266,6 +298,7 @@ class ReplicaCollectionView {
     _snapshot = _snapshot?.withGeneration(_generation);
     _dirty = _resolved.isNotEmpty;
     persistenceFailed = false;
+    _durableResolutions.clear();
     // The full snapshot is durable before retiring its small recovery journal.
     try {
       assertSafePath(objects.rootDirectory, _journalPath);
@@ -423,7 +456,8 @@ class ReplicaCollectionView {
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
     try {
       cancellation?.check();
-      await _journalResolution(item);
+      if (_durableResolutions[item.entryId] != _resolutionKey(item))
+        await _journalResolution(item);
       await objects.receiveObject(item.object, bytes,
           cancellation: cancellation);
       cancellation?.check();

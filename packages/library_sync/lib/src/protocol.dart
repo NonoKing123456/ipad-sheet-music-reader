@@ -14,6 +14,16 @@ import 'collection_replica.dart';
 import 'signing_status.dart';
 import 'page_metadata.dart';
 import 'background_transfer.dart';
+import 'small_file_batch.dart';
+
+class _SmallBatchPlan {
+  _SmallBatchPlan(this.peerId, this.items, this.metadataBytes)
+      : expires = DateTime.now().add(const Duration(minutes: 30));
+  final String peerId;
+  final List<CatalogItem?> items;
+  final DateTime expires;
+  final int metadataBytes;
+}
 
 class SyncProtocolException implements Exception {
   const SyncProtocolException(this.message, [this.status, this.code]);
@@ -329,6 +339,7 @@ class SyncServer {
       Uri(scheme: 'http', host: _server.address.address, port: _server.port);
   int get port => _server.port;
   String get _statePath => p.join(stateDirectory, 'peers.json');
+  final _smallBatchPlans = <String, _SmallBatchPlan>{};
 
   static Future<SyncServer> start(
       {required LibrarySource source,
@@ -493,6 +504,51 @@ class SyncServer {
           path == '/v2/catalog') {
         await _reply(request.response, (await collection.index()).toJson());
       } else if (collection != null &&
+          request.method == 'GET' &&
+          path == '/v2/transfer-capabilities') {
+        await _reply(request.response, {'smallFileBatch': 1});
+      } else if (collection != null &&
+          request.method == 'POST' &&
+          path == '/v2/batch-prepare') {
+        await _prepareSmallBatch(request, peerId, collection);
+      } else if (collection != null &&
+          request.method == 'GET' &&
+          path == '/v2/batch-object') {
+        final token = request.uri.queryParameters['batchId'];
+        final maskText = request.uri.queryParameters['mask'] ?? '';
+        final plan = _smallBatchPlans[token];
+        if (plan == null ||
+            plan.peerId != peerId ||
+            plan.expires.isBefore(DateTime.now())) {
+          throw const SyncProtocolException(
+              'Batch plan expired; prepare again.', 410);
+        }
+        if (!RegExp(r'^[a-f0-9]{1,16}$').hasMatch(maskText))
+          throw const FormatException('Invalid selection mask.');
+        final mask = BigInt.parse(maskText, radix: 16);
+        if ((mask >> plan.items.length) != BigInt.zero)
+          throw const FormatException('Selection mask exceeds batch.');
+        final selected = <CatalogItem>[];
+        for (var i = 0; i < plan.items.length; i++) {
+          if ((mask & (BigInt.one << i)) != BigInt.zero) {
+            final item = plan.items[i];
+            if (item == null)
+              throw const FormatException(
+                  'Selection mask contains unavailable object.');
+            selected.add(item);
+          }
+        }
+        request.response.headers.contentType =
+            ContentType('application', 'vnd.score-reader.batch-v1');
+        request.response.headers
+            .set(HttpHeaders.cacheControlHeader, 'no-store');
+        await for (final chunk
+            in encodeSmallFileBatch(selected, collection).timeout(ioTimeout)) {
+          request.response.add(chunk);
+          await request.response.flush();
+        }
+        await request.response.close();
+      } else if (collection != null &&
           request.method == 'POST' &&
           path == '/v2/prepare') {
         final body = await _readBody(request, ioTimeout, 4096);
@@ -564,6 +620,70 @@ class SyncServer {
         await request.response.close().catchError((Object _) {});
       }
     }
+  }
+
+  Future<void> _prepareSmallBatch(HttpRequest request, String peerId,
+      CollectionLibrarySource source) async {
+    final body = await _readBody(request, ioTimeout, 64 * 1024);
+    final raw = body['items'];
+    if (raw is! List || raw.isEmpty || raw.length > SmallFileBatchLimits.count)
+      throw const FormatException('Invalid small batch.');
+    final items = <CatalogItem?>[], results = <Map<String, Object?>>[];
+    final seen = <String>{};
+    var total = 0;
+    for (var i = 0; i < raw.length; i++) {
+      final value = asMap(raw[i]),
+          id = value['entryId'] as String,
+          revision = value['revisionId'] as String,
+          sourceId = value['sourceId'] as String;
+      if (!seen.add(id)) throw const FormatException('Duplicate batch object.');
+      CatalogItem? item;
+      var status = 200;
+      try {
+        item = await source.prepare(id, revision);
+        if (item.entryId != id ||
+            item.sourceId != sourceId ||
+            item.revisionId != revision ||
+            item.missing ||
+            item.hash == null) {
+          throw const FormatException('Prepared identity changed.');
+        }
+        if (item.length > SmallFileBatchLimits.objectBytes ||
+            total + item.length > SmallFileBatchLimits.payloadBytes ||
+            utf8.encode(jsonEncode(item.toJson())).length >
+                SmallFileBatchLimits.headerBytes - 1024) {
+          status = 413;
+          item = null;
+        } else {
+          total += item.length;
+        }
+      } catch (_) {
+        status = 409;
+        item = null;
+      }
+      items.add(item);
+      results.add({
+        'index': i,
+        'entryId': id,
+        'status': status,
+        if (item != null) 'item': item.toJson()
+      });
+    }
+    _smallBatchPlans
+        .removeWhere((_, plan) => plan.expires.isBefore(DateTime.now()));
+    final metadataBytes = utf8.encode(jsonEncode(results)).length;
+    while (_smallBatchPlans.isNotEmpty &&
+        (_smallBatchPlans.length >= 128 ||
+            _smallBatchPlans.values
+                        .fold(0, (total, plan) => total + plan.metadataBytes) +
+                    metadataBytes >
+                8 * 1024 * 1024)) {
+      _smallBatchPlans.remove(_smallBatchPlans.keys.first);
+    }
+    final token = randomId(24);
+    _smallBatchPlans[token] = _SmallBatchPlan(peerId, items, metadataBytes);
+    await _reply(
+        request.response, {'protocol': 1, 'batchId': token, 'items': results});
   }
 
   void _requireReaderCapability(HttpRequest request) {
@@ -727,6 +847,20 @@ class SyncClient {
   final int maxJsonBytes;
   String get _statePath => p.join(stateDirectory, 'client.json');
   BackgroundTransfer? backgroundTransfer;
+  bool enableSmallFileBatches = true;
+  bool? _smallBatchesAvailable;
+  Future<bool> _supportsSmallBatches(HttpClient http) async {
+    if (!enableSmallFileBatches) return false;
+    if (_smallBatchesAvailable != null) return _smallBatchesAvailable!;
+    try {
+      final value = await _json(http, '/v2/transfer-capabilities');
+      return _smallBatchesAvailable = value['smallFileBatch'] == 1;
+    } on SyncProtocolException catch (error) {
+      if (error.status != 404) rethrow;
+      return _smallBatchesAvailable = false;
+    }
+  }
+
   String get _transferNamespace =>
       sha256.convert(utf8.encode('$baseUri/$peerId')).toString();
   String get backgroundTransferNamespace => _transferNamespace;
@@ -756,6 +890,8 @@ class SyncClient {
     while (true) {
       final completed = await transfer.staged(_transferNamespace);
       if (completed.isEmpty) break;
+      final acknowledgements = <CatalogItem>[];
+      final eligible = <BackgroundTransferFile>[];
       for (final staged in completed) {
         final item = staged.item,
             current = replica.itemFor(staged.item.entryId);
@@ -766,19 +902,33 @@ class SyncClient {
                 current.revisionId != item.revisionId) ||
             current.missing ||
             !replica.selection.includes(item)) {
-          await transfer.acknowledge(_transferNamespace, item);
+          acknowledgements.add(item);
           continue;
         }
+        eligible.add(staged);
+      }
+      await replica
+          .prepareReceiveBatch(eligible.map((staged) => staged.item).toList());
+      for (final staged in eligible) {
+        final item = staged.item;
         try {
           await replica.receive(item, File(staged.path).openRead());
         } on LibraryContentIntegrityException {
           // A damaged or empty stage must not poison every future recovery.
           // Existing immutable objects remain untouched; the next batch retries.
-          await transfer.acknowledge(_transferNamespace, item);
+          acknowledgements.add(item);
           continue;
         }
-        await transfer.acknowledge(_transferNamespace, item);
+        acknowledgements.add(item);
         imported++;
+      }
+      if (transfer is BackgroundTransferBatchAcknowledger) {
+        await (transfer as BackgroundTransferBatchAcknowledger)
+            .acknowledgeMany(_transferNamespace, acknowledgements);
+      } else {
+        for (final item in acknowledgements) {
+          await transfer.acknowledge(_transferNamespace, item);
+        }
       }
     }
     await replica.flush();
@@ -1098,6 +1248,21 @@ class SyncClient {
     void cancel() => http.close(force: true);
     cancellation?.addListener(cancel);
     var downloaded = 0, processed = 0, failed = false;
+    final acknowledgements = <CatalogItem>[];
+    Future<void> acknowledgePending() async {
+      final transfer = backgroundTransfer;
+      if (transfer == null || acknowledgements.isEmpty) return;
+      if (transfer is BackgroundTransferBatchAcknowledger) {
+        await (transfer as BackgroundTransferBatchAcknowledger)
+            .acknowledgeMany(_transferNamespace, acknowledgements);
+      } else {
+        for (final item in acknowledgements) {
+          await transfer.acknowledge(_transferNamespace, item);
+        }
+      }
+      acknowledgements.clear();
+    }
+
     void report(int total) {
       if (onProgress != null) {
         unawaited(Future<void>.sync(() => onProgress(LibrarySyncProgress(
@@ -1142,6 +1307,10 @@ class SyncClient {
       processed = unavailable;
       report(total);
       final transfer = backgroundTransfer;
+      final smallBatches = targets
+              .any((item) => item.length <= SmallFileBatchLimits.objectBytes) &&
+          await _supportsSmallBatches(http);
+      final batched = <String>{};
       if (transfer != null) {
         final pending = <CatalogItem>[];
         for (final item in targets) {
@@ -1158,11 +1327,119 @@ class SyncClient {
             bearerToken: _token,
             items: pending,
             prepare: true,
+            smallFileBatches: smallBatches,
             selection: replica.selection,
             cancellation: cancellation);
+      } else if (smallBatches) {
+        final pending = <CatalogItem>[];
+        final online = {
+          for (final source in index.sources) source.id: source.online
+        };
+        for (final item in targets) {
+          if (online[item.sourceId] == true &&
+              item.length <= SmallFileBatchLimits.objectBytes &&
+              (item.hash == null ||
+                  !await replica.objects.hasVerifiedObject(item.object)))
+            pending.add(item);
+        }
+        for (final batch in planSmallFileBatches(pending)) {
+          cancellation?.check();
+          try {
+            final prepared = await _readBody(
+                await _request(http, 'POST', '/v2/batch-prepare', body: {
+                  'items': [
+                    for (final item in batch)
+                      {
+                        'sourceId': item.sourceId,
+                        'entryId': item.entryId,
+                        'revisionId': item.revisionId
+                      }
+                  ]
+                }),
+                ioTimeout,
+                SmallFileBatchLimits.prepareBytes);
+            final raw = prepared['items'];
+            if (prepared['protocol'] != 1 ||
+                raw is! List ||
+                raw.length != batch.length)
+              throw const FormatException('Invalid batch preparation.');
+            final expected = <String, CatalogItem>{};
+            var mask = BigInt.zero;
+            for (var i = 0; i < raw.length; i++) {
+              final record = asMap(raw[i]), original = batch[i];
+              if (record['index'] != i || record['entryId'] != original.entryId)
+                throw const FormatException('Batch identity changed.');
+              if (record['status'] != 200)
+                continue; // Isolated single-file retry below.
+              final item = CatalogItem.fromJson(asMap(record['item']));
+              if (item.entryId != original.entryId ||
+                  item.sourceId != original.sourceId ||
+                  item.revisionId != original.revisionId ||
+                  item.hash == null ||
+                  item.missing ||
+                  item.length > SmallFileBatchLimits.objectBytes)
+                throw const FormatException('Batch object changed.');
+              if (!replica.selection.includes(item)) {
+                batched.add(item.entryId);
+                processed++;
+                failed = true;
+                continue;
+              }
+              expected[item.entryId] = item;
+              mask |= BigInt.one << i;
+            }
+            if (expected.isEmpty) continue;
+            await replica.prepareReceiveBatch(expected.values.toList());
+            final response =
+                await _request(http, 'GET', '/v2/batch-object', query: {
+              'batchId': prepared['batchId'] as String,
+              'mask': mask.toRadixString(16),
+            });
+            final seen = <String>{};
+            await for (final frame in decodeSmallFileBatch(
+                response.timeout(ioTimeout),
+                cancellation: cancellation)) {
+              final item = expected[frame.entryId];
+              if (item == null ||
+                  !seen.add(frame.entryId) ||
+                  frame.sourceId != item.sourceId ||
+                  frame.revisionId != item.revisionId) {
+                throw const FormatException('Unexpected batch frame.');
+              }
+              if (frame.status != 200) continue;
+              if (jsonEncode(frame.item?.toJson()) != jsonEncode(item.toJson()))
+                throw const FormatException('Batch metadata changed.');
+              if (!replica.selection.includes(item)) {
+                batched.add(item.entryId);
+                processed++;
+                continue;
+              }
+              try {
+                await replica.receive(item, Stream.value(frame.bytes),
+                    cancellation: cancellation);
+                downloaded++;
+                batched.add(item.entryId);
+                processed++;
+                report(total);
+              } on LibraryContentIntegrityException {
+                /* Retry only this file below. */
+              }
+            }
+            if (seen.length != expected.length)
+              throw const FormatException('Batch omitted an object.');
+          } on SyncProtocolException catch (error) {
+            if (error.status != 404 && error.status != 410) rethrow;
+            if (error.status == 404) _smallBatchesAvailable = false;
+            break;
+          } on FormatException {
+            // Framing cannot safely locate later records. Retry only files
+            // that have not already passed their independent atomic import.
+          }
+        }
       }
       for (var item in targets) {
         cancellation?.check();
+        if (batched.contains(item.entryId)) continue;
         if (!replica.selection.includes(item)) continue;
         try {
           if (item.hash == null ||
@@ -1178,6 +1455,15 @@ class SyncClient {
             final staged = transfer == null
                 ? null
                 : await transfer.wait(_transferNamespace, item, cancellation);
+            if (staged != null) {
+              final available = staged.companions.isNotEmpty
+                  ? staged.companions
+                  : (await transfer!.staged(_transferNamespace))
+                      .map((file) => file.item)
+                      .toList();
+              await replica.prepareReceiveBatch(
+                  available.where(replica.selection.includes).toList());
+            }
             final resolved = staged?.item ??
                 CatalogItem.fromJson(await _json(http, '/v2/prepare', body: {
                   'entryId': item.entryId,
@@ -1209,8 +1495,10 @@ class SyncClient {
             } else {
               replica.rememberResolved(item);
             }
-            if (staged != null)
-              await transfer!.acknowledge(_transferNamespace, item);
+            if (staged != null) {
+              acknowledgements.add(item);
+              if (acknowledgements.length >= 32) await acknowledgePending();
+            }
           }
         } catch (error) {
           if (error is SyncCancelled || cancellation?.isCancelled == true)
@@ -1244,6 +1532,7 @@ class SyncClient {
           _libraryFailureMessage(failure),
           failure);
     } finally {
+      await acknowledgePending();
       cancellation?.removeListener(cancel);
       http.close(force: true);
       if (cancellation?.isCancelled == true)

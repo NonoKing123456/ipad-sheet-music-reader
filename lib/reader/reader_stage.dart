@@ -11,6 +11,12 @@ bool get isMobileReader =>
     defaultTargetPlatform == TargetPlatform.android;
 bool get canPreviewReader => defaultTargetPlatform == TargetPlatform.windows;
 
+/// Only the reader's exposed surround changes; score pixels retain their colour.
+Color readerSurroundColor(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+    ? Colors.black
+    : Theme.of(context).colorScheme.surfaceContainerLowest;
+
 /// Root navigation visibility distinguishes opaque pages from local popups.
 class ReaderRouteVisibilityObserver extends NavigatorObserver
     with ChangeNotifier {
@@ -245,10 +251,8 @@ class _ReaderStageState extends State<ReaderStage>
     if (isMobileReader) {
       unawaited(
         SystemChrome.setEnabledSystemUIMode(
-          defaultTargetPlatform == TargetPlatform.iOS
-              ? SystemUiMode.manual
-              : SystemUiMode.immersiveSticky,
-          overlays: const [],
+          SystemUiMode.manual,
+          overlays: SystemUiOverlay.values,
         ),
       );
     }
@@ -302,79 +306,94 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      final size = constraints.biggest;
-      _measureObstruction();
-      if (_viewport != null && _viewport != size) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) widget.onViewportChanged?.call();
-        });
-      }
-      _viewport = size;
-      return Stack(
-        key: const ValueKey('reading-viewport'),
-        fit: StackFit.expand,
-        children: [
-          widget.contentBuilder(_toggle),
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 0,
-            child: SafeArea(
-              bottom: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _animatedTools(
-                    KeyedSubtree(key: _topKey, child: widget.top),
-                    const Offset(0, -1),
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: Theme.of(context).brightness == Brightness.dark
+        ? SystemUiOverlayStyle.light.copyWith(
+            statusBarColor: Colors.black,
+            systemNavigationBarColor: Colors.black,
+          )
+        : SystemUiOverlayStyle.dark,
+    child: ColoredBox(
+      key: const ValueKey('reader-surround'),
+      color: readerSurroundColor(context),
+      child: SafeArea(
+        bottom: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final size = constraints.biggest;
+            _measureObstruction();
+            if (_viewport != null && _viewport != size) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) widget.onViewportChanged?.call();
+              });
+            }
+            _viewport = size;
+            return Stack(
+              key: const ValueKey('reading-viewport'),
+              fit: StackFit.expand,
+              children: [
+                widget.contentBuilder(_toggle),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: SafeArea(
+                    bottom: false,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _animatedTools(
+                          KeyedSubtree(key: _topKey, child: widget.top),
+                          const Offset(0, -1),
+                        ),
+                        if (!widget.hasReadablePage) ...widget.notices,
+                      ],
+                    ),
                   ),
-                  if (!widget.hasReadablePage) ...widget.notices,
-                ],
-              ),
-            ),
-          ),
-          if (widget.hasReadablePage && widget.notices.isNotEmpty)
-            Positioned(
-              top: _tools ? (_reportedObstruction?.top ?? 120) + 8 : 8,
-              right: 8,
-              child: SafeArea(
-                child: ReaderStatusButton(
-                  label: widget.statusLabel,
-                  details: widget.notices,
                 ),
-              ),
-            ),
-          if (widget.loading)
-            const Positioned(
-              right: 18,
-              bottom: 18,
-              child: IgnorePointer(
-                child: SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                if (widget.hasReadablePage && widget.notices.isNotEmpty)
+                  Positioned(
+                    top: _tools ? (_reportedObstruction?.top ?? 120) + 8 : 8,
+                    right: 8,
+                    child: SafeArea(
+                      child: ReaderStatusButton(
+                        label: widget.statusLabel,
+                        details: widget.notices,
+                      ),
+                    ),
+                  ),
+                if (widget.loading)
+                  const Positioned(
+                    right: 18,
+                    bottom: 18,
+                    child: IgnorePointer(
+                      child: SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                  ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: SafeArea(
+                    top: false,
+                    child: _animatedTools(
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 18),
+                        child: widget.bottom,
+                      ),
+                      const Offset(0, 1),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(
-              top: false,
-              child: _animatedTools(
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 18),
-                  child: widget.bottom,
-                ),
-                const Offset(0, 1),
-              ),
-            ),
-          ),
-        ],
-      );
-    },
+              ],
+            );
+          },
+        ),
+      ),
+    ),
   );
   Widget _animatedTools(Widget child, Offset from) => IgnorePointer(
     ignoring: !_tools,

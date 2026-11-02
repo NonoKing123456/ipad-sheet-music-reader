@@ -14,12 +14,15 @@ import 'package:flutter/services.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
+import 'package:reader_state/reader_state.dart' show PageKey;
 
 import '../reader/library_reader_screen.dart';
 import '../reader/reader_session.dart';
 import '../reader/set_lists_screen.dart';
 import 'sync_controller.dart';
 import 'sync_screen.dart';
+import '../theme/app_theme.dart';
+import '../sharing/score_share.dart';
 
 class OfflineLibraryScreen extends StatefulWidget {
   const OfflineLibraryScreen({
@@ -88,6 +91,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   String _folder = '';
   bool _withinFolder = false;
   bool _opening = false;
+  final Set<String> _sharingEntries = {};
   String? _sourceId, _dismissedMessage;
   String? get _activeSourceId {
     final sources = widget.controller.offlineSources;
@@ -455,6 +459,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
               constraints.maxWidth < 700 ||
               MediaQuery.textScalerOf(context).scale(14) > 18;
           final otherActionsWidth =
+              48.0 + // Appearance.
               48.0 + // Search.
               (!_searchOpen ? 48 : 0) + // Set lists.
               (!wide && !widget.isHome ? 48 : 0) + // Folders.
@@ -545,6 +550,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                       icon: const Icon(Icons.arrow_back),
                     ),
               actions: [
+                const ThemeAction(),
                 IconButton(
                   tooltip: _searchOpen ? '关闭搜索' : '搜索',
                   icon: Icon(_searchOpen ? Icons.close : Icons.search),
@@ -768,43 +774,63 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                         path: entry.relativePath,
                                         service: sync.pageCounts,
                                       ),
-                                      menuAction: PopupMenuButton<String>(
-                                        tooltip: '离线选项',
-                                        onSelected: (value) => unawaited(
-                                          value == 'download'
-                                              ? _download(entry: entry)
-                                              : value == 'remove'
-                                              ? sync.removeOfflineDownload(
-                                                  entry.id,
-                                                )
-                                              : sync.selectOffline(
-                                                  OfflineRule(
-                                                    sourceId: sync.sourceIdFor(
-                                                      entry.id,
-                                                    )!,
-                                                    entryId: entry.id,
-                                                    selected: false,
+                                      menuAction: Builder(
+                                        builder: (shareContext) =>
+                                            PopupMenuButton<String>(
+                                              tooltip: '离线选项',
+                                              enabled: !_sharingEntries
+                                                  .contains(entry.id),
+                                              onSelected: (value) => unawaited(
+                                                value == 'share'
+                                                    ? _shareEntry(
+                                                        shareContext,
+                                                        entry,
+                                                      )
+                                                    : value == 'download'
+                                                    ? _download(entry: entry)
+                                                    : value == 'remove'
+                                                    ? sync.removeOfflineDownload(
+                                                        entry.id,
+                                                      )
+                                                    : sync.selectOffline(
+                                                        OfflineRule(
+                                                          sourceId: sync
+                                                              .sourceIdFor(
+                                                                entry.id,
+                                                              )!,
+                                                          entryId: entry.id,
+                                                          selected: false,
+                                                        ),
+                                                      ),
+                                              ),
+                                              itemBuilder: (_) => [
+                                                PopupMenuItem(
+                                                  value: 'share',
+                                                  enabled: ready,
+                                                  child: Text(
+                                                    ready ? '分享' : '下载后可分享',
                                                   ),
                                                 ),
-                                        ),
-                                        itemBuilder: (_) => [
-                                          if (!ready || pending)
-                                            PopupMenuItem(
-                                              value: 'download',
-                                              child: Text(
-                                                pending ? '更新下载' : '下载到iPad',
-                                              ),
+                                                if (!ready || pending)
+                                                  PopupMenuItem(
+                                                    value: 'download',
+                                                    child: Text(
+                                                      pending
+                                                          ? '更新下载'
+                                                          : '下载到iPad',
+                                                    ),
+                                                  ),
+                                                const PopupMenuItem(
+                                                  value: 'unselect',
+                                                  child: Text('取消离线选择'),
+                                                ),
+                                                if (ready)
+                                                  const PopupMenuItem(
+                                                    value: 'remove',
+                                                    child: Text('移除本机下载'),
+                                                  ),
+                                              ],
                                             ),
-                                          const PopupMenuItem(
-                                            value: 'unselect',
-                                            child: Text('取消离线选择'),
-                                          ),
-                                          if (ready)
-                                            const PopupMenuItem(
-                                              value: 'remove',
-                                              child: Text('移除本机下载'),
-                                            ),
-                                        ],
                                       ),
                                     ),
                                   );
@@ -821,6 +847,47 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       );
     },
   );
+  Future<void> _shareEntry(BuildContext anchor, LibraryEntry entry) async {
+    if (!_sharingEntries.add(entry.id)) return;
+    setState(() {});
+    try {
+      final target = widget.controller.locateOffline(entry.id);
+      if (target == null) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('请先下载这份曲谱，再分享原文件。')));
+        return;
+      }
+      final workspace = widget.controller.workspace;
+      await shareScore(
+        anchor,
+        filePath: target.filePath,
+        fileName: p.posix.basename(target.displayPath),
+        validate: target.validateBeforeRead,
+        beforeShare: () async {
+          if (!workspace.savingAnnotations) await workspace.retryStrokes();
+          if (workspace.savingAnnotations || workspace.unsavedCount > 0) {
+            if (mounted) {
+              ScaffoldMessenger.of(context)
+                  .showSnackBar(const SnackBar(content: Text('批注尚未保存，请稍后分享。')));
+            }
+            return false;
+          }
+          return true;
+        },
+        annotationsFor: (number) => workspace.annotationsFor(
+          PageKey(
+            entryId: target.entryId,
+            revisionId: target.revisionId,
+            pageNumber: number,
+          ),
+        ),
+      );
+    } finally {
+      _sharingEntries.remove(entry.id);
+      if (mounted) setState(() {});
+    }
+  }
+
   void _ensureHierarchy(List<String> folders) {
     final key = (
       widget.controller.activeCollection?.directory ?? folders,
@@ -844,7 +911,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       ],
     ];
     return Material(
-      color: const Color(0xfff6f5ef),
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Column(
         children: [
           Expanded(

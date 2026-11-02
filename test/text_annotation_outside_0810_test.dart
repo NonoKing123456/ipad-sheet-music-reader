@@ -252,7 +252,7 @@ void main() {
         expect(state.turns, 0);
         expect(find.byType(TextField), findsNothing);
         final generation = workspace.store.snapshot.generation;
-        await tester.tap(find.byTooltip('编辑文字'));
+        state.controls.onEdit!();
         await tester.pump();
         await tester.tapAt(state.paperPoint(0, .8, .8));
         await _until(tester, () => !state.controls.editing);
@@ -304,7 +304,7 @@ void main() {
           tester,
           () => !workspace.savingAnnotations && !state.controls.saving,
         );
-        await tester.tap(find.byTooltip('编辑文字'));
+        state.controls.onEdit!();
         await tester.pump();
         await tester.enterText(find.byType(TextField), '');
         await tester.tapAt(state.paperPoint(1, .8, .8));

@@ -417,16 +417,40 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
   Widget _label(int? count) {
     final appearance = scoreFileAppearance(widget.path);
     final extension = appearance.label;
+    final scheme = Theme.of(context).colorScheme;
+    final dark = scheme.brightness == Brightness.dark;
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    final countLabel = Tooltip(
+      message: count == null ? '尚未取得页数' : '$count页',
+      child: Text(
+        count == null
+            ? compact
+                  ? '—'
+                  : '待获取'
+            : '$count页',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: compact ? 12 : 13,
+          color: scheme.onSurfaceVariant,
+        ),
+      ),
+    );
     return Semantics(
       label: count == null ? '$extension，尚未取得页数' : '$extension，$count页',
       child: SizedBox(
-        width: 100,
+        width: compact ? 84 : 100,
         child: Row(
           children: [
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
               decoration: BoxDecoration(
-                color: appearance.background,
+                color: dark
+                    ? Color.alphaBlend(
+                        appearance.foreground.withValues(alpha: .28),
+                        scheme.surfaceContainerHigh,
+                      )
+                    : appearance.background,
                 borderRadius: BorderRadius.circular(5),
               ),
               child: Text(
@@ -434,17 +458,15 @@ class _ScoreFileMetadataState extends State<ScoreFileMetadata> {
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color: appearance.foreground,
+                  color: dark
+                      ? Color.lerp(appearance.foreground, scheme.onSurface, .78)
+                      : appearance.foreground,
                 ),
               ),
             ),
-            const Spacer(),
-            Tooltip(
-              message: count == null ? '尚未取得页数' : '$count页',
-              child: Text(
-                count == null ? '待获取' : '$count页',
-                style: const TextStyle(fontSize: 13, color: Color(0xff65736b)),
-              ),
+            SizedBox(width: compact ? 4 : 8),
+            Expanded(
+              child: Align(alignment: Alignment.centerRight, child: countLabel),
             ),
           ],
         ),
@@ -473,14 +495,17 @@ class ScoreFileTrailing extends StatelessWidget {
   final Widget metadata, menuAction;
   static const width = 160.0;
   @override
-  Widget build(BuildContext context) => SizedBox(
-    width: width,
-    child: Row(
-      children: [
-        SizedBox(width: 100, child: metadata),
-        const SizedBox(width: 12),
-        SizedBox(width: 48, child: menuAction),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    return SizedBox(
+      width: compact ? 128 : width,
+      child: Row(
+        children: [
+          SizedBox(width: compact ? 84 : 100, child: metadata),
+          if (!compact) const SizedBox(width: 12),
+          SizedBox(width: compact ? 44 : 48, child: menuAction),
+        ],
+      ),
+    );
+  }
 }

@@ -1765,7 +1765,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     final transfer = _backgroundTransfer, client = _client;
     if (transfer == null || client == null || busy) return;
     try {
-      await transfer.resume(client.backgroundTransferNamespace);
+      await transfer.resume(
+        client.backgroundTransferNamespace,
+        selection: collection?.selection,
+      );
       message = '已继续后台下载。';
     } catch (_) {
       message = '下载尚未恢复，请检查空间后重试。';

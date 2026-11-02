@@ -14,7 +14,8 @@ import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_screen.dart';
 import 'package:score_reader/reader/library_reader_screen.dart';
-import 'package:score_reader/reader/annotation_canvas.dart';
+import 'package:score_reader/reader/annotation_text_layer.dart';
+import 'package:score_reader/reader/reader_page_seek_bar.dart';
 import 'package:score_reader/reader/reader_stage.dart';
 import 'package:score_reader/reader/reader_screen.dart';
 import 'package:score_reader/reader/reader_session.dart';
@@ -157,7 +158,7 @@ void main() {
           );
         }
         await settleReader(tester);
-        final paper = find.byType(AnnotationCanvas).hitTestable();
+        final paper = find.byType(AnnotationTextLayer).hitTestable();
         final viewport = find.byKey(const ValueKey('reading-viewport'));
         expect(tester.getSize(viewport), const Size(810, 1080));
         expect(tester.getSize(paper), const Size(810, 1080));
@@ -191,7 +192,12 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 30));
         });
         await settleReader(tester);
-        expect(find.text('2 / 3'), findsOneWidget);
+        expect(
+          tester
+              .widget<ReaderPageSeekBar>(find.byType(ReaderPageSeekBar))
+              .currentPage,
+          2,
+        );
         await tester.runAsync(() async {
           await tester.sendKeyDownEvent(LogicalKeyboardKey.pageDown);
           await tester.sendKeyRepeatEvent(LogicalKeyboardKey.pageDown);
@@ -199,13 +205,18 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 30));
         });
         await settleReader(tester);
-        expect(find.text('3 / 3'), findsOneWidget);
+        expect(
+          tester
+              .widget<ReaderPageSeekBar>(find.byType(ReaderPageSeekBar))
+              .currentPage,
+          3,
+        );
         await tester.binding.setSurfaceSize(const Size(1080, 810));
         await tester.pump();
         expect(tester.getSize(viewport), const Size(1080, 810));
         expect(tester.getSize(paper).height, closeTo(810, .01));
         expect(tester.getSize(paper).width, closeTo(607.5, .01));
-        await tester.tap(find.byTooltip('收起阅读工具'));
+        await tester.tap(find.byTooltip('完成批注'));
         await settleReader(tester);
         expect(
           tester
@@ -249,7 +260,7 @@ void main() {
                 call.method == 'SystemChrome.setEnabledSystemUIOverlays' &&
                 (call.arguments as List).isEmpty,
           ),
-          isTrue,
+          isFalse,
         );
         expect(
           calls.any(

@@ -58,6 +58,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     for (final handle in TextHandleKind.values) handle: GlobalKey(),
   };
   String? _selected, _error;
+  final _deleteKey = GlobalKey();
+  String? _lastTapId;
+  Duration? _lastTapTime;
+  Offset? _lastTapPosition;
   TextAnnotation? _original, _preview, _candidate, _editBase, _draft;
   Offset? _origin, _globalOrigin;
   double _slop = kTouchSlop;
@@ -96,7 +100,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (draft == null) return null;
     final text = _controller.text;
     return draft.revise(
-      text: text.trim().isEmpty || text.length > 8192 ? '输入文字' : text,
+      // The persisted model requires nonempty text. This invisible UI-only
+      // glyph measures one empty line; the controller and saved content stay real.
+      text: text.trim().isEmpty || text.length > 8192 ? '\u200b' : text,
       now: draft.updatedUtc,
       version: draft.version,
     );
@@ -295,6 +301,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       (event.kind == PointerDeviceKind.mouse &&
           event.buttons == kPrimaryButton);
   void _down(PointerDownEvent event, Size size) {
+    if (widget.suspended) return;
     if (widget.textTool && _controls.editing) {
       if (readerTextHandleActive ||
           !_primary(event) ||
@@ -304,6 +311,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       }
       final blank =
           !_inside(_inputKey, event.position) &&
+          !_inside(_deleteKey, event.position) &&
           !_handleKeys.values.any((key) => _inside(key, event.position));
       _paperSessionPointers.add(event.pointer);
       _controls.paperDown(event, blank: blank);
@@ -317,6 +325,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         !_controls.availableTo(this) ||
         widget.workspace.savingAnnotations ||
         _handleKeys.values.any((key) => _inside(key, event.position)) ||
+        _inside(_deleteKey, event.position) ||
         _inside(widget.mouseControlKey, event.position) ||
         !_primary(event)) {
       return;
@@ -415,6 +424,16 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     }
     final moved = _dragged ? _preview : null, original = _original;
     final selected = !_dragged ? _candidate : null;
+    final doubleTap =
+        selected != null &&
+        _lastTapId == selected.id &&
+        _lastTapTime != null &&
+        event.timeStamp - _lastTapTime! <= kDoubleTapTimeout &&
+        _lastTapPosition != null &&
+        (event.position - _lastTapPosition!).distance < kDoubleTapSlop;
+    _lastTapId = selected?.id;
+    _lastTapTime = selected == null ? null : event.timeStamp;
+    _lastTapPosition = selected == null ? null : event.position;
     final point = _candidate == null && !_dragged ? _origin : null;
     setState(() {
       _cancelPointer();
@@ -431,6 +450,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       );
     } else if (selected != null) {
       _bindSelection(selected, size);
+      if (doubleTap) {
+        _lastTapId = null;
+        _editor(size);
+      }
     }
     if (point != null) {
       _editor(
@@ -494,18 +517,36 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (_selection case final selected?) _bindSelection(selected, _lastSize);
   }
 
-  void _deleteSelection() {
+  Future<bool> _deleteSelection() async {
     final value = _selection;
-    if (value == null || widget.workspace.savingAnnotations) return;
-    setState(() => _selected = null);
-    _controls.release(this);
-    unawaited(
-      widget.workspace.saveText(
-        widget.page,
-        value.withDeletion(true, DateTime.now().toUtc()),
-        expected: TextEditBase(value),
-      ),
+    if (value == null || _committing || widget.workspace.savingAnnotations) {
+      return false;
+    }
+    setState(() {
+      _committing = true;
+      _preview = value;
+    });
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      value.withDeletion(true, DateTime.now().toUtc()),
+      expected: TextEditBase(value),
     );
+    if (!mounted) return saved;
+    setState(() => _committing = false);
+    if (saved) {
+      setState(() {
+        _selected = null;
+        _preview = null;
+      });
+      _controls.release(this);
+    } else {
+      _editor(_lastSize);
+      setState(() {
+        _preview = null;
+        _error = '未能保存，内容已保留。请再次点谱面重试。';
+      });
+    }
+    return saved;
   }
 
   void _closeEditor() {
@@ -596,7 +637,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _draft =
         selected ??
         widget.workspace.store.newText(
-          text: '输入文字',
+          text: '\u200b',
           anchor: anchor!,
           argb: _controls.argb | 0xff000000,
           fontSizeFraction: _nextSize,
@@ -609,7 +650,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       release: _releaseSelection,
       onColor: _changeColor,
       onCancel: _cancelEditor,
-      onDelete: selected == null ? null : _deleteEditing,
+      onDelete: _deleteEditing,
       onDone: () => _finishEditor(_lastSize),
     );
     if (!bound) {
@@ -628,6 +669,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   Future<bool> _finishEditor(Size size) async {
     if (!_editorOpen) return true;
+    if (_committing) return false;
     if (_controller.text.trim().isEmpty) {
       if (_editBase != null) return _deleteEditing();
       _cancelEditor();
@@ -662,7 +704,11 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   Future<bool> _deleteEditing() async {
     final base = _editBase;
-    if (base == null || _committing) return false;
+    if (_committing) return false;
+    if (base == null) {
+      _cancelEditor();
+      return true;
+    }
     setState(() => _committing = true);
     final saved = await widget.workspace.saveText(
       widget.page,
@@ -879,7 +925,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
               _scheduleReveal();
             },
             decoration: InputDecoration(
-              hintText: '输入文字',
               isDense: true,
               filled: true,
               fillColor: const Color(0xe6ffffff),
@@ -960,6 +1005,14 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       rotation: value.rotation,
       scale: scale,
     );
+    final deletion = layoutTextDelete(
+      frame: controlFrame,
+      rotationCentre: frame.center,
+      viewport: paperViewport,
+      rotation: value.rotation,
+      scale: scale,
+      handles: placements.values,
+    );
     final clipRect = Rect.fromPoints(
       overlay.globalToLocal(visible.topLeft),
       overlay.globalToLocal(visible.bottomRight),
@@ -983,6 +1036,17 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                     overlay,
                     clipRect.topLeft,
                   ),
+                _handleWidget(
+                  null,
+                  value,
+                  frame,
+                  size,
+                  scale,
+                  deletion,
+                  paper,
+                  overlay,
+                  clipRect.topLeft,
+                ),
               ],
             ),
           ),
@@ -992,7 +1056,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   }
 
   Widget _handleWidget(
-    TextHandleKind handle,
+    TextHandleKind? handle,
     TextAnnotation value,
     Rect frame,
     Size size,
@@ -1015,11 +1079,13 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       TextHandleKind.move => '移动文字',
       TextHandleKind.transform => '缩放并旋转文字',
       TextHandleKind.width => '调整换行宽度',
+      null => '删除文字',
     };
     final icon = switch (handle) {
       TextHandleKind.move => Icons.open_with,
       TextHandleKind.transform => Icons.rotate_right,
       TextHandleKind.width => Icons.swap_horiz,
+      null => Icons.delete_outline,
     };
     return Positioned(
       left: centre.dx - 22,
@@ -1029,39 +1095,59 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       child: Transform.rotate(
         angle: value.rotation,
         child: Listener(
-          key: _handleKeys[handle],
+          key: handle == null ? _deleteKey : _handleKeys[handle],
           behavior: HitTestBehavior.opaque,
-          onPointerDown: (e) => _handleDown(handle, e, size),
-          onPointerMove: (e) => _handleMove(e, size),
-          onPointerUp: (e) => _handleUp(e, size),
-          onPointerCancel: (_) => setState(_cancelHandle),
-          child: Tooltip(
-            message: label,
-            child: Semantics(
-              label: label,
-              button: true,
-              child: Stack(
-                children: [
-                  Positioned(
-                    left: visualOffset.dx,
-                    top: visualOffset.dy,
-                    width: 28,
-                    height: 28,
-                    child: DecoratedBox(
-                      key: ValueKey('text-handle-visual-${handle.name}'),
-                      decoration: BoxDecoration(
-                        color: const Color(0xfffaf9f5),
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(color: const Color(0xff52615c)),
-                      ),
-                      child: Icon(
-                        icon,
-                        size: 16,
-                        color: const Color(0xff52615c),
+          onPointerDown: handle == null
+              ? (_) => _controls.cancelPaperTap()
+              : (e) => _handleDown(handle, e, size),
+          onPointerMove: handle == null ? null : (e) => _handleMove(e, size),
+          onPointerUp: handle == null ? null : (e) => _handleUp(e, size),
+          onPointerCancel: handle == null
+              ? null
+              : (_) => setState(_cancelHandle),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: handle != null || _committing || _controls.saving
+                ? null
+                : () {
+                    unawaited(_controls.delete());
+                  },
+            child: Tooltip(
+              message: label,
+              child: Semantics(
+                label: label,
+                button: true,
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: visualOffset.dx,
+                      top: visualOffset.dy,
+                      width: 28,
+                      height: 28,
+                      child: DecoratedBox(
+                        key: ValueKey(
+                          'text-handle-visual-${handle?.name ?? 'delete'}',
+                        ),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.surface,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(
+                            color: handle == null
+                                ? Theme.of(context).colorScheme.error
+                                : Theme.of(context).colorScheme.outline,
+                          ),
+                        ),
+                        child: Icon(
+                          icon,
+                          size: 16,
+                          color: handle == null
+                              ? Theme.of(context).colorScheme.error
+                              : Theme.of(context).colorScheme.onSurface,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),

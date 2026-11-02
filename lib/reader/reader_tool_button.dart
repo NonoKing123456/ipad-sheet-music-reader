@@ -73,7 +73,7 @@ class _ReaderToolButtonState extends State<ReaderToolButton> {
         child: Material(
           elevation: 6,
           borderRadius: BorderRadius.circular(12),
-          color: const Color(0xfffaf9f5),
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -119,7 +119,7 @@ class _ReaderToolButtonState extends State<ReaderToolButton> {
         _start = widget.value;
         _travel = 0;
         _dragging = true;
-        widget.onSelect();
+        if (!widget.selected) widget.onSelect();
         _portal.show();
       },
       onHorizontalDragUpdate: (event) {

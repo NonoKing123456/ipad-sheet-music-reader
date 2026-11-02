@@ -417,7 +417,7 @@ void main() {
         await tester.pump();
         await tester.tapAt(location(created));
         await tester.pump();
-        expect(find.byTooltip('编辑文字'), findsOneWidget);
+        expect(find.byTooltip('移动文字'), findsOneWidget);
         state.transform.value = Matrix4.diagonal3Values(4, 4, 1)
           ..setTranslationRaw(-720, -960, 0);
         await tester.pump();
@@ -526,7 +526,7 @@ void main() {
         );
         await tester.tapAt(Offset(anchor.x * 600 + 2, anchor.y * 800 + 2));
         await tester.pump();
-        await tester.tap(find.byTooltip('编辑文字'));
+        state.textControls.onEdit!();
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '取消的文字');
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);

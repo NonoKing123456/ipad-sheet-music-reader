@@ -203,20 +203,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
   }
 
-  void _zoom(double factor) {
-    final next = (_scale * factor).clamp(1.0, 4.0);
-    final viewport =
-        _viewportKey.currentContext?.findRenderObject() as RenderBox?;
-    final centre = viewport?.size.center(Offset.zero) ?? Offset.zero;
-    final scene = _transform.toScene(centre);
-    _transform.value = Matrix4.diagonal3Values(next, next, 1)
-      ..setTranslationRaw(
-        centre.dx - scene.dx * next,
-        centre.dy - scene.dy * next,
-        0,
-      );
-  }
-
   void _onRendered(int number) {
     if (_renderedPages.add(number)) {
       debugPrint(
@@ -327,23 +313,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   icon: const Icon(Icons.screen_rotation_outlined),
                   onPressed: () => setState(() => _landscape = !_landscape),
                 ),
-              if (_ready) ...[
-                IconButton(
-                  tooltip: '缩小',
-                  onPressed: () => _zoom(1 / 1.25),
-                  icon: const Icon(Icons.remove, size: 20),
-                ),
-                IconButton(
-                  tooltip: '恢复整页',
-                  onPressed: () => _transform.value = Matrix4.identity(),
-                  icon: const Icon(Icons.fit_screen, size: 20),
-                ),
-                IconButton(
-                  tooltip: '放大',
-                  onPressed: () => _zoom(1.25),
-                  icon: const Icon(Icons.add, size: 20),
-                ),
-              ],
               const SizedBox(width: 8),
               FilledButton.icon(
                 onPressed: _chooseFile,

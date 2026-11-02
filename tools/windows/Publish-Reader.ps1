@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$ReleaseDirectory,
-  [switch]$InstallLauncher
+  [switch]$InstallLauncher,
+  [ValidateSet('legacy', 'share-v1')][string]$LayoutProfile = 'legacy',
+  [switch]$ValidateOnly
 )
 $ErrorActionPreference = 'Stop'
 $appId = 'SheetMusicReader.Desktop'
@@ -10,6 +12,7 @@ $release = (Resolve-Path -LiteralPath $ReleaseDirectory).Path.TrimEnd('\')
 $name = Split-Path $release -Leaf
 if ($name -notmatch '^reader-update-(\d+\.\d+\.\d+\+\d+)-win-x64$') { throw 'Expected a versioned reader-update-x.y.z+N-win-x64 directory.' }
 $version = $Matches[1]
+if ($LayoutProfile -eq 'legacy' -and [Version]($version.Replace('+', '.')) -ge [Version]'0.8.10.31') { throw 'Release 0.8.10+31 and later requires -LayoutProfile share-v1.' }
 $members = @(
   'dartjni.dll', 'file_selector_windows_plugin.dll', 'flutter_windows.dll',
   'native_assets.json', 'pdfium.dll', 'pdfrx_pdfium_gate.dll', 'score_reader.exe',
@@ -21,17 +24,24 @@ $members = @(
   'data\flutter_assets\shaders\ink_sparkle.frag',
   'data\flutter_assets\shaders\stretch_effect.frag'
 )
+if ($LayoutProfile -eq 'share-v1') { $members += 'share_plus_plugin.dll' }
 if ((Get-Item -LiteralPath $release).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Release cannot be a reparse point.' }
 $items = @(Get-ChildItem -LiteralPath $release -Recurse -Force)
 if (@($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Release contains a reparse point.' }
 $files = @($items | Where-Object { -not $_.PSIsContainer })
-if ($files.Count -ne 18) { throw "Expected 18 release files; found $($files.Count)." }
+if ($files.Count -ne $members.Count) { throw "Expected $($members.Count) release files for $LayoutProfile; found $($files.Count)." }
+$hashes = [ordered]@{}
 foreach ($member in $members) {
   $path = Join-Path $release $member
   if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) { throw "Missing or empty release member: $member" }
+  $hashes[$member] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $exeVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $release 'score_reader.exe'))
 if ($exeVersion.ProductVersion -ne $version) { throw "Executable product version $($exeVersion.ProductVersion) does not match $version." }
+if ($ValidateOnly) {
+  [ordered]@{ ok = $true; version = $version; layoutProfile = $LayoutProfile; members = $members; sha256 = $hashes; releaseDirectory = $release } | ConvertTo-Json -Depth 4
+  return
+}
 $install = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\SheetMusicReader'
 [IO.Directory]::CreateDirectory($install) | Out-Null
 $launcher = Join-Path $install '曲谱阅读器.exe'
@@ -62,7 +72,7 @@ $pointer = Join-Path $install 'deployment.json'
 $candidate = Join-Path $install ('deployment.' + [Guid]::NewGuid().ToString('N') + '.tmp')
 $verification = $candidate + '.verification.json'
 try {
-  $json = [ordered]@{ appId = $appId; version = $version; releaseDirectory = $release; members = $members } | ConvertTo-Json -Depth 4
+  $json = [ordered]@{ appId = $appId; version = $version; releaseDirectory = $release; members = $members; layoutProfile = $LayoutProfile; sha256 = $hashes } | ConvertTo-Json -Depth 4
   [IO.File]::WriteAllText($candidate, $json, $utf8)
   $process = Start-Process -FilePath $launcher -ArgumentList @('--verify', '--pointer', ('"' + $candidate + '"'), '--output', ('"' + $verification + '"')) -WindowStyle Hidden -PassThru -Wait
   if ($process.ExitCode -ne 0) { throw "Launcher rejected deployment: $([IO.File]::ReadAllText($verification))" }
@@ -79,6 +89,6 @@ if ($InstallLauncher -or -not (Test-Path -LiteralPath $shortcut)) {
   $identity = [ShortcutIdentity]::Inspect($shortcut)
   if ($identity[0] -ne $launcher -or $identity[1] -ne $appId) { throw 'Start shortcut identity verification failed.' }
 }
-[ordered]@{ version = $version; pointer = $pointer; launcher = $launcher; shortcut = $shortcut; appId = $appId;
+[ordered]@{ version = $version; layoutProfile = $LayoutProfile; pointer = $pointer; launcher = $launcher; shortcut = $shortcut; appId = $appId;
   executableSha256 = (Get-FileHash -LiteralPath (Join-Path $release 'score_reader.exe') -Algorithm SHA256).Hash;
   launcherSha256 = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash } | ConvertTo-Json

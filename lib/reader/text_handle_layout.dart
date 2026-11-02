@@ -11,6 +11,70 @@ class TextHandlePlacement {
   final Rect hitRect, visualRect;
 }
 
+/// A destructive action stays separate from both the input and the three
+/// manipulation targets, with the same screen-sized hit area.
+TextHandlePlacement layoutTextDelete({
+  required Rect frame,
+  required Rect viewport,
+  required double rotation,
+  required double scale,
+  required Iterable<TextHandlePlacement> handles,
+  Offset? rotationCentre,
+}) {
+  final u = 1 / scale, side = 44 * u;
+  final candidates = [
+    Offset(frame.left, frame.bottom + 2 * u),
+    Offset(frame.left - 46 * u, frame.center.dy - 22 * u),
+    Offset(frame.left, frame.top - 46 * u),
+    Offset(frame.right - side, frame.top - 46 * u),
+    Offset(frame.left - 46 * u, frame.bottom + 2 * u),
+    Offset(frame.right + 2 * u, frame.top - 46 * u),
+    Offset(frame.left - 46 * u, frame.top - 46 * u),
+    Offset(frame.right + 2 * u, frame.bottom + 2 * u),
+  ];
+  final pivot = rotationCentre ?? frame.center;
+  double overflow(Rect rect) {
+    var result = 0.0;
+    for (final point in [
+      rect.topLeft,
+      rect.topRight,
+      rect.bottomLeft,
+      rect.bottomRight,
+    ]) {
+      final d = point - pivot;
+      final p =
+          pivot +
+          Offset(
+            d.dx * math.cos(rotation) - d.dy * math.sin(rotation),
+            d.dx * math.sin(rotation) + d.dy * math.cos(rotation),
+          );
+      result +=
+          math.max(0, viewport.left - p.dx) +
+          math.max(0, p.dx - viewport.right) +
+          math.max(0, viewport.top - p.dy) +
+          math.max(0, p.dy - viewport.bottom);
+    }
+    return result;
+  }
+
+  Rect? best;
+  var score = double.infinity;
+  for (final point in candidates) {
+    final rect = point & Size.square(side);
+    if (rect.overlaps(frame) || handles.any((h) => h.hitRect.overlaps(rect))) {
+      continue;
+    }
+    final value = overflow(rect);
+    if (value < score) {
+      best = rect;
+      score = value;
+    }
+    if (value < .001) break;
+  }
+  final hit = best!;
+  return TextHandlePlacement(hit, hit.deflate(8 * u));
+}
+
 Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
   required Rect frame,
   required Rect viewport,

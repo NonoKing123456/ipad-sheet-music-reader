@@ -10,6 +10,7 @@ abstract interface class BackgroundTransfer {
       required String bearerToken,
       required List<CatalogItem> items,
       required bool prepare,
+      bool smallFileBatches = false,
       OfflineSelection? selection,
       required SyncCancellation? cancellation});
   Future<BackgroundTransferFile> wait(
@@ -19,10 +20,15 @@ abstract interface class BackgroundTransfer {
   Future<void> pause(String namespace);
 }
 
+abstract interface class BackgroundTransferBatchAcknowledger {
+  Future<void> acknowledgeMany(String namespace, List<CatalogItem> items);
+}
+
 class BackgroundTransferFile {
   const BackgroundTransferFile(this.item, this.path,
-      {this.requestedRevisionId});
+      {this.requestedRevisionId, this.companions = const []});
   final CatalogItem item;
   final String path;
   final String? requestedRevisionId;
+  final List<CatalogItem> companions;
 }

@@ -21,6 +21,8 @@ import 'reader_spreads.dart';
 import 'desktop_reader.dart';
 import 'reader_continuous.dart';
 import '../library/desktop_navigation_history.dart';
+import '../theme/app_theme.dart';
+import '../sharing/score_share.dart';
 
 class LibraryReaderScreen extends StatefulWidget {
   const LibraryReaderScreen({
@@ -90,7 +92,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   int _pickEpoch = 0;
   String? _pickMessage;
   EdgeInsets _panInsets = EdgeInsets.zero;
-  ReaderTool _tool = ReaderTool.pen;
+  ReaderTool? _tool;
   bool _textTool = false;
   final _sizes = <ReaderTool, double>{
     ReaderTool.pen: 3.2,
@@ -118,34 +120,44 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   PageKey? _historyPosition;
   String? _historyItemId;
   LoadedScore? _notifiedDocument;
+  ReaderSnapshot? _shareSnapshot;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final route = ModalRoute.of(context);
     if (route == null) return;
-    DesktopHistoryScope.of(context)?.reader(route, _leaveSafely, () {
-      final position = _historyPosition;
-      final latest = widget.locate(
-        position?.entryId ?? widget.initialTarget.entryId,
-      );
-      if (latest == null) return null;
-      return LibraryReaderScreen(
-        workspace: widget.workspace,
-        locate: widget.locate,
-        initialTarget: latest,
-        initialPageNumber: latest.revisionId == position?.revisionId
-            ? position!.pageNumber
-            : 1,
-        setListId: widget.setListId,
-        itemId: _historyItemId ?? widget.itemId,
-        sourceChanges: widget.sourceChanges,
-        loader: widget.loader,
-        allowAnnotations: widget.allowAnnotations,
-        onPresented: widget.onPresented,
-        onLoaded: widget.onLoaded,
-      );
-    }, blockKeys: () => _desktopMenuOpen || _sampleMenuOpen || _writing || readerTextEditorActive);
+    DesktopHistoryScope.of(context)?.reader(
+      route,
+      _leaveSafely,
+      () {
+        final position = _historyPosition;
+        final latest = widget.locate(
+          position?.entryId ?? widget.initialTarget.entryId,
+        );
+        if (latest == null) return null;
+        return LibraryReaderScreen(
+          workspace: widget.workspace,
+          locate: widget.locate,
+          initialTarget: latest,
+          initialPageNumber: latest.revisionId == position?.revisionId
+              ? position!.pageNumber
+              : 1,
+          setListId: widget.setListId,
+          itemId: _historyItemId ?? widget.itemId,
+          sourceChanges: widget.sourceChanges,
+          loader: widget.loader,
+          allowAnnotations: widget.allowAnnotations,
+          onPresented: widget.onPresented,
+          onLoaded: widget.onLoaded,
+        );
+      },
+      blockKeys: () =>
+          _desktopMenuOpen ||
+          _sampleMenuOpen ||
+          _writing ||
+          readerTextEditorActive,
+    );
   }
 
   @override
@@ -234,9 +246,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _textControlsChanged() {
-    if (mounted && (_textDraftActive != _textControls.editing || (_textTool && _color != _textControls.argb))) {
-      setState(() { _textDraftActive = _textControls.editing;
-        if (_textTool) { _color = _textControls.argb; _usingSample = false; }
+    if (mounted &&
+        (_textDraftActive != _textControls.editing ||
+            (_textTool && _color != _textControls.argb))) {
+      setState(() {
+        _textDraftActive = _textControls.editing;
+        if (_textTool) {
+          _color = _textControls.argb;
+          _usingSample = false;
+        }
       });
     }
   }
@@ -285,12 +303,45 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<bool> _leaveSafely() async {
-    if (!mounted || !await _textControls.finish() || (widget.allowAnnotations && !await _confirmLeaving())) {
+    if (!mounted ||
+        !await _textControls.finish() ||
+        (widget.allowAnnotations && !await _confirmLeaving())) {
       return false;
     }
     await widget.workspace.flushPositions();
     return mounted;
   }
+
+  Future<bool> _prepareShare() async {
+    _shareSnapshot = null;
+    if (_writing || !await _textControls.finish() || !mounted) return false;
+    if (widget.workspace.savingAnnotations ||
+        widget.workspace.unsavedCount > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.workspace.savingAnnotations
+                ? '批注正在保存，请稍后分享。'
+                : '批注尚未保存，请先重试保存。',
+          ),
+        ),
+      );
+      return false;
+    }
+    _shareSnapshot = widget.workspace.store.snapshot;
+    return true;
+  }
+
+  List<PageAnnotation> _shareAnnotations(ScoreTarget target, int pageNumber) =>
+      List.unmodifiable(
+        (_shareSnapshot ?? widget.workspace.store.snapshot).annotationsFor(
+          PageKey(
+            entryId: target.entryId,
+            revisionId: target.revisionId,
+            pageNumber: pageNumber,
+          ),
+        ),
+      );
 
   StrokeStyle get _style => StrokeStyle(
     tool: _tool == ReaderTool.highlighter
@@ -314,16 +365,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Future<void> _selectTool(ReaderTool tool) async {
     if (!await _textControls.finish() || !mounted) return;
-    setState(() { _cancelPick(); _textTool = false; _tool = tool; });
-  }
-  Future<void> _toggleTextTool() async {
-    if (!await _textControls.finish() || !mounted) return;
-    setState(() { _cancelPick();
-      if (!_textTool) _textControls.argb = _color;
-      _textTool = !_textTool;
+    setState(() {
+      _cancelPick();
+      _textTool = false;
+      _tool = _tool == tool ? null : tool;
     });
   }
 
+  Future<void> _toggleTextTool() async {
+    if (!await _textControls.finish() || !mounted) return;
+    setState(() {
+      _cancelPick();
+      if (!_textTool) _textControls.argb = _color;
+      _textTool = !_textTool;
+      _tool = null;
+    });
+  }
 
   Future<void> _sampleAction() async {
     if (_writing) return;
@@ -380,9 +437,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       setState(() {
         _cancelPick();
         _color = sample;
-        _tool = ReaderTool.pen;
         _usingSample = true;
       });
+      if (_textTool) _textControls.changeColor(sample);
     }
   }
 
@@ -393,6 +450,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _editing = editing;
       if (!editing) {
         _textTool = false;
+        _tool = null;
         _inputGeneration++;
         _cancelPick();
         _touchTransforming = false;
@@ -446,9 +504,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           _color = color.toARGB32() | 0xff000000;
           _lastSample = _color;
           _usingSample = true;
-          _tool = ReaderTool.pen;
           _picking = false;
         });
+        if (_textTool) _textControls.changeColor(_color);
       }
     } catch (_) {
       if (mounted && epoch == _pickEpoch) {
@@ -471,6 +529,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (!isMobileReader) return _desktop(current, page, title);
     return Scaffold(
       resizeToAvoidBottomInset: false,
+      backgroundColor: readerSurroundColor(context),
       body: ReaderStage(
         controller: _stageControls,
         hasReadablePage: _visiblePage != null,
@@ -485,7 +544,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         onNext: () => _navigate(NavigationDirection.forward),
         onViewportChanged: _resetViewport,
         top: Material(
-          color: const Color(0xfffaf9f5),
+          color: Theme.of(context).colorScheme.surface,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -501,27 +560,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
+                  const ThemeAction(),
+                  if (current != null)
+                    ShareAction(
+                      filePath: current.target.filePath,
+                      fileName: p.basename(title),
+                      validate: current.target.validateBeforeRead,
+                      beforeShare: _prepareShare,
+                      annotationsFor: (number) =>
+                          _shareAnnotations(current.target, number),
+                    ),
                   if (_editing && !_textDraftActive)
                     IconButton(
                       tooltip: '完成批注',
                       onPressed: _writing ? null : _stageControls.hideTools,
                       icon: const Icon(Icons.check),
                     ),
-                  IconButton(
-                    tooltip: '缩小',
-                    onPressed: () => _zoom(1 / 1.25),
-                    icon: const Icon(Icons.remove, size: 20),
-                  ),
-                  IconButton(
-                    tooltip: '恢复整页',
-                    onPressed: () => _transform.value = Matrix4.identity(),
-                    icon: const Icon(Icons.fit_screen, size: 20),
-                  ),
-                  IconButton(
-                    tooltip: '放大',
-                    onPressed: () => _zoom(1.25),
-                    icon: const Icon(Icons.add, size: 20),
-                  ),
                   if (_visibleDocument != null && _visibleDocument!.pdf == null)
                     PopupMenuButton<String>(
                       tooltip: '更多',
@@ -574,7 +628,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             _notice(workspace.textConflictNotice!),
           if (workspace.unsavedCount > 0)
             Material(
-              color: const Color(0xffffedcf),
+              color: Theme.of(context).colorScheme.tertiaryContainer,
               child: ListTile(
                 dense: true,
                 title: Text('${workspace.unsavedCount} 项批注未保存'),
@@ -634,15 +688,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   onPrevious: () => _navigate(NavigationDirection.backward),
                   onNext: () => _navigate(NavigationDirection.forward),
                   onCenterTap: _picking ? null : toggleTools,
-                  allowPointerPageTurns: !_picking && _scale <= 1.01,
+                  allowPointerPageTurns:
+                      !_picking &&
+                      !_textTool &&
+                      _tool == null &&
+                      _scale <= 1.01,
                   panInsets: _panInsets,
                   pageAspect:
                       _visibleDocument?.aspectFor(
                         _visiblePage?.pageNumber ?? 1,
                       ) ??
                       current.aspectFor(_session.page),
-                  mouseInk: true,
-                  editing: _editing,
+                  mouseInk: _editing && _tool != null,
+                  touchInk: _editing && _tool != null,
+                  editing: _editing && (_tool != null || _textTool),
                   gestureGeneration: _inputGeneration,
                   onTransformGestureChanged: (active) =>
                       setState(() => _touchTransforming = active),
@@ -651,7 +710,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   touchControlKey: _seekRegionKey,
                   textTool: _textTool,
                   textSelectionKey: _textSelectionKey,
-                  textControls: _textControls,
+                  textControls: _picking ? null : _textControls,
                   child: ReaderPageWindow(
                     documentKey: current.target.key,
                     pageNumber: _session.page,
@@ -781,7 +840,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _finishAnnotation() async {
-    if (_writing || !_editing || !await _textControls.finish() || !mounted) return;
+    if (_writing || !_editing || !await _textControls.finish() || !mounted) {
+      return;
+    }
     if (_desktopMode == ReaderViewMode.continuous &&
         _session.pageKey != _continuousEditStart) {
       _continuousRestore = null;
@@ -846,7 +907,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _notice(widget.workspace.textConflictNotice!),
     if (widget.allowAnnotations && widget.workspace.unsavedCount > 0)
       Material(
-        color: const Color(0xffffedcf),
+        color: Theme.of(context).colorScheme.tertiaryContainer,
         child: ListTile(
           dense: true,
           title: Text('${widget.workspace.unsavedCount} 项批注未保存'),
@@ -878,6 +939,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         '${shown.first == shown.last ? focus : '${shown.first}–${shown.last}'} / ${document?.pageCount ?? 1}';
     return Scaffold(
       resizeToAvoidBottomInset: false,
+      backgroundColor: readerSurroundColor(context),
       body: ReaderStage(
         top: const SizedBox.shrink(),
         bottom: const SizedBox.shrink(),
@@ -888,6 +950,18 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         allowOverlayPageKeys: _sampleMenuOpen,
         blockArrowKeys: _desktopMenuOpen,
         contentBuilder: (_) => DesktopReaderShell(
+          actions: [
+            const ThemeAction(),
+            if (document != null)
+              ShareAction(
+                filePath: document.target.filePath,
+                fileName: p.basename(title),
+                validate: document.target.validateBeforeRead,
+                beforeShare: _prepareShare,
+                annotationsFor: (number) =>
+                    _shareAnnotations(document.target, number),
+              ),
+          ],
           title: p.basename(title),
           pageLabel: pageLabel,
           mode: _effectiveDesktopMode,
@@ -923,6 +997,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               ? () => unawaited(_annotationAction())
               : null,
           onFinishEditing: _finishAnnotation,
+          beforeHideTools: () => _setEditing(false),
           editing: _editing,
           writing: _writing,
           textEditing: _textDraftActive,
@@ -1046,8 +1121,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             return ReaderInput(
               onPrevious: () => _navigate(NavigationDirection.backward),
               onNext: () => _navigate(NavigationDirection.forward),
-              onCenterTap: _editing || _picking ? null : toggleBar,
-              allowPointerPageTurns: !_editing && !_picking && _scale <= 1.01,
+              onCenterTap: _tool != null || _textTool || _picking
+                  ? null
+                  : toggleBar,
+              allowPointerPageTurns:
+                  _tool == null && !_textTool && !_picking && _scale <= 1.01,
               pageAspect: aspect(
                 groups
                     .forPage(
@@ -1057,16 +1135,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     )
                     .index,
               ),
-              mouseInk: _editing,
+              mouseInk: _editing && _tool != null,
+              touchInk: _editing && _tool != null,
               mouseWheel: true,
-              editing: _editing,
+              editing: _editing && (_tool != null || _textTool),
               gestureGeneration: _inputGeneration,
               transform: _transform,
               viewportKey: _viewportKey,
               touchControlKey: _seekRegionKey,
               textTool: _textTool,
               textSelectionKey: _textSelectionKey,
-              textControls: _textControls,
+              textControls: _picking ? null : _textControls,
               onTransformGestureChanged: (active) =>
                   setState(() => _touchTransforming = active),
               child: ReaderPageWindow(
@@ -1259,12 +1338,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             page: surfacePage,
             enabled:
                 active &&
+                _editing &&
+                (_tool != null || _textTool) &&
                 (isMobileReader ||
                     (_editing &&
                         surfacePage == _visiblePage &&
                         surfacePage == _session.pageKey)) &&
                 !_session.sourceChanged &&
-                !_picking &&
                 (!_textTool || (_editing && surfacePage == _visiblePage)),
             textTool: _textTool,
             style: _textTool
@@ -1276,7 +1356,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 : _style,
             eraser: _tool == ReaderTool.eraser,
             eraserRadiusFraction: _sizes[ReaderTool.eraser]! / 810,
-            suspended: _touchTransforming,
+            suspended: _touchTransforming || _picking,
             onWritingChanged: _writingChanged,
           ),
         if (_picking && surfacePage == _visiblePage)
@@ -1349,7 +1429,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Widget _notice(String message) => Container(
     width: double.infinity,
-    color: const Color(0xffffedcf),
+    color: Theme.of(context).colorScheme.tertiaryContainer,
     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
     child: Text(message, style: const TextStyle(fontSize: 12)),
   );
@@ -1359,7 +1439,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     child: Card(
       key: _textToolsKey,
       margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-      color: const Color(0xfffaf9f5),
+      color: Theme.of(context).colorScheme.surface,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: Wrap(
@@ -1368,9 +1448,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           alignment: WrapAlignment.center,
           children: [
             for (final tool in ReaderTool.values)
-              if (_textTool)
-                IconButton(tooltip: tool.label, icon: Icon(tool.icon), onPressed: () => _selectTool(tool))
-              else ReaderToolButton(
+              ReaderToolButton(
                 key: ValueKey(tool),
                 tool: tool,
                 selected: !_picking && !_textTool && _tool == tool,
@@ -1382,15 +1460,27 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               tooltip: '文字批注',
               isSelected: _textTool,
               icon: const Icon(Icons.text_fields),
+              style: IconButton.styleFrom(
+                fixedSize: const Size(44, 44),
+                minimumSize: const Size(44, 44),
+                maximumSize: const Size(44, 44),
+                padding: EdgeInsets.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                backgroundColor: _textTool
+                    ? Theme.of(context).colorScheme.secondaryContainer
+                    : Colors.transparent,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
               onPressed: _toggleTextTool,
             ),
-            if (_textTool) ReaderTextFormatControls(controller: _textControls),
-            if (!_textTool) ReaderSampleColorButton(
+            ReaderSampleColorButton(
               key: _sampleButtonKey,
               sample: _lastSample == null ? null : Color(_lastSample!),
               picking: _picking,
               busy: _sampling,
-              usingSample: _usingSample && _tool == ReaderTool.pen,
+              usingSample: _usingSample,
               onPressed:
                   _visiblePage == null ||
                       _visiblePage != _session.pageKey ||
@@ -1398,9 +1488,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   ? null
                   : _sampleAction,
             ),
-            if (!_textTool) ReaderAnnotationColors(argb:_color,onChanged:(color) => setState(() {
-              _cancelPick(); _usingSample = false; _color = color;
-            })),
+            ReaderAnnotationColors(
+              argb: _color,
+              onChanged: _textControls.saving
+                  ? null
+                  : (color) {
+                      setState(() {
+                        _cancelPick();
+                        _usingSample = false;
+                        _color = color;
+                      });
+                      if (_textTool) _textControls.changeColor(color);
+                    },
+            ),
             IconButton(
               tooltip: '撤销',
               onPressed: widget.workspace.store.canUndo(page)

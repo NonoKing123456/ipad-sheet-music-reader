@@ -58,6 +58,7 @@ class ReaderInput extends StatefulWidget {
     this.viewportKey,
     this.touchControlKey,
     this.mouseInk = false,
+    this.touchInk = false,
     this.onTransformGestureChanged,
     this.panInsets,
     this.pageAspect,
@@ -79,6 +80,7 @@ class ReaderInput extends StatefulWidget {
   final GlobalKey? viewportKey;
   final GlobalKey? touchControlKey;
   final bool mouseInk;
+  final bool touchInk;
   final ValueChanged<bool>? onTransformGestureChanged;
   final EdgeInsets? panInsets;
   final double? pageAspect;
@@ -296,7 +298,7 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_touches.containsKey(event.pointer)) {
       _touches[event.pointer] = event.localPosition;
       final controller = widget.transform;
-      if (controller != null && _touches.length == 2) {
+      if (controller != null && _touches.length == 2 && _inkPointers.isEmpty) {
         final a = _touches.values.first, b = _touches.values.last;
         final scale = (_startScale * (a - b).distance / _pinchDistance).clamp(
           1.0,
@@ -308,6 +310,7 @@ class _ReaderInputState extends State<ReaderInput> {
           _inkPointers.isEmpty &&
           !_textMoves.contains(event.pointer) &&
           _touches.length == 1 &&
+          !widget.touchInk &&
           (!widget.textTool ||
               _textPanning ||
               (_origin != null &&
@@ -365,6 +368,7 @@ class _ReaderInputState extends State<ReaderInput> {
     _touches.remove(event.pointer);
     if (_touches.isEmpty) _pinching = false;
     if (readerTextEditorActive ||
+        widget.touchInk ||
         _cancelled ||
         origin == null ||
         movingText ||

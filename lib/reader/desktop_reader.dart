@@ -28,10 +28,12 @@ class DesktopReaderShell extends StatefulWidget {
     this.annotationPages = const [],
     this.onMenuChanged,
     this.onFinishEditing,
+    this.beforeHideTools,
     this.editing = false,
     this.writing = false,
     this.textEditing = false,
     this.annotationTools,
+    this.actions = const [],
     this.bottom = const SizedBox.shrink(),
     this.notices = const [],
     this.statusLabel = '阅读状态',
@@ -46,10 +48,12 @@ class DesktopReaderShell extends StatefulWidget {
   final VoidCallback onPrevious, onNext, onBack, onFit, onJump;
   final ValueChanged<double> onZoom;
   final VoidCallback? onAnnotate, onFinishEditing;
+  final Future<bool> Function()? beforeHideTools;
   final ValueChanged<int>? onAnnotatePage;
   final List<int> annotationPages;
   final ValueChanged<bool>? onMenuChanged;
   final Widget? annotationTools;
+  final List<Widget> actions;
   final Widget bottom;
   final List<Widget> notices;
   final Widget Function(VoidCallback toggleBar) contentBuilder;
@@ -111,8 +115,14 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     }
   }
 
-  void _toggle() {
-    if (!widget.editing && !widget.writing) _pin(!_pinned);
+  Future<void> _toggle() async {
+    if (widget.writing) return;
+    if (_pinned &&
+        widget.beforeHideTools != null &&
+        !await widget.beforeHideTools!()) {
+      return;
+    }
+    if (mounted) _pin(!_pinned);
   }
 
   @override
@@ -158,7 +168,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       onExit: (_) => _overlayChanged(hover: false),
       child: Material(
         key: _barKey,
-        color: const Color(0xfffafafa),
+        color: Theme.of(context).colorScheme.surface,
         elevation: 1,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -368,24 +378,6 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                     controller.isOpen ? controller.close() : controller.open(),
         ),
       );
-      final zoom = _group(context, [
-        _ReaderBarButton(
-          icon: Icons.remove,
-          tooltip: '缩小',
-          onPressed: disabled ? null : () => widget.onZoom(1 / 1.25),
-        ),
-        _ReaderBarButton(
-          icon: Icons.fit_screen,
-          label: widget.mode == ReaderViewMode.continuous ? '适宽' : '整页',
-          tooltip: '恢复整页',
-          onPressed: disabled ? null : widget.onFit,
-        ),
-        _ReaderBarButton(
-          icon: Icons.add,
-          tooltip: '放大',
-          onPressed: disabled ? null : () => widget.onZoom(1.25),
-        ),
-      ]);
       final annotate = MenuAnchor(
         controller: _annotationMenu,
         childFocusNode: _annotationFocus,
@@ -493,11 +485,14 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       final collapse = _ReaderBarButton(
         icon: Icons.keyboard_arrow_up,
         tooltip: '收起工具栏',
-        onPressed: () {
+        onPressed: () async {
           _arrangementMenu.close();
           _annotationMenu.close();
-          widget.onFinishEditing?.call();
-          _pin(false);
+          if (widget.beforeHideTools != null &&
+              !await widget.beforeHideTools!()) {
+            return;
+          }
+          if (mounted) _pin(false);
         },
       );
       final title = Text(
@@ -510,16 +505,16 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         navigation,
         modes,
         if (widget.mode == ReaderViewMode.spread) arrangement,
-        zoom,
       ];
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: constraints.maxWidth >= 1120
+        child: constraints.maxWidth >= 1120 + widget.actions.length * 48
             ? Row(
                 children: [
                   back,
                   const SizedBox(width: 8),
                   Expanded(child: title),
+                  ...widget.actions,
                   const SizedBox(width: 16),
                   for (final group in controls) ...[
                     group,
@@ -538,6 +533,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                       back,
                       const SizedBox(width: 8),
                       Expanded(child: title),
+                      ...widget.actions,
                       if (widget.onAnnotate != null && !widget.textEditing)
                         annotate,
                       if (!widget.textEditing) collapse,

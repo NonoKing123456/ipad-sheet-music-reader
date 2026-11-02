@@ -274,7 +274,7 @@ void main() {
           paper.localToGlobal(textAnnotationFrame(original, paper.size).center),
         );
         await tester.pump();
-        await tester.tap(find.byTooltip('编辑文字'));
+        state.controls.onEdit!();
         await tester.pump();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pump();
@@ -438,7 +438,7 @@ void main() {
             .whereType<TextAnnotation>()
             .single;
         expect(saved.widthFraction, closeTo(manual / paper.size.width, .0001));
-        await tester.tap(find.byTooltip('编辑文字'));
+        state.controls.onEdit!();
         await tester.pump();
         await tester.enterText(find.byType(TextField), '旧文字变短');
         await tester.pump();

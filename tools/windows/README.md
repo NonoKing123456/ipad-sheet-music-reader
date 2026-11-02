@@ -16,7 +16,9 @@ Copy-Item -LiteralPath '.\build\windows\x64\runner\Release' -Destination '.\arti
 
 复制目标必须是尚不存在的新目录，避免混入旧文件。版本号应与实际 `pubspec.yaml` 一致；这里以 `0.8.10+26` 为例。
 
-脚本校验目前固定的 18 个非空发布文件、拒绝目录中的链接，并核对 EXE ProductVersion 与版本目录名称。通过临时指针验证后，才原子切换 `deployment.json`。
+旧版本使用 `legacy` 布局，校验固定的 18 个非空发布文件。`0.8.10+31` 起必须显式传 `-LayoutProfile share-v1`，包含新增的 `share_plus_plugin.dll` 共 19 个成员；启动器核对该布局的 SHA256 清单。脚本继续拒绝缺失、多余文件和目录链接，核对 EXE ProductVersion 与版本目录名称。通过临时指针验证后，才原子切换 `deployment.json`。
+
+首次从旧布局升级到 `share-v1` 时需使用已支持该布局的启动器（显式 `-InstallLauncher`）；固定路径与 AppUserModelID 保持相同。`-ValidateOnly` 仅检查候选目录并输出清单，不安装启动器、不切换指针。`Test-ReleaseLayout.ps1` 在本机合成 fixture 上检查旧/新布局和拒绝路径，不启动阅读器或修改生产部署。
 
 首次安装会使用本机 .NET Framework C# 编译器和 Windows SDK 资源编译器构建启动器，嵌入现有图标与名称资源，并创建当前用户开始菜单快捷方式。脚本不下载工具、不要求管理员权限。
 

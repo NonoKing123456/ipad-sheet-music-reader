@@ -127,6 +127,14 @@ class _NativeBoundary {
         acknowledgements++;
         await save();
         return null;
+      case 'acknowledgeMany':
+        for (final id in args['entryIds'] as List) {
+          final value = jobs.remove(id);
+          if (value != null) await File(value['path'] as String).delete();
+          acknowledgements++;
+        }
+        await save();
+        return null;
       case 'pause':
         pauses++;
         for (final value in jobs.values) {
@@ -371,6 +379,51 @@ void main() {
       }
     },
   );
+
+  test('microbatch metadata is fetched once and acknowledged in one native checkpoint', () async {
+    await transfer.enqueue(
+      namespace: client.backgroundTransferNamespace,
+      origin: client.baseUri,
+      bearerToken: 'test-only',
+      prepare: true,
+      smallFileBatches: true,
+      cancellation: null,
+      items: [source.item('a'), source.item('b')],
+    );
+    native.jobs['a']['batchKey'] = 'synthetic-batch';
+    native.jobs['b']['batchKey'] = 'synthetic-batch';
+    var metadataRequests = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'batchMetadata') {
+            metadataRequests++;
+            return [native.jobs['a']['item'], native.jobs['b']['item']];
+          }
+          return native.handle(call);
+        });
+    final a = await transfer.wait(
+      client.backgroundTransferNamespace,
+      source.item('a'),
+      null,
+    );
+    final b = await transfer.wait(
+      client.backgroundTransferNamespace,
+      source.item('b'),
+      null,
+    );
+    expect(a.companions, hasLength(2));
+    expect(b.companions, hasLength(2));
+    expect(metadataRequests, 1);
+    await transfer.acknowledgeMany(client.backgroundTransferNamespace, [
+      a.item,
+      b.item,
+    ]);
+    expect(
+      native.calls.where((call) => call == 'acknowledgeMany'),
+      hasLength(1),
+    );
+    expect(native.jobs, isEmpty);
+  });
 
   test(
     'thirty thousand planned objects cross the platform boundary in one batch',

@@ -268,7 +268,8 @@ List<PageAnnotation> _previewFragments(
 }
 
 /// Listens to system stylus events only. Desktop mouse writing is explicitly a
-/// Windows development aid; touch always belongs to reading/transform gestures.
+/// A selected tool accepts one finger, mouse or pen. A second finger cancels
+/// the provisional finger stroke, leaving the complete gesture to navigation.
 class AnnotationCanvas extends StatefulWidget {
   const AnnotationCanvas({
     super.key,
@@ -313,6 +314,8 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   List<AnnotationStroke> _previewBase = const [];
   List<PageAnnotation> _previewAnnotations = const [];
   int? _pointer;
+  PointerDeviceKind? _pointerKind;
+  final Set<int> _pens = {};
   StrokeStyle? _style;
   bool _erasing = false;
   double _radius = .018;
@@ -322,24 +325,41 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   @override
   void didUpdateWidget(AnnotationCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.page != widget.page || !widget.enabled) _clear();
+    if (oldWidget.page != widget.page || !widget.enabled) {
+      _touches.clear();
+      _pens.clear();
+      _clear(defer: true);
+    }
     if (!oldWidget.suspended && widget.suspended) {
+      if (_pointerKind == PointerDeviceKind.touch) {
+        _clear(defer: true);
+        return;
+      }
       _finishSegment();
       _previousErase = null;
       _cursor = null;
     }
   }
 
-  void _clear() {
+  void _clear({bool defer = false}) {
     final writing = _pointer != null;
     _path = null;
     _segments.clear();
     _replacements.clear();
     _sweeps.clear();
     _pointer = null;
+    _pointerKind = null;
     _cursor = null;
     _previousErase = null;
-    if (writing) widget.onWritingChanged?.call(false);
+    if (writing) {
+      if (defer) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _pointer == null) widget.onWritingChanged?.call(false);
+        });
+      } else {
+        widget.onWritingChanged?.call(false);
+      }
+    }
   }
 
   void _finishSegment() {
@@ -444,12 +464,10 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
     if (event.kind == PointerDeviceKind.touch) {
       _touches.add(event.pointer);
       if (_paused) {
-        _finishSegment();
-        _previousErase = null;
-        _cursor = null;
-        setState(() {});
+        if (_pointerKind == PointerDeviceKind.touch) setState(_clear);
+        return;
       }
-      return;
+      if (_pens.isNotEmpty) return;
     }
     final pen =
         event.kind == PointerDeviceKind.stylus ||
@@ -458,8 +476,18 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
         defaultTargetPlatform == TargetPlatform.windows &&
         event.kind == PointerDeviceKind.mouse &&
         event.buttons == kPrimaryButton;
-    if (!widget.enabled || _pointer != null || (!pen && !desktopMouse)) return;
+    if (pen) {
+      _pens.add(event.pointer);
+      if (_pointerKind == PointerDeviceKind.touch) _clear();
+    }
+    if (!widget.enabled ||
+        _paused ||
+        _pointer != null ||
+        (!pen && !desktopMouse && event.kind != PointerDeviceKind.touch)) {
+      return;
+    }
     _pointer = event.pointer;
+    _pointerKind = event.kind;
     _style = widget.style;
     _erasing = widget.eraser || event.kind == PointerDeviceKind.invertedStylus;
     _radius = widget.eraserRadiusFraction;
@@ -468,7 +496,8 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
   }
 
   void _up(PointerUpEvent event, Size size) {
-    if (_touches.remove(event.pointer)) return;
+    _touches.remove(event.pointer);
+    _pens.remove(event.pointer);
     if (_pointer != event.pointer) return;
     _sample(event.localPosition, size, exact: true);
     final page = widget.page;
@@ -568,6 +597,7 @@ class _AnnotationCanvasState extends State<AnnotationCanvas> {
             onPointerUp: (e) => _up(e, size),
             onPointerCancel: (e) {
               _touches.remove(e.pointer);
+              _pens.remove(e.pointer);
               if (_pointer == e.pointer) setState(_clear);
             },
             child: painter,

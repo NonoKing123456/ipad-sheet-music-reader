@@ -33,6 +33,7 @@ class ScoreFileIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final outline = isFolder
         ? Icons.folder_outlined
         : _image
@@ -57,7 +58,7 @@ class ScoreFileIcon extends StatelessWidget {
               top: 5,
               width: 32,
               height: 32,
-              child: Icon(outline, size: 32, color: outlineColor),
+              child: Icon(outline, size: 32, color: scheme.onSurfaceVariant),
             ),
             if (corner != null)
               Positioned(
@@ -85,19 +86,26 @@ class _CornerBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final local = scheme.brightness == Brightness.dark
+        ? scheme.primary
+        : ScoreFileIcon.localColor;
     final symbol = SizedBox(
       key: ValueKey('score-file-symbol-${mark.name}'),
       width: 14,
       height: 14,
       child: mark == _CornerMark.cloud
-          ? const CustomPaint(painter: _CloudOutlinePainter())
+          ? CustomPaint(
+              painter: _CloudOutlinePainter(
+                scheme.surface,
+                scheme.onSurfaceVariant,
+              ),
+            )
           : mark == _CornerMark.partial
-          ? const CustomPaint(painter: _PartialPainter())
+          ? CustomPaint(painter: _PartialPainter(local))
           : DecoratedBox(
               decoration: BoxDecoration(
-                color: mark == _CornerMark.error
-                    ? ScoreFileIcon.unreadableColor
-                    : ScoreFileIcon.localColor,
+                color: mark == _CornerMark.error ? scheme.error : local,
                 shape: BoxShape.circle,
               ),
               child: Icon(
@@ -107,7 +115,9 @@ class _CornerBadge extends StatelessWidget {
                     ? Icons.refresh_rounded
                     : Icons.priority_high_rounded,
                 size: mark == _CornerMark.check ? 11 : 10,
-                color: Colors.white,
+                color: scheme.brightness == Brightness.dark
+                    ? scheme.onPrimary
+                    : Colors.white,
               ),
             ),
     );
@@ -118,8 +128,8 @@ class _CornerBadge extends StatelessWidget {
       child: Container(
         width: 16,
         height: 16,
-        decoration: const BoxDecoration(
-          color: Colors.white,
+        decoration: BoxDecoration(
+          color: scheme.surface,
           shape: BoxShape.circle,
         ),
         child: Center(child: symbol),
@@ -129,7 +139,8 @@ class _CornerBadge extends StatelessWidget {
 }
 
 class _PartialPainter extends CustomPainter {
-  const _PartialPainter();
+  const _PartialPainter(this.color);
+  final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -137,7 +148,7 @@ class _PartialPainter extends CustomPainter {
       center: size.center(Offset.zero),
       radius: 6.2,
     );
-    final p = Paint()..color = ScoreFileIcon.localColor;
+    final p = Paint()..color = color;
     canvas.drawArc(circle, math.pi / 2, math.pi, true, p);
     canvas.drawOval(
       circle,
@@ -148,11 +159,13 @@ class _PartialPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _PartialPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _PartialPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 class _CloudOutlinePainter extends CustomPainter {
-  const _CloudOutlinePainter();
+  const _CloudOutlinePainter(this.surface, this.outline);
+  final Color surface, outline;
   @override
   void paint(Canvas canvas, Size size) {
     final cloud = Path()
@@ -162,7 +175,7 @@ class _CloudOutlinePainter extends CustomPainter {
       ..cubicTo(13.2, 5.1, 13.5, 10.8, 10.7, 10.8)
       ..close();
     final p = Paint()
-      ..color = Colors.white
+      ..color = surface
       ..strokeJoin = StrokeJoin.round;
     canvas.drawPath(cloud, p);
     canvas.drawPath(
@@ -174,11 +187,12 @@ class _CloudOutlinePainter extends CustomPainter {
     canvas.drawPath(
       cloud,
       p
-        ..color = const Color(0xff4f6059)
+        ..color = outline
         ..strokeWidth = 1.6,
     );
   }
 
   @override
-  bool shouldRepaint(covariant _CloudOutlinePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _CloudOutlinePainter oldDelegate) =>
+      oldDelegate.surface != surface || oldDelegate.outline != outline;
 }

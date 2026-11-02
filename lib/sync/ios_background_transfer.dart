@@ -6,7 +6,8 @@ import 'package:library_sync/library_sync.dart';
 
 /// The OS owns the whole batch before any file is awaited. Polling only updates
 /// the foreground UI; URLSession and its native delegates advance without Dart.
-class IosBackgroundTransfer implements BackgroundTransfer {
+class IosBackgroundTransfer
+    implements BackgroundTransfer, BackgroundTransferBatchAcknowledger {
   IosBackgroundTransfer({
     MethodChannel? channel,
     this.pollInterval = const Duration(milliseconds: 300),
@@ -19,14 +20,21 @@ class IosBackgroundTransfer implements BackgroundTransfer {
   final MethodChannel channel;
   final Duration pollInterval;
   void Function()? onChanged;
+  final _batchMetadata = <String, List<CatalogItem>>{};
   void dispose() {
     channel.setMethodCallHandler(null);
   }
 
   Future<Map<String, dynamic>> activity(String namespace) async =>
       _map(await _invoke<Object?>('activity', {'namespace': namespace}));
-  Future<void> resume(String namespace) =>
-      _invoke<void>('resume', {'namespace': namespace});
+  Future<void> resume(String namespace, {OfflineSelection? selection}) {
+    _batchMetadata.clear();
+    return _invoke<void>('resume', {
+      'namespace': namespace,
+      if (selection != null) 'selection': selection.toJson(),
+    });
+  }
+
   Future<void> discard(String namespace) =>
       _invoke<void>('discard', {'namespace': namespace});
 
@@ -45,15 +53,18 @@ class IosBackgroundTransfer implements BackgroundTransfer {
     required String bearerToken,
     required List<CatalogItem> items,
     required bool prepare,
+    bool smallFileBatches = false,
     OfflineSelection? selection,
     required SyncCancellation? cancellation,
   }) async {
     cancellation?.check();
+    _batchMetadata.clear();
     await _invoke<void>('enqueue', {
       'namespace': namespace,
       'origin': origin.toString(),
       'token': bearerToken,
       'prepare': prepare,
+      'smallFileBatches': smallFileBatches,
       'selection': selection?.toJson(),
       'items': items.map((item) => item.toJson()).toList(),
     });
@@ -99,7 +110,35 @@ class IosBackgroundTransfer implements BackgroundTransfer {
               file.item.sourceId != item.sourceId) {
             throw const FormatException('Background object identity changed.');
           }
-          return file;
+          final key = value['batchKey'] as String?;
+          if (key == null) return file;
+          var companions = _batchMetadata[key];
+          if (companions == null) {
+            final raw =
+                await _invoke<List<Object?>>('batchMetadata', {
+                  'namespace': namespace,
+                  'entryId': item.entryId,
+                }) ??
+                [];
+            if (raw.length > 64) {
+              throw const FormatException(
+                'Background batch metadata exceeds limit.',
+              );
+            }
+            companions = raw
+                .map((item) => CatalogItem.fromJson(_map(item)))
+                .toList();
+            if (_batchMetadata.length >= 16) {
+              _batchMetadata.remove(_batchMetadata.keys.first);
+            }
+            _batchMetadata[key] = companions;
+          }
+          return BackgroundTransferFile(
+            file.item,
+            file.path,
+            requestedRevisionId: file.requestedRevisionId,
+            companions: companions,
+          );
         }
         if (value['state'] == 'error') {
           switch (value['failure']) {
@@ -142,6 +181,12 @@ class IosBackgroundTransfer implements BackgroundTransfer {
     'acknowledge',
     {'namespace': namespace, 'entryId': item.entryId},
   );
+  @override
+  Future<void> acknowledgeMany(String namespace, List<CatalogItem> items) =>
+      _invoke<void>('acknowledgeMany', {
+        'namespace': namespace,
+        'entryIds': items.map((item) => item.entryId).toList(),
+      });
   @override
   Future<void> pause(String namespace) =>
       _invoke<void>('pause', {'namespace': namespace});

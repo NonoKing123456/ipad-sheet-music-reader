@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: c02e2fa6cf4251a677035e5bcc5abc0d9d3c778e36f2ced6857f1aee7c4a257f
+      REVIEWED_SOURCE_SHA256: 92b81d330c4904c44300fecad52ecdfcfa64975298114af454c959d9df376071
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +71,13 @@ jobs:
             -o "$RUNNER_TEMP/signing-expiry-smoke"
           "$RUNNER_TEMP/signing-expiry-smoke" | tee "$RUNNER_TEMP/signing-expiry-smoke.txt"
 
+      - name: Run the shared background queue schema with legacy and batch records
+        run: |
+          set -euo pipefail
+          swiftc ios/Runner/BackgroundDownloadBridge.swift tool/background_queue_schema_smoke.swift \
+            -o "$RUNNER_TEMP/background-queue-schema-smoke"
+          "$RUNNER_TEMP/background-queue-schema-smoke" | tee "$RUNNER_TEMP/background-queue-schema-smoke.txt"
+
       - name: Build an unsigned device application
         run: |
           set -euo pipefail
@@ -92,6 +99,7 @@ jobs:
           {
             git rev-parse HEAD
             printf 'Reviewed source archive SHA256: %s\n' "$REVIEWED_SOURCE_SHA256"
+            printf 'GitHub run ID: %s\n' "$GITHUB_RUN_ID"
             shasum -a 256 pubspec.lock
             flutter --version
             sw_vers
@@ -100,6 +108,7 @@ jobs:
             cat "$RUNNER_TEMP/raster-fixture-make.txt"
             cat "$RUNNER_TEMP/raster-imageio-smoke.txt"
             cat "$RUNNER_TEMP/signing-expiry-smoke.txt"
+            cat "$RUNNER_TEMP/background-queue-schema-smoke.txt"
           } > unsigned-output/build-info.txt
           python3 - <<'PY' | tee -a unsigned-output/build-info.txt
           import pathlib

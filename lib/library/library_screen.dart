@@ -29,6 +29,8 @@ import 'library_controller.dart';
 import '../sync/sync_controller.dart';
 import '../sync/sync_screen.dart';
 import '../sync/offline_library_screen.dart';
+import '../theme/app_theme.dart';
+import '../sharing/score_share.dart';
 
 Future<String> _hashExternalFile(String path) async =>
     (await sha256.bind(File(path).openRead()).first).toString();
@@ -67,7 +69,7 @@ class _HostLibraryIcon extends StatelessWidget {
               ? Icons.image_outlined
               : Icons.description_outlined,
           size: 32,
-          color: const Color(0xff53645c),
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
     );
@@ -107,6 +109,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   ReaderWorkspace? _workspace;
   Future<ReaderWorkspace>? _workspaceFuture;
   bool _openingReader = false;
+  final Set<String> _sharingEntries = {};
   LibrarySnapshot? _setListCatalogSnapshot;
   List<ScoreCatalogEntry> _setListCatalog = const [];
   SyncController? _sync;
@@ -275,17 +278,21 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   Future<void> _openSingle() async {
-    final file = await openFile(
-      acceptedTypeGroups: const [
-        XTypeGroup(
-          label: '曲谱',
-          extensions: ['pdf', 'jpg', 'jpeg', 'png', 'webp'],
-          uniformTypeIdentifiers: ['com.adobe.pdf', 'public.image'],
-        ),
-      ],
-    );
-    if (file != null && mounted) {
-      await _openPath(file.path);
+    try {
+      final file = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(
+            label: '曲谱',
+            extensions: ['pdf', 'jpg', 'jpeg', 'png', 'webp'],
+            uniformTypeIdentifiers: ['com.adobe.pdf', 'public.image'],
+          ),
+        ],
+      );
+      if (file != null && mounted) {
+        await _openPath(file.path);
+      }
+    } catch (_) {
+      if (mounted) _message('无法选择曲谱，请关闭其他文件选择窗口后重试。');
     }
   }
 
@@ -659,8 +666,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                       ),
                     ],
                   ),
-            backgroundColor: const Color(0xfffaf9f5),
             actions: [
+              const ThemeAction(),
               IconButton(
                 tooltip: _searchOpen ? '关闭搜索' : '搜索',
                 icon: Icon(_searchOpen ? Icons.close : Icons.search),
@@ -767,10 +774,10 @@ class _LibraryScreenState extends State<LibraryScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
+              Icon(
                 Icons.library_music_outlined,
                 size: 64,
-                color: Color(0xff236459),
+                color: Theme.of(context).colorScheme.primary,
               ),
               const SizedBox(height: 24),
               Text(
@@ -783,7 +790,10 @@ class _LibraryScreenState extends State<LibraryScreen>
                     ? '选择存放 PDF 或图片的文件夹。'
                     : '连接电脑更新目录，再选择要带走的文件夹或曲谱。\n已下载的曲谱、批注和曲单可断网使用。',
                 textAlign: TextAlign.center,
-                style: TextStyle(height: 1.8, color: Color(0xff65736b)),
+                style: TextStyle(
+                  height: 1.8,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
               ),
               const SizedBox(height: 24),
               FilledButton.icon(
@@ -796,7 +806,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                   padding: const EdgeInsets.only(top: 18),
                   child: Text(
                     library.error!,
-                    style: const TextStyle(color: Colors.red),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ),
             ],
@@ -822,7 +834,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       ],
     ];
     return Material(
-      color: const Color(0xfff6f5ef),
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -838,8 +850,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                 const SizedBox(height: 6),
                 Text(
                   '${library.selectedSourceCount} 份曲谱 · ${library.folders.length - 1} 个文件夹',
-                  style: const TextStyle(
-                    color: Color(0xff65736b),
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                     fontSize: 12,
                   ),
                 ),
@@ -893,9 +905,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                         p.basename(library.rootPath!),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 11,
-                      color: Color(0xff65736b),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ),
@@ -931,7 +943,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       child: ListTile(
         dense: true,
         selected: selected,
-        selectedTileColor: const Color(0xffdfe8df),
+        selectedTileColor: Theme.of(context).colorScheme.secondaryContainer,
         leading: const _HostLibraryIcon.folder(),
         title: Tooltip(
           message: folder.isEmpty ? library.rootPath! : folder,
@@ -983,13 +995,32 @@ class _LibraryScreenState extends State<LibraryScreen>
                     : () => _folder(_parent(library.currentFolder)),
               ),
             ),
-            if (library.searching) ...[
-              const Text('当前文件夹及子文件夹', style: TextStyle(fontSize: 12)),
-              Checkbox(
-                value: library.searchCurrentFolder,
-                onChanged: (value) => library.setSearchScope(value ?? false),
+            if (library.searching)
+              InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () =>
+                    library.setSearchScope(!library.searchCurrentFolder),
+                child: Semantics(
+                  checked: library.searchCurrentFolder,
+                  label: '当前文件夹及子文件夹',
+                  child: ExcludeSemantics(
+                    child: Row(
+                      children: [
+                        const Text(
+                          '当前文件夹及子文件夹',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        IgnorePointer(
+                          child: Checkbox(
+                            value: library.searchCurrentFolder,
+                            onChanged: (value) {},
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-            ],
           ],
         ),
       ),
@@ -1021,7 +1052,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   );
 
   Widget _notice(String text, IconData icon, VoidCallback action) => Material(
-    color: const Color(0xffffedcf),
+    color: Theme.of(context).colorScheme.tertiaryContainer,
     child: InkWell(
       onTap: action,
       child: Padding(
@@ -1056,7 +1087,9 @@ class _LibraryScreenState extends State<LibraryScreen>
               : library.searching
               ? '没有找到匹配的曲谱'
               : '这个文件夹里还没有曲谱',
-          style: const TextStyle(color: Color(0xff65736b)),
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
         ),
       );
     }
@@ -1068,8 +1101,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       )),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
       itemCount: subfolders.length + entries.length,
-      separatorBuilder: (_, _) =>
-          const Divider(height: 1, indent: 56, color: Color(0xffdfe4df)),
+      separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
       itemBuilder: (context, index) {
         if (index < subfolders.length) {
           final folder = subfolders[index];
@@ -1101,7 +1133,10 @@ class _LibraryScreenState extends State<LibraryScreen>
               '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12, color: Color(0xff65736b)),
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
           trailing: ScoreFileTrailing(
@@ -1112,23 +1147,73 @@ class _LibraryScreenState extends State<LibraryScreen>
               path: entry.relativePath,
               service: _sync?.pageCounts,
             ),
-            menuAction: IconButton(
-              tooltip: Platform.isWindows ? '打开文件所在目录' : '查看完整路径',
-              icon: Icon(
-                Platform.isWindows
-                    ? Icons.folder_open_outlined
-                    : Icons.info_outline,
-                size: 19,
+            menuAction: Builder(
+              builder: (shareContext) => PopupMenuButton<String>(
+                tooltip: '曲谱选项',
+                enabled: !_sharingEntries.contains(entry.id),
+                onSelected: (value) {
+                  if (value == 'share') {
+                    unawaited(_shareEntry(shareContext, library, entry));
+                  } else if (Platform.isWindows) {
+                    unawaited(_revealFile(library, entry));
+                  } else {
+                    _pathDetails(entry);
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'share', child: Text('分享')),
+                  PopupMenuItem(
+                    value: 'location',
+                    child: Text(Platform.isWindows ? '打开文件所在目录' : '查看完整路径'),
+                  ),
+                ],
               ),
-              onPressed: () => Platform.isWindows
-                  ? unawaited(_revealFile(library, entry))
-                  : _pathDetails(entry),
             ),
           ),
           onTap: () => unawaited(_openEntry(entry)),
         );
       },
     );
+  }
+
+  Future<void> _shareEntry(
+    BuildContext anchor,
+    LibraryController library,
+    LibraryEntry entry,
+  ) async {
+    if (!_sharingEntries.add(entry.id)) return;
+    setState(() {});
+    try {
+      final workspace = await _prepareReader();
+      if (!anchor.mounted) return;
+      await shareScore(
+        anchor,
+        filePath: library.absolutePathFor(entry),
+        fileName: p.posix.basename(entry.relativePath),
+        validate: () =>
+            library.validateForRead(entry.id, entry.currentRevisionId),
+        beforeShare: () async {
+          if (!workspace.savingAnnotations) await workspace.retryStrokes();
+          if (workspace.savingAnnotations || workspace.unsavedCount > 0) {
+            if (mounted) _message('批注尚未保存，请稍后分享。');
+            return false;
+          }
+          return true;
+        },
+        annotationsFor: (number) => workspace.annotationsFor(
+          PageKey(
+            entryId: entry.id,
+            revisionId: entry.currentRevisionId,
+            pageNumber: number,
+          ),
+        ),
+      );
+    } catch (_) {
+      if (mounted) _message('无法读取批注资料，请检查应用存储后重试。');
+    } finally {
+      _sharingEntries.remove(entry.id);
+      if (mounted) setState(() {});
+    }
   }
 
   Future<void> _revealFile(
