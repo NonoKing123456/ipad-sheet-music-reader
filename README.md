@@ -8,7 +8,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码候选版本：`0.8.10+29`，已完成文字颜色常驻、点框外保存和正交旋转吸附，移除字体选择，保留旧批注数据兼容。此前 Windows `0.8.10+27` 与 iPad `0.8.10+28` 已交付；本轮两端候选包的构建与交付状态以对应记录及 Release 的 `build-info.txt` 为准，尚未完成新版本真机验证。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。项目不附带曲谱资源。
+> 当前源码候选版本：`0.8.10+30`，已完成靠框边文字控制点、统一色点、新文字短框自动增长及新阅读会话默认第一页。此前 Windows 与 iPad `0.8.10+29` 已交付；本轮两端候选包的构建与交付状态以对应记录及 Release 的 `build-info.txt` 为准，尚未完成新版本真机验证。仓库包含 Flutter 应用、Windows 与 iOS 原生工程、三个 Dart 核心包、可移植测试和构建工具。项目不附带曲谱资源。
 
 ## 能做什么
 

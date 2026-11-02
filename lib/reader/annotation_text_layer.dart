@@ -10,6 +10,7 @@ import 'annotation_canvas.dart';
 import 'reader_text_editing.dart';
 import 'reader_workspace.dart';
 import 'text_rotation_snap.dart';
+import 'text_handle_layout.dart';
 
 /// Paper-relative text. Only explicit T mode accepts finger/mouse text actions.
 class AnnotationTextLayer extends StatefulWidget {
@@ -44,18 +45,17 @@ class AnnotationTextLayer extends StatefulWidget {
   State<AnnotationTextLayer> createState() => _AnnotationTextLayerState();
 }
 
-enum _TextHandle { move, transform, width }
-
 class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     with WidgetsBindingObserver {
   final _fallbackControls = ReaderTextEditorController();
+  final _handlePortal = OverlayPortalController();
   ReaderTextEditorController get _controls =>
       widget.textControls ?? _fallbackControls;
   final _controller = TextEditingController();
   final _focus = FocusNode();
   final _inputKey = GlobalKey();
   final _handleKeys = {
-    for (final handle in _TextHandle.values) handle: GlobalKey(),
+    for (final handle in TextHandleKind.values) handle: GlobalKey(),
   };
   String? _selected, _error;
   TextAnnotation? _original, _preview, _candidate, _editBase, _draft;
@@ -67,7 +67,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   bool _committing = false;
   int? _pointer, _handlePointer;
   bool _dragged = false;
-  _TextHandle? _handle;
+  TextHandleKind? _handle;
   final _rotationSnap = TextRotationSnap();
   bool _handleMoved = false;
   TextAnnotation? _handleBase;
@@ -76,6 +76,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   Matrix4? _beforeReveal, _revealedTransform;
   bool _revealWaitingForPaint = false;
   double _nextSize = 20 / 1024;
+  bool _automaticNewWidth = false;
   bool get _editorOpen => _draft != null;
   bool get _enabled => widget.enabled && widget.textTool && !widget.suspended;
   String? get _family => Theme.of(context).textTheme.bodyMedium?.fontFamily;
@@ -125,6 +126,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.transform?.addListener(_transformChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handlePortal.show();
+    });
     _focus.onKeyEvent = (_, event) {
       if (event is KeyDownEvent &&
           event.logicalKey == LogicalKeyboardKey.escape &&
@@ -508,6 +512,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _cancelHandle(defer: true);
     _focus.unfocus();
     _draft = _editBase = null;
+    _automaticNewWidth = false;
     _error = null;
     _endEditing?.call();
     _endEditing = null;
@@ -528,10 +533,65 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _revealWaitingForPaint = false;
   }
 
+  Rect _visiblePaper(Size size) {
+    final paper = context.findRenderObject();
+    final viewport = widget.viewportKey?.currentContext?.findRenderObject();
+    if (paper is! RenderBox ||
+        !paper.hasSize ||
+        viewport is! RenderBox ||
+        !viewport.hasSize) {
+      return Offset.zero & size;
+    }
+    final visible = Rect.fromPoints(
+      paper.globalToLocal(viewport.localToGlobal(Offset.zero)),
+      paper.globalToLocal(
+        viewport.localToGlobal(viewport.size.bottomRight(Offset.zero)),
+      ),
+    );
+    final result = visible.intersect(Offset.zero & size);
+    return result.isEmpty ? Offset.zero & size : result;
+  }
+
+  TextAnnotation _sizeNewDraft(TextAnnotation value, Size size) {
+    final visible = _visiblePaper(size), scale = _screenScale;
+    final margin = 4 / scale;
+    final limit = math.max(
+      1.0,
+      math.min(size.width * .30, visible.width * .33),
+    );
+    final fontHeight = value.fontSizeFraction * size.shortestSide;
+    final initial = (fontHeight * 7 + 12 / scale).clamp(90.0, 120.0);
+    final painter = TextPainter(
+      text: TextSpan(
+        text: _controller.text,
+        style: textAnnotationStyle(value, size, fontFamily: _family),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final measured = painter.width + 12 / scale;
+    painter.dispose();
+    final width = math.min(limit, math.max(initial, measured));
+    var result = _fit(_revise(value, width: width / size.width), size);
+    final left = visible.left + margin;
+    final right = math.max(left, visible.right - margin - width);
+    result = _revise(
+      result,
+      anchor: NormalizedPoint(
+        ((result.anchor.x * size.width).clamp(left, right) / size.width).clamp(
+          0.0,
+          1.0,
+        ),
+        result.anchor.y,
+      ),
+    );
+    return result;
+  }
+
   void _editor(Size size, {NormalizedPoint? anchor}) {
     if (_editorOpen || !_enabled || !_controls.availableTo(this)) return;
     final selected = anchor == null ? _selection : null;
     _editBase = selected;
+    _automaticNewWidth = selected == null;
     _controller.text = selected?.text ?? '';
     _draft =
         selected ??
@@ -541,7 +601,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           argb: _controls.argb | 0xff000000,
           fontSizeFraction: _nextSize,
         );
-    if (selected == null) _draft = _fit(_draft!, size);
+    if (selected == null) _draft = _sizeNewDraft(_draft!, size);
     final bound = _controls.bind(
       this,
       argb: _draft!.argb,
@@ -624,7 +684,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   Offset _paperPoint(Offset global) =>
       (context.findRenderObject()! as RenderBox).globalToLocal(global);
-  void _handleDown(_TextHandle handle, PointerDownEvent event, Size size) {
+  void _handleDown(TextHandleKind handle, PointerDownEvent event, Size size) {
     if (!_enabled ||
         !_primary(event) ||
         _handlePointer != null ||
@@ -657,9 +717,14 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     final point = _paperPoint(event.position), delta = point - _handleOrigin!;
     if (!_handleMoved && delta.distance * _screenScale < 2) return;
     _handleMoved = true;
+    if (_editorOpen &&
+        (_handle == TextHandleKind.width ||
+            _handle == TextHandleKind.transform)) {
+      _automaticNewWidth = false;
+    }
     TextAnnotation value;
     switch (_handle!) {
-      case _TextHandle.move:
+      case TextHandleKind.move:
         value = _fit(
           _revise(
             base,
@@ -670,7 +735,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           ),
           size,
         );
-      case _TextHandle.width:
+      case TextHandleKind.width:
         final projected =
             delta.dx * math.cos(base.rotation) +
             delta.dy * math.sin(base.rotation);
@@ -679,7 +744,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           math.max(.06, 1 - base.anchor.x),
         );
         value = _revise(base, width: width.toDouble());
-      case _TextHandle.transform:
+      case TextHandleKind.transform:
         final from = _handleOrigin! - frame.center, to = point - frame.center;
         if (from.distance < 1 || to.distance < 1) return;
         final minFactor = math.max(
@@ -806,7 +871,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
             onChanged: (_) {
               setState(() {
                 _error = null;
-                _draft = _fit(_editingValue(size)!, size);
+                final value = _editingValue(size)!;
+                _draft = _automaticNewWidth
+                    ? _sizeNewDraft(value, size)
+                    : _fit(value, size);
               });
               _scheduleReveal();
             },
@@ -831,71 +899,169 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         : 1;
   }
 
-  Widget _handleWidget(
-    _TextHandle handle,
+  Widget _handleOverlay(
+    BuildContext overlayContext,
     TextAnnotation value,
     Rect frame,
     Size size,
     double scale,
   ) {
-    final gap = 1 / scale;
-    final local = switch (handle) {
-      _TextHandle.move => frame.topLeft - Offset(24 * gap, 24 * gap),
-      _TextHandle.transform => frame.bottomRight + Offset(16 * gap, 40 * gap),
-      _TextHandle.width => frame.centerRight + Offset(36 * gap, 0),
-    };
-    final point = rotateTextPoint(local, frame.center, value.rotation);
-    final side = 44 / scale;
-    final centre = Offset(
-      point.dx.clamp(side / 2, math.max(side / 2, size.width - side / 2)),
-      point.dy.clamp(side / 2, math.max(side / 2, size.height - side / 2)),
+    final paper = context.findRenderObject();
+    final overlay = Overlay.of(
+      context,
+      rootOverlay: true,
+    ).context.findRenderObject();
+    if (paper is! RenderBox ||
+        !paper.hasSize ||
+        overlay is! RenderBox ||
+        !overlay.hasSize) {
+      return const SizedBox.shrink();
+    }
+    final media = MediaQuery.of(overlayContext), view = View.of(overlayContext);
+    final viewportBox = widget.viewportKey?.currentContext?.findRenderObject();
+    final viewport = viewportBox is RenderBox && viewportBox.hasSize
+        ? Rect.fromPoints(
+            viewportBox.localToGlobal(Offset.zero),
+            viewportBox.localToGlobal(
+              viewportBox.size.bottomRight(Offset.zero),
+            ),
+          )
+        : Offset.zero & media.size;
+    final tools = widget.topControlsKey?.currentContext?.findRenderObject();
+    final top = tools is RenderBox && tools.hasSize
+        ? math.max(
+            viewport.top,
+            tools.localToGlobal(Offset(0, tools.size.height)).dy,
+          )
+        : viewport.top;
+    final visible = Rect.fromLTRB(
+      math.max(0, viewport.left),
+      top,
+      math.min(media.size.width, viewport.right),
+      math.min(
+        viewport.bottom,
+        media.size.height - view.viewInsets.bottom / view.devicePixelRatio,
+      ),
     );
+    if (visible.isEmpty) return const SizedBox.shrink();
+    final paperViewport = Rect.fromPoints(
+      paper.globalToLocal(visible.topLeft),
+      paper.globalToLocal(visible.bottomRight),
+    );
+    // The editable underline has four pixels of bottom padding. Keep target
+    // geometry outside that padding as well as outside the painted text.
+    final controlFrame = _editorOpen
+        ? Rect.fromLTRB(frame.left, frame.top, frame.right, frame.bottom + 4)
+        : frame;
+    final placements = layoutTextHandles(
+      frame: controlFrame,
+      rotationCentre: frame.center,
+      viewport: paperViewport,
+      rotation: value.rotation,
+      scale: scale,
+    );
+    final clipRect = Rect.fromPoints(
+      overlay.globalToLocal(visible.topLeft),
+      overlay.globalToLocal(visible.bottomRight),
+    );
+    return Stack(
+      children: [
+        Positioned.fromRect(
+          rect: clipRect,
+          child: ClipRect(
+            child: Stack(
+              children: [
+                for (final handle in TextHandleKind.values)
+                  _handleWidget(
+                    handle,
+                    value,
+                    frame,
+                    size,
+                    scale,
+                    placements[handle]!,
+                    paper,
+                    overlay,
+                    clipRect.topLeft,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _handleWidget(
+    TextHandleKind handle,
+    TextAnnotation value,
+    Rect frame,
+    Size size,
+    double scale,
+    TextHandlePlacement placement,
+    RenderBox paper,
+    RenderBox overlay,
+    Offset clipOrigin,
+  ) {
+    final point = rotateTextPoint(
+      placement.hitRect.center,
+      frame.center,
+      value.rotation,
+    );
+    final centre =
+        overlay.globalToLocal(paper.localToGlobal(point)) - clipOrigin;
+    final visualOffset =
+        (placement.visualRect.topLeft - placement.hitRect.topLeft) * scale;
     final label = switch (handle) {
-      _TextHandle.move => '移动文字',
-      _TextHandle.transform => '缩放并旋转文字',
-      _TextHandle.width => '调整换行宽度',
+      TextHandleKind.move => '移动文字',
+      TextHandleKind.transform => '缩放并旋转文字',
+      TextHandleKind.width => '调整换行宽度',
     };
     final icon = switch (handle) {
-      _TextHandle.move => Icons.open_with,
-      _TextHandle.transform => Icons.rotate_right,
-      _TextHandle.width => Icons.swap_horiz,
+      TextHandleKind.move => Icons.open_with,
+      TextHandleKind.transform => Icons.rotate_right,
+      TextHandleKind.width => Icons.swap_horiz,
     };
     return Positioned(
-      left: centre.dx - side / 2,
-      top: centre.dy - side / 2,
-      width: side,
-      height: side,
-      child: Listener(
-        key: _handleKeys[handle],
-        behavior: HitTestBehavior.opaque,
-        onPointerDown: (e) => _handleDown(handle, e, size),
-        onPointerMove: (e) => _handleMove(e, size),
-        onPointerUp: (e) => _handleUp(e, size),
-        onPointerCancel: (_) => setState(_cancelHandle),
-        child: Tooltip(
-          message: label,
-          child: Semantics(
-            label: label,
-            button: true,
-            child: Center(
-              child: SizedBox(
-                width: 28 / scale,
-                height: 28 / scale,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: const Color(0xfffaf9f5),
-                    borderRadius: BorderRadius.circular(7 / scale),
-                    border: Border.all(
-                      color: const Color(0xff52615c),
-                      width: 1 / scale,
+      left: centre.dx - 22,
+      top: centre.dy - 22,
+      width: 44,
+      height: 44,
+      child: Transform.rotate(
+        angle: value.rotation,
+        child: Listener(
+          key: _handleKeys[handle],
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (e) => _handleDown(handle, e, size),
+          onPointerMove: (e) => _handleMove(e, size),
+          onPointerUp: (e) => _handleUp(e, size),
+          onPointerCancel: (_) => setState(_cancelHandle),
+          child: Tooltip(
+            message: label,
+            child: Semantics(
+              label: label,
+              button: true,
+              child: Stack(
+                children: [
+                  Positioned(
+                    left: visualOffset.dx,
+                    top: visualOffset.dy,
+                    width: 28,
+                    height: 28,
+                    child: DecoratedBox(
+                      key: ValueKey('text-handle-visual-${handle.name}'),
+                      decoration: BoxDecoration(
+                        color: const Color(0xfffaf9f5),
+                        borderRadius: BorderRadius.circular(7),
+                        border: Border.all(color: const Color(0xff52615c)),
+                      ),
+                      child: Icon(
+                        icon,
+                        size: 16,
+                        color: const Color(0xff52615c),
+                      ),
                     ),
                   ),
-                  child: Icon(
-                    icon,
-                    size: 16 / scale,
-                    color: const Color(0xff52615c),
-                  ),
-                ),
+                ],
               ),
             ),
           ),
@@ -970,7 +1136,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                   ),
                 ),
                 if (_editorOpen) _input(value, frame, size),
-                if (_handle == _TextHandle.transform &&
+                if (_handle == TextHandleKind.transform &&
                     _rotationSnap.guideAngle != null)
                   Positioned.fill(
                     child: IgnorePointer(
@@ -986,9 +1152,20 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                       ),
                     ),
                   ),
-                for (final handle in _TextHandle.values)
-                  _handleWidget(handle, value, frame, size, _screenScale),
               ],
+              OverlayPortal(
+                controller: _handlePortal,
+                overlayChildBuilder: (overlayContext) =>
+                    value == null || frame == null
+                    ? const SizedBox.shrink()
+                    : _handleOverlay(
+                        overlayContext,
+                        value,
+                        frame,
+                        size,
+                        _screenScale,
+                      ),
+              ),
             ],
           ),
         );

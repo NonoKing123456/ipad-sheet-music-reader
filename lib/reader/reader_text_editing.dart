@@ -215,24 +215,45 @@ class ReaderAnnotationColors extends StatelessWidget {
                 width: 44,
                 height: 44,
                 child: Center(
-                  child: Container(
-                    width: 25,
-                    height: 25,
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: argb == color
-                            ? const Color(0xff52615c)
-                            : Colors.transparent,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Color(color),
-                      ),
+                  child: SizedBox(
+                    width: 36,
+                    height: 36,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        if (argb == color)
+                          Positioned.fill(
+                            child: DecoratedBox(
+                              key: ValueKey(
+                                'annotation-color-selection-$color',
+                              ),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: const Color(0xff52615c),
+                                  width: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                        SizedBox(
+                          key: ValueKey('annotation-color-dot-$color'),
+                          width: 28,
+                          height: 28,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Color(color),
+                              border: color == 0xffffffff
+                                  ? Border.all(
+                                      color: const Color(0xff9a9e9b),
+                                      width: .75,
+                                    )
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

@@ -184,10 +184,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       widget.initialTarget,
       itemId: widget.itemId,
       pageNumber: widget.initialPageNumber,
-      restore:
-          widget.initialPageNumber == null &&
-          widget.allowAnnotations &&
-          widget.setListId == null,
+      restore: false,
     );
   }
 
@@ -1401,51 +1398,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   ? null
                   : _sampleAction,
             ),
-            if (!_textTool) for (final (name, color) in [
-              ('红色', 0xffc12b32),
-              ('黑色', 0xff222222),
-              ('蓝色', 0xff1c57ac),
-              ('黄色', 0xffffc107),
-            ])
-              Tooltip(
-                message: name,
-                child: InkWell(
-                  onTap: () => setState(() {
-                    _cancelPick();
-                    _usingSample = false;
-                    _color = color;
-                  }),
-                  child: SizedBox(
-                    width: 44,
-                    height: 44,
-                    child: Center(
-                      child: Container(
-                        width: 28,
-                        height: 28,
-                        margin: const EdgeInsets.all(3),
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color(color),
-                          border: Border.all(
-                            color: !_usingSample && _color == color
-                                ? Colors.white
-                                : Colors.transparent,
-                            width: 3,
-                          ),
-                          boxShadow: !_usingSample && _color == color
-                              ? const [
-                                  BoxShadow(
-                                    color: Colors.black38,
-                                    blurRadius: 2,
-                                  ),
-                                ]
-                              : null,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+            if (!_textTool) ReaderAnnotationColors(argb:_color,onChanged:(color) => setState(() {
+              _cancelPick(); _usingSample = false; _color = color;
+            })),
             IconButton(
               tooltip: '撤销',
               onPressed: widget.workspace.store.canUndo(page)

@@ -217,3 +217,6 @@
 !/lib/reader/text_rotation_snap.dart
 !/test/text_annotation_outside_0810_test.dart
 !/test/text_rotation_snap_test.dart
+!/lib/reader/text_handle_layout.dart
+!/test/reader_open_first_page_test.dart
+!/test/text_controls_geometry_0810_test.dart

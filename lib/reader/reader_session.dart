@@ -528,7 +528,7 @@ class ReaderSession extends ChangeNotifier {
     ScoreTarget target, {
     String? itemId,
     int? pageNumber,
-    bool restore = true,
+    bool restore = false,
   }) async {
     final epoch = ++_epoch;
     cancelPrewarm();
