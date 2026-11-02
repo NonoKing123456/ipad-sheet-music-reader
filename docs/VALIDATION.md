@@ -1,18 +1,18 @@
 # 验证情况
 
-验证日期：2026-11-02。构建、安装和真机验证分别记录；下方保留 `0.8.10+26` 公开副本的历史测试结果，不把后续定向验证视为全量通过。
+验证日期：2026-11-03。构建、安装和真机验证分别记录；下方保留 `0.8.10+26` 公开副本的历史测试结果，不把后续定向验证视为全量通过。
 
 ## 0.8.10+33：目录组件与双页批注
 
-当前根IPA为+31；Windows33已唯一构建114.2秒并完成19成员/share-v1发布，固定launcher/Start/cmd与旧用户窗口保持，Mac33尚未触发。先前+32 run23的精确失败为“未获得hosted runner”，附macOS arm64容量通知，job cancelled/steps0；没有执行原生编译，未提升IPA，未盲重发同一次构建。
+Windows33已唯一构建114.2秒并完成19成员/share-v1发布，固定launcher/Start/cmd与旧用户窗口保持；根IPA33也已核并原子交付，来自唯一Intel run24（41488644321/attempt1，编译源a9a84fdd）。先前+32 run23的精确失败为“未获得hosted runner”，附macOS arm64容量通知，job cancelled/steps0；该次没有执行原生编译，未提升32，也未盲重发同一次构建；33是在明确审查Intel方案和新版本源后另行授权。
 
 | 范围 | 证据与限制 |
 | --- | --- |
 | 面包屑 | 私有实际组件检查已核root/parent/current顺序、祖先与菜单路径、独立48触区、当前非按钮；新增窄例通过：744下8层无省略、同path收窄仅折必要中间层、再放宽完整恢复、菜单展开期间resize仍回原String path、真实trailing占位、2×字体/长名及完整Tooltip。合成长短深窄单图供独立审查，无私谱 |
 | 旧Windows目录case | 业务所有断言及DIRECTORY_UI_084标记通过，最终删除临时目录失败OS32；未改旧test、不追无关iOS过期tooltip，保留原失败记录 |
 | 桌面双页 | 两项私有实际组件QA通过并经独立读断言/截图审查，覆盖左右页首笔归属、空隙不画、撤销、文字草稿与退出边界；未更改旧公开picker预期，不称全回归 |
-| 生产输入 | 本轮114路径不新增、不删除，明确补入之前漏更新的目录helper字节；Root/公开候选/ZIP逐byte同后，实际候选生产Dart树还必须单次分析，不能只核relative imports。私有QA/字体/截图不进入公开238或生产114 |
-| 平台构建 | Windows33已经批准步骤交付，唯一Mac33仍待触发；Mac host计划仅ARM→Intel且SDK不降，iOS设备目标仍arm64，ImageIO/alias/CMS15/同schema队列/来源run及精确6+Runner静态share门禁保持。尚未得到Mac33结果时，不宣称原生编译/包验证已通过 |
+| 生产输入 | 本轮114路径不新增、不删除，明确补入之前漏更新的目录helper字节；Root/公开候选/ZIP114逐byte一致，238暂存blob及7冻结源核对通过；实际候选生产lib和3个本地包以候选自身相对包根分析，No issues found。初次旧ignored配置产生的无效分析已保留，未用作gate；未改依赖/源以消除配置错误。私有QA/字体/截图不进入公开238或生产114 |
+| 平台构建 | Windows33已交付；唯一Intel Mac24/attempt1所有步骤成功，Flutter3.47.8/Xcode26.6与iOS arm64目标保持。实际ImageIO/alias/CMS15/队列schema、来源commit/run/archive/version、精确6独立iOS映像和Runner四个真实N_SECT share定义/channel/selector/privacy全部通过原封校验；根IPA33已原子提升，11,478,156字节，SHA256 cd8ce6fc89bff8c371b68dbf099efad298e64e319bfbe3d6f17c1b2c34e31467，旧31归档保留。包验证不等于实机功能验收 |
 | 真机 | 尚无iPad33装机、网络速度、锁屏后台、原生分享或实际手指/笔体验验收；已有合成或Windows结果不能替代 |
 
 以下保留先前版本及失败历史。

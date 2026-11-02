@@ -2,13 +2,13 @@
 
 本文件记录公开源码的重要变化，不等同于安装包发布清单。较早记录根据 Git 历史整理，未补造发布日期；具体 iPad 包以预发布中的 `build-info.txt` 为准。
 
-## 0.8.10+33（Windows已交付，iPad待构建）
+## 0.8.10+33（Windows与iPad包已交付）
 
 - 面包屑从固定层数折叠改为真实可用宽度测量，考虑caption字体、textScale、现有padding/icon/触区与trailing占位。有空间全层级完整展示，仅折必要中间前缀；根/最近父/当前优先，窄处完整控件与Tooltip，祖先菜单以完整path值映射。返回上级固定48×48，当前非按钮，点击根图标用可读的活动色。
 - 补齐公开及生产输入中的共用directory_navigation组件；此前本机新DirectoryBreadcrumbs与公开旧DirectoryParentButton存在API闭合漏项，本轮把114生产文件逐byte与根/候选/ZIP对齐，并在实际候选生产树进行符号分析。
 - 桌面双页批注直接进入工具栏，保持双页；左右页按真实首笔/文字/橡皮落点归属，纸间隙不画，无左右页选择菜单。旧保存、退出、翻页、撤销、单页/iPad/连续模式保留，未新增设计令牌。
 - 共用组件私有合成检查覆盖完整路径/菜单/48触区及宽窄/8层/缩放/长名/resize；双页两项实际组件检查覆盖首笔页归属、撤销、文字与边界。旧Windows目录业务断言通过，但旧fixture清理遇OS32文件占用；不隐藏该清理失败，也未修改旧公共picker预期或跑整套。
-- +32唯一Mac run23（attempt1）因GitHub未分配hosted macOS arm64 runner而结束，runner_id0、steps0，并非Swift/Flutter编译报错；根IPA保持31。+33仅将host换同Xcode26.6/Flutter3.47.8的standard Intel image，iOS arm64目标与全部来源、原生烟测、精确6映像加静态share和包提升门禁不变。
+- +32唯一Mac run23（attempt1）因GitHub未分配hosted macOS arm64 runner而结束，runner_id0、steps0，并非Swift/Flutter编译报错，当时根IPA保持31。随后+33唯一Intel run24/attempt1成功（编译源a9a84fdd），Flutter3.47.8/Xcode26.6及iOS arm64目标保持；ImageIO/alias/CMS15/队列schema及完整来源、精确6映像加Runner真实静态share定义门禁通过。根同名IPA33已核验并原子交付，11,478,156字节；旧31归档保留，真实iPad装机、后台、速度及原生分享仍待用户确认。
 
 ## 0.8.10+32（Windows已交付，iPad待构建）
 

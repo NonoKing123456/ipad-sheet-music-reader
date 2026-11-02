@@ -8,7 +8,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码版本：`0.8.10+33`。Windows `+33` 已交付：唯一构建114.2秒，完整19成员逐SHA及share-v1发布通过，固定入口/launcher/Start/cmd保持；根 iPad 为 `+31`。上次 +32 的 run23 因 macOS ARM64 hosted runner 容量限制未开始编译即结束；本轮拟在同 Flutter/Xcode 的 Intel host 构建，iOS 目标仍为 arm64。真实 iPad 交互、后台调度和系统分享仍待装机验证。
+> 当前源码版本：`0.8.10+33`。Windows `+33` 已交付：唯一构建114.2秒，完整19成员逐SHA及share-v1发布通过，固定入口/launcher/Start/cmd保持；根 iPad `+33` 包已完整核验并原子交付，来自唯一 Intel [run24](https://github.com/NonoKing123456/ipad-sheet-music-reader/actions/runs/41488644321) / 编译源 `a9a84fdd`，设备目标为 iOS arm64。此前 +32 run23 未获得 ARM64 runner 的容量失败记录保留在验证历史中。真实 iPad 交互、后台调度和系统分享仍待装机验证。
 
 ## +33 更新
 
