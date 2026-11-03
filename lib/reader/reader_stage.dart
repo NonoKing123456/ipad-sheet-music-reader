@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'reader_text_editing.dart';
+import 'reader_tool_button.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -260,6 +261,11 @@ class _ReaderStageState extends State<ReaderStage>
     final focus = FocusManager.instance.primaryFocus?.context;
     if (focus?.widget is EditableText ||
         focus?.findAncestorWidgetOfExactType<EditableText>() != null) {
+      return KeyEventResult.ignored;
+    }
+    if (arrow &&
+        (focus?.findAncestorWidgetOfExactType<ReaderSizeButton>() != null ||
+            focus?.findAncestorWidgetOfExactType<Slider>() != null)) {
       return KeyEventResult.ignored;
     }
     if (arrow &&

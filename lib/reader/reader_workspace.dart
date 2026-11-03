@@ -208,6 +208,23 @@ class ReaderWorkspace extends ChangeNotifier {
     return result.where((item) => !item.isDeleted).toList(growable: false);
   }
 
+  /// Cancelling a failed deletion must also withdraw its background retry.
+  /// Ordinary drafts and writes already in flight remain protected.
+  bool cancelPendingTextDeletion(PageKey page, String id) {
+    final count = pendingText.length;
+    pendingText.removeWhere(
+      (edit) =>
+          edit.page == page &&
+          edit.value.id == id &&
+          !edit.saving &&
+          edit.value.isDeleted,
+    );
+    if (pendingText.length == count) return false;
+    if (unsavedCount == 0) error = null;
+    _changed();
+    return true;
+  }
+
   Future<bool> saveText(
     PageKey page,
     TextAnnotation value, {

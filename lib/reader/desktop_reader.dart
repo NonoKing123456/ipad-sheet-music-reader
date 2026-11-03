@@ -34,6 +34,7 @@ class DesktopReaderShell extends StatefulWidget {
     this.textEditing = false,
     this.annotationTools,
     this.actions = const [],
+    this.primaryActions = const [],
     this.bottom = const SizedBox.shrink(),
     this.notices = const [],
     this.statusLabel = '阅读状态',
@@ -52,6 +53,7 @@ class DesktopReaderShell extends StatefulWidget {
   final ValueChanged<bool>? onMenuChanged;
   final Widget? annotationTools;
   final List<Widget> actions;
+  final List<Widget> primaryActions;
   final Widget bottom;
   final List<Widget> notices;
   final Widget Function(VoidCallback toggleBar) contentBuilder;
@@ -453,6 +455,8 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         viewControls,
       ];
       final documentActions = <Widget>[
+        ...widget.primaryActions,
+        if (widget.primaryActions.isNotEmpty) const SizedBox(width: 8),
         if (widget.onAnnotate != null) annotate,
         const SizedBox(width: 4),
         collapse,

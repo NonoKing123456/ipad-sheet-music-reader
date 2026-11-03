@@ -78,7 +78,8 @@ class ReaderStateStore {
           createdUtc: now,
           updatedUtc: now,
           version: 1);
-      final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+      final pages =
+          Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
       pages[page] = [...?pages[page], stroke];
       await _commit(_snapshot.next(annotations: pages));
       _undo
@@ -103,79 +104,114 @@ class ReaderStateStore {
         return true;
       });
 
-  TextAnnotation newText({required String text, required NormalizedPoint anchor,
-      required int argb, double fontSizeFraction = 20 / 1024,
-      double widthFraction = .45, AnnotationTextFont font = AnnotationTextFont.system}) {
+  TextAnnotation newText(
+      {required String text,
+      required NormalizedPoint anchor,
+      required int argb,
+      double fontSizeFraction = 20 / 1024,
+      double widthFraction = .45,
+      AnnotationTextFont font = AnnotationTextFont.system}) {
     final now = DateTime.now().toUtc();
-    return TextAnnotation(id: _newId(), text: text, anchor: anchor, argb: argb,
-        fontSizeFraction: fontSizeFraction, widthFraction: widthFraction, font: font,
-        createdUtc: now, updatedUtc: now, version: 1);
+    return TextAnnotation(
+        id: _newId(),
+        text: text,
+        anchor: anchor,
+        argb: argb,
+        fontSizeFraction: fontSizeFraction,
+        widthFraction: widthFraction,
+        font: font,
+        createdUtc: now,
+        updatedUtc: now,
+        version: 1);
   }
 
   /// One confirmed text creation/edit/move/delete is one history operation.
   Future<TextAnnotation> saveText(PageKey page, TextAnnotation desired,
       {TextEditBase? expected}) {
-    final base = expected?.value ?? (expected == null
-        ? (_snapshot.annotations[page] ?? []).whereType<TextAnnotation>()
-            .where((item) => item.id == desired.id).firstOrNull
-        : null);
+    final base = expected?.value ??
+        (expected == null
+            ? (_snapshot.annotations[page] ?? [])
+                .whereType<TextAnnotation>()
+                .where((item) => item.id == desired.id)
+                .firstOrNull
+            : null);
     return _enqueue(() async {
-        final items = List<PageAnnotation>.of(_snapshot.annotations[page] ?? []);
-        final index = items.indexWhere((item) => item.id == desired.id);
-        final now = DateTime.now().toUtc();
-        TextAnnotation next;
-        TextAnnotation? previous;
-        if (index < 0) {
-          if (desired.isDeleted) throw StateError('Cannot delete an unknown text.');
-          next = desired.revise(now: now, version: 1);
-          items.add(next);
-        } else {
-          final original = items[index];
-          if (original is! TextAnnotation) throw StateError('Annotation is not text.');
-          previous = original;
-          next = desired.revise(now: now, version: original.version + 1,
-              deleted: desired.isDeleted);
-          items[index] = next;
-        }
-        final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
-        pages[page] = items;
-        final current = (_snapshot.annotations[page] ?? [])
-            .whereType<TextAnnotation>().where((item) => item.id == desired.id).firstOrNull;
-        bool same(TextAnnotation? a, TextAnnotation? b) => a == null || b == null
-            ? a == b
-            : a.isDeleted == b.isDeleted &&
-                canonicalReaderJson(a.geometry) == canonicalReaderJson(b.geometry);
-        if (current != null && (same(current, next) || same(base, next))) {
-          return current; // An unchanged confirmation cannot undo a peer edit.
-        }
-        if (!same(current, base) && !same(current, next)) {
-          // A draft can outlive a peer merge or a failed save. Preserve its
-          // captured semantic base; counters/clocks are not causal evidence.
-          final basePages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
-          basePages[page] = [for (final item in _snapshot.annotations[page] ?? <PageAnnotation>[])
-            if (item.id != desired.id) item else if (base != null) base];
-          final ancestor = ReaderSnapshot(generation: _snapshot.generation,
-              annotations: basePages, setLists: _snapshot.setLists,
-              bookmarks: _snapshot.bookmarks, conflicts: _snapshot.conflicts,
-              mergeReceipts: _snapshot.mergeReceipts);
-          final merged = mergeReaderSnapshots(base: ancestor, local: _snapshot,
-              remote: _snapshot.next(annotations: pages), peerId: 'local-text-edit');
-          await _commit(merged.snapshot);
-          next = _snapshot.annotations[page]!.whereType<TextAnnotation>()
-              .singleWhere((item) => item.id == desired.id);
-        } else {
-          await _commit(_snapshot.next(annotations: pages));
-        }
-        final edit = previous == null ? _StrokeEdit(next.id, true, false)
-            : same(previous, next) ? null
-            : _StrokeEdit(next.id, previous.isDeleted, next.isDeleted,
-                beforeText: previous, afterText: next);
-        if (edit != null) {
-          _undo.putIfAbsent(page, () => []).add([edit]);
-          _redo.remove(page);
-        }
-        return next;
-      });
+      final items = List<PageAnnotation>.of(_snapshot.annotations[page] ?? []);
+      final index = items.indexWhere((item) => item.id == desired.id);
+      final now = DateTime.now().toUtc();
+      TextAnnotation next;
+      TextAnnotation? previous;
+      if (index < 0) {
+        if (desired.isDeleted)
+          throw StateError('Cannot delete an unknown text.');
+        next = desired.revise(now: now, version: 1);
+        items.add(next);
+      } else {
+        final original = items[index];
+        if (original is! TextAnnotation)
+          throw StateError('Annotation is not text.');
+        previous = original;
+        next = desired.revise(
+            now: now,
+            version: original.version + 1,
+            deleted: desired.isDeleted);
+        items[index] = next;
+      }
+      final pages =
+          Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+      pages[page] = items;
+      final current = (_snapshot.annotations[page] ?? [])
+          .whereType<TextAnnotation>()
+          .where((item) => item.id == desired.id)
+          .firstOrNull;
+      bool same(TextAnnotation? a, TextAnnotation? b) => a == null || b == null
+          ? a == b
+          : a.isDeleted == b.isDeleted &&
+              canonicalReaderJson(a.geometry) ==
+                  canonicalReaderJson(b.geometry);
+      if (current != null && (same(current, next) || same(base, next))) {
+        return current; // An unchanged confirmation cannot undo a peer edit.
+      }
+      if (!same(current, base) && !same(current, next)) {
+        // A draft can outlive a peer merge or a failed save. Preserve its
+        // captured semantic base; counters/clocks are not causal evidence.
+        final basePages =
+            Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+        basePages[page] = [
+          for (final item in _snapshot.annotations[page] ?? <PageAnnotation>[])
+            if (item.id != desired.id) item else if (base != null) base
+        ];
+        final ancestor = ReaderSnapshot(
+            generation: _snapshot.generation,
+            annotations: basePages,
+            setLists: _snapshot.setLists,
+            bookmarks: _snapshot.bookmarks,
+            conflicts: _snapshot.conflicts,
+            mergeReceipts: _snapshot.mergeReceipts);
+        final merged = mergeReaderSnapshots(
+            base: ancestor,
+            local: _snapshot,
+            remote: _snapshot.next(annotations: pages),
+            peerId: 'local-text-edit');
+        await _commit(merged.snapshot);
+        next = _snapshot.annotations[page]!
+            .whereType<TextAnnotation>()
+            .singleWhere((item) => item.id == desired.id);
+      } else {
+        await _commit(_snapshot.next(annotations: pages));
+      }
+      final edit = previous == null
+          ? _StrokeEdit(next.id, true, false)
+          : same(previous, next)
+              ? null
+              : _StrokeEdit(next.id, previous.isDeleted, next.isDeleted,
+                  beforeText: previous, afterText: next);
+      if (edit != null) {
+        _undo.putIfAbsent(page, () => []).add([edit]);
+        _redo.remove(page);
+      }
+      return next;
+    });
   }
 
   Future<bool> undo(PageKey page) => _enqueue(() async {
@@ -213,9 +249,12 @@ class ReaderStateStore {
         final strokes = <PageAnnotation>[];
         final edits = <_StrokeEdit>[];
         final now = DateTime.now().toUtc();
-        for (final original in _snapshot.annotations[page] ?? <PageAnnotation>[]) {
+        for (final original
+            in _snapshot.annotations[page] ?? <PageAnnotation>[]) {
           final paths = requested[original.id];
-          if (paths == null || original.isDeleted || original is! AnnotationStroke) {
+          if (paths == null ||
+              original.isDeleted ||
+              original is! AnnotationStroke) {
             strokes.add(original);
             continue;
           }
@@ -236,7 +275,8 @@ class ReaderStateStore {
           }
         }
         if (edits.isEmpty) return false;
-        final pages = Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
+        final pages =
+            Map<PageKey, List<PageAnnotation>>.of(_snapshot.annotations);
         pages[page] = strokes;
         await _commit(_snapshot.next(annotations: pages));
         _undo.putIfAbsent(page, () => []).add(edits);
@@ -255,8 +295,11 @@ class ReaderStateStore {
       final current = strokes[index];
       final text = undo ? edit.beforeText : edit.afterText;
       if (text != null) {
-        if (current is! TextAnnotation) throw StateError('Text history type changed.');
-        strokes[index] = text.revise(now: now, version: current.version + 1,
+        if (current is! TextAnnotation)
+          throw StateError('Text history type changed.');
+        strokes[index] = text.revise(
+            now: now,
+            version: current.version + 1,
             deleted: undo ? edit.beforeDeleted : edit.afterDeleted);
       } else {
         strokes[index] = current.withDeletion(
@@ -298,9 +341,17 @@ class ReaderStateStore {
         return true;
       });
 
-  Future<SetListItem> addItem(String listId, String entryId) =>
+  /// Appends a score, or reuses its active item when [ifAbsent] is requested.
+  /// The presence check runs inside the save queue to cover concurrent callers.
+  Future<SetListItem> addItem(String listId, String entryId,
+          {bool ifAbsent = false}) =>
       _enqueue(() async {
         final list = _requireList(listId);
+        if (ifAbsent) {
+          for (final item in list.activeItems) {
+            if (item.entryId == entryId) return item;
+          }
+        }
         final now = DateTime.now().toUtc();
         final item = SetListItem(
             id: _newId(),

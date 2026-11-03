@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import '../theme/tokens.dart';
+import '../theme/reader_icons.dart';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -69,7 +70,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     for (final handle in TextHandleKind.values) handle: GlobalKey(),
   };
   String? _selected, _error;
-  final _deleteKey = GlobalKey();
   String? _lastTapId;
   Duration? _lastTapTime;
   Offset? _lastTapPosition;
@@ -329,7 +329,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       final blank =
           !_inside(_inputKey, event.position) &&
           !_inside(_actionBarKey, event.position) &&
-          !_inside(_deleteKey, event.position) &&
           !_handleKeys.values.any((key) => _inside(key, event.position));
       _paperSessionPointers.add(event.pointer);
       if (widget.transferTextOnTap && !_controls.availableTo(this)) {
@@ -347,7 +346,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         widget.workspace.savingAnnotations ||
         _handleKeys.values.any((key) => _inside(key, event.position)) ||
         _inside(_actionBarKey, event.position) ||
-        _inside(_deleteKey, event.position) ||
         _inside(widget.mouseControlKey, event.position) ||
         !_primary(event)) {
       return;
@@ -687,6 +685,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   void _cancelEditor() {
     if (!_editorOpen || _committing) return;
+    final base = _editBase;
+    if (base != null) {
+      widget.workspace.cancelPendingTextDeletion(widget.page, base.id);
+    }
     setState(_closeEditor);
     if (_selection case final selected?) _bindSelection(selected, _lastSize);
   }
@@ -714,16 +716,27 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       });
       _controls.release(this);
     } else {
-      _editor(_lastSize);
-      setState(() {
-        _preview = null;
-        _error = '未能保存，内容已保留。请再次点谱面重试。';
+      // delete() still owns the controller's saving lock until this future
+      // returns. Restore on the next frame, retaining the original preview
+      // while the pending deletion hides it from the workspace selection.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _editor(_lastSize);
+        setState(() {
+          _preview = null;
+          _error = '未能保存，内容已保留。请再次点谱面重试。';
+        });
       });
     }
     return saved;
   }
 
   void _closeEditor() {
+    // A tap before editing belongs to the previous interaction. Completing or
+    // cancelling must leave the next tap as a selection, even after a quick edit.
+    _lastTapId = null;
+    _lastTapTime = null;
+    _lastTapPosition = null;
     _cancelHandle(defer: true);
     _focus.unfocus();
     _draft = _editBase = null;
@@ -1248,14 +1261,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       rotation: value.rotation,
       scale: scale,
     );
-    final deletion = layoutTextDelete(
-      frame: controlFrame,
-      rotationCentre: frame.center,
-      viewport: paperViewport,
-      rotation: value.rotation,
-      scale: scale,
-      handles: placements.values,
-    );
     final clipRect = visible;
     final screenCorners =
         [frame.topLeft, frame.topRight, frame.bottomLeft, frame.bottomRight]
@@ -1273,13 +1278,16 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       screenCorners.map((point) => point.dx).reduce(math.max),
       screenCorners.map((point) => point.dy).reduce(math.max),
     );
-    final actionBarHeight = math.min(38.0, clipRect.height);
-    final actionBarWidth = math.min(210.0, clipRect.width);
+    final actionBarHeight = math.min(44.0, clipRect.height);
+    final actionBarWidth = math.min(
+      _editorOpen ? 144.0 : 210.0,
+      clipRect.width,
+    );
     Rect? actionBarRect;
-    if (_selected != null && actionBarWidth >= 150 && actionBarHeight >= 34) {
-      final screenHandleRects = [...placements.values, deletion].map((
-        placement,
-      ) {
+    if ((_editorOpen || _selected != null) &&
+        actionBarWidth >= (_editorOpen ? 88 : 132) &&
+        actionBarHeight >= 44) {
+      final screenHandleRects = placements.values.map((placement) {
         final corners =
             [
               placement.hitRect.topLeft,
@@ -1335,17 +1343,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                     overlay,
                     clipRect.topLeft,
                   ),
-                _handleWidget(
-                  null,
-                  value,
-                  frame,
-                  size,
-                  scale,
-                  deletion,
-                  paper,
-                  overlay,
-                  clipRect.topLeft,
-                ),
               ],
             ),
           ),
@@ -1430,64 +1427,63 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     return candidates.first.$1;
   }
 
-  Widget _textActionBar(double height) => Material(
-    key: _actionBarKey,
-    color: Theme.of(context).colorScheme.surface,
-    elevation: 5,
-    shadowColor: Colors.black26,
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(10),
-      side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
-    ),
-    child: Row(
-      children: [
-        Expanded(
-          child: TextButton(
-            key: const ValueKey('text-action-edit'),
-            onPressed: _controls.saving ? null : _controls.onEdit,
-            style: TextButton.styleFrom(
-              minimumSize: Size(0, height),
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: const Text('编辑'),
-          ),
+  Widget _textActionBar(double height) {
+    final busy = _committing || _controls.saving;
+    Widget action(
+      String name,
+      String label,
+      VoidCallback? onPressed, {
+      bool destructive = false,
+    }) => Expanded(
+      child: TextButton(
+        key: ValueKey('text-action-$name'),
+        onPressed: busy ? null : onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: destructive
+              ? Theme.of(context).colorScheme.error
+              : null,
+          minimumSize: Size(44, height),
+          visualDensity: VisualDensity.standard,
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-        Expanded(
-          child: TextButton(
-            key: const ValueKey('text-action-copy'),
-            onPressed: _committing || _controls.saving
-                ? null
-                : () => unawaited(_copySelection()),
-            style: TextButton.styleFrom(
-              minimumSize: Size(0, height),
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: const Text('复制'),
-          ),
+        child: Text(label),
+      ),
+    );
+    return Listener(
+      key: _actionBarKey,
+      onPointerDown: (_) => _controls.cancelPaperTap(),
+      child: Material(
+        color: Theme.of(context).colorScheme.surface,
+        elevation: 3,
+        shadowColor: Colors.black26,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
         ),
-        Expanded(
-          child: TextButton(
-            key: const ValueKey('text-action-delete'),
-            onPressed: _committing || _controls.saving
-                ? null
-                : () => unawaited(_controls.delete()),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-              minimumSize: Size(0, height),
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: const Text('删除'),
-          ),
+        child: Row(
+          children: _editorOpen
+              ? [
+                  action('cancel', '取消', _controls.onCancel),
+                  action('done', '完成', () => unawaited(_controls.finish())),
+                ]
+              : [
+                  action('edit', '编辑', _controls.onEdit),
+                  action('copy', '复制', () => unawaited(_copySelection())),
+                  action(
+                    'delete',
+                    '删除',
+                    () => unawaited(_controls.delete()),
+                    destructive: true,
+                  ),
+                ],
         ),
-      ],
-    ),
-  );
+      ),
+    );
+  }
 
   Widget _handleWidget(
-    TextHandleKind? handle,
+    TextHandleKind handle,
     TextAnnotation value,
     Rect frame,
     Size size,
@@ -1510,13 +1506,11 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       TextHandleKind.move => '移动文字',
       TextHandleKind.transform => '缩放并旋转文字',
       TextHandleKind.width => '调整换行宽度',
-      null => '删除文字',
     };
     final icon = switch (handle) {
-      TextHandleKind.move => Icons.open_with,
-      TextHandleKind.transform => Icons.rotate_right,
-      TextHandleKind.width => Icons.swap_horiz,
-      null => Icons.delete_outline,
+      TextHandleKind.move => ReaderGlyph.move,
+      TextHandleKind.transform => ReaderGlyph.transform,
+      TextHandleKind.width => ReaderGlyph.width,
     };
     return Positioned(
       left: centre.dx - 22,
@@ -1526,59 +1520,41 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       child: Transform.rotate(
         angle: value.rotation,
         child: Listener(
-          key: handle == null ? _deleteKey : _handleKeys[handle],
+          key: _handleKeys[handle],
           behavior: HitTestBehavior.opaque,
-          onPointerDown: handle == null
-              ? (_) => _controls.cancelPaperTap()
-              : (e) => _handleDown(handle, e, size),
-          onPointerMove: handle == null ? null : (e) => _handleMove(e, size),
-          onPointerUp: handle == null ? null : (e) => _handleUp(e, size),
-          onPointerCancel: handle == null
-              ? null
-              : (_) => setState(_cancelHandle),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: handle != null || _committing || _controls.saving
-                ? null
-                : () {
-                    unawaited(_controls.delete());
-                  },
-            child: Tooltip(
-              message: label,
-              child: Semantics(
-                label: label,
-                button: true,
-                child: Stack(
-                  children: [
-                    Positioned(
-                      left: visualOffset.dx,
-                      top: visualOffset.dy,
-                      width: 28,
-                      height: 28,
-                      child: DecoratedBox(
-                        key: ValueKey(
-                          'text-handle-visual-${handle?.name ?? 'delete'}',
-                        ),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.surface,
-                          borderRadius: BorderRadius.circular(7),
-                          border: Border.all(
-                            color: handle == null
-                                ? Theme.of(context).colorScheme.error
-                                : Theme.of(context).colorScheme.outline,
-                          ),
-                        ),
-                        child: Icon(
-                          icon,
-                          size: 16,
-                          color: handle == null
-                              ? Theme.of(context).colorScheme.error
-                              : Theme.of(context).colorScheme.onSurface,
+          onPointerDown: (e) => _handleDown(handle, e, size),
+          onPointerMove: (e) => _handleMove(e, size),
+          onPointerUp: (e) => _handleUp(e, size),
+          onPointerCancel: (_) => setState(_cancelHandle),
+          child: Tooltip(
+            message: label,
+            child: Semantics(
+              label: label,
+              button: true,
+              child: Stack(
+                children: [
+                  Positioned(
+                    left: visualOffset.dx,
+                    top: visualOffset.dy,
+                    width: 28,
+                    height: 28,
+                    child: DecoratedBox(
+                      key: ValueKey('text-handle-visual-${handle.name}'),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surface,
+                        borderRadius: BorderRadius.circular(7),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outlineVariant,
                         ),
                       ),
+                      child: ReaderIcon(
+                        icon,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ),

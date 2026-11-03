@@ -25,6 +25,8 @@ import '../reader/library_reader_screen.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import '../reader/set_lists_screen.dart';
+import '../reader/add_to_set_list_dialog.dart';
+import '../theme/reader_icons.dart';
 import 'library_controller.dart';
 import '../sync/sync_controller.dart';
 import '../sync/sync_screen.dart';
@@ -117,6 +119,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   List<FolderTreeRow>? _treeRows;
   String? _initializationError;
   ReaderWorkspace? _workspace;
+  bool _openingSetList = false;
   Future<ReaderWorkspace>? _workspaceFuture;
   bool _openingReader = false;
   final Set<String> _sharingEntries = {};
@@ -1159,6 +1162,11 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
           ),
           trailing: ScoreFileTrailing(
+            addToSetListAction: IconButton(
+              tooltip: '加入曲单',
+              icon: const ReaderIcon(ReaderGlyph.playlistAdd),
+              onPressed: () => unawaited(_addEntryToSetList(entry)),
+            ),
             metadata: ScoreFileMetadata(
               key: ValueKey((entry.id, entry.currentRevisionId)),
               entryId: entry.id,
@@ -1193,6 +1201,25 @@ class _LibraryScreenState extends State<LibraryScreen>
         );
       },
     );
+  }
+
+  Future<void> _addEntryToSetList(LibraryEntry entry) async {
+    if (_openingSetList) return;
+    _openingSetList = true;
+    try {
+      final workspace = await _prepareReader();
+      if (!mounted) return;
+      await showAddToSetList(
+        context,
+        workspace: workspace,
+        entryId: entry.id,
+        displayPath: entry.relativePath,
+      );
+    } catch (_) {
+      if (mounted) _message('无法打开曲单，请重试。');
+    } finally {
+      _openingSetList = false;
+    }
   }
 
   Future<void> _shareEntry(

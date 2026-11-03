@@ -491,18 +491,22 @@ class ScoreFileTrailing extends StatelessWidget {
     super.key,
     required this.metadata,
     required this.menuAction,
+    this.addToSetListAction,
   });
   final Widget metadata, menuAction;
+  final Widget? addToSetListAction;
   static const width = 160.0;
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 600;
     return SizedBox(
-      width: compact ? 128 : width,
+      width: (compact ? 128 : width) + (addToSetListAction == null ? 0 : 44),
       child: Row(
         children: [
           SizedBox(width: compact ? 84 : 100, child: metadata),
           if (!compact) const SizedBox(width: 12),
+          if (addToSetListAction != null)
+            SizedBox(width: 44, child: addToSetListAction),
           SizedBox(width: compact ? 44 : 48, child: menuAction),
         ],
       ),

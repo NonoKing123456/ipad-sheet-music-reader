@@ -23,6 +23,8 @@ import 'reader_continuous.dart';
 import '../library/desktop_navigation_history.dart';
 import '../theme/app_theme.dart';
 import '../theme/device_layout.dart';
+import '../theme/reader_icons.dart';
+import 'add_to_set_list_dialog.dart';
 import '../sharing/score_share.dart';
 
 class LibraryReaderScreen extends StatefulWidget {
@@ -598,9 +600,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         statusLabel: workspace.unsavedCount > 0
             ? '${workspace.unsavedCount} 项未保存'
             : '阅读状态',
-        onToolsVisibilityChanged: _setEditing,
         onToolsLayoutSettled: _refreshReaderLayout,
-        beforeHideTools: _textControls.finish,
+        beforeHideTools: () async =>
+            !_writing && (!_editing || await _setEditing(false)),
+        blockArrowKeys: _desktopMenuOpen,
         onObstructionChanged: (insets) => setState(() => _panInsets = insets),
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
@@ -622,6 +625,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
                 actions: [
+                  if (widget.allowAnnotations)
+                    IconButton(
+                      tooltip: '加入曲单',
+                      onPressed: _writing ? null : _addToSetList,
+                      icon: const ReaderIcon(ReaderGlyph.playlistAdd),
+                    ),
+                  if (widget.allowAnnotations)
+                    IconButton(
+                      key: const ValueKey('ipad-annotation-toggle'),
+                      tooltip: _editing ? '完成批注' : '批注',
+                      onPressed: _writing ? null : _annotationAction,
+                      isSelected: _editing,
+                      icon: _editing
+                          ? const Icon(Icons.check)
+                          : const ReaderIcon(ReaderGlyph.pen),
+                    ),
                   const ThemeAction(),
                   if (current != null)
                     ShareAction(
@@ -631,12 +650,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                       beforeShare: _prepareShare,
                       annotationsFor: (number) =>
                           _shareAnnotations(current.target, number),
-                    ),
-                  if (_editing && !_textDraftActive)
-                    IconButton(
-                      tooltip: '完成批注',
-                      onPressed: _writing ? null : _stageControls.hideTools,
-                      icon: const Icon(Icons.check),
                     ),
                   if (_visibleDocument != null && _visibleDocument!.pdf == null)
                     PopupMenuButton<String>(
@@ -653,7 +666,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     ),
                 ],
               ),
-              if (page != null && widget.allowAnnotations)
+              if (page != null && widget.allowAnnotations && _editing)
                 _tools(_visiblePage ?? page),
             ],
           ),
@@ -735,6 +748,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 mouseInk: _editing && _tool != null,
                 touchInk: _editing && _tool != null,
                 editing: _editing,
+                ignorePointerGestures: _desktopMenuOpen,
                 gestureGeneration: _inputGeneration,
                 onTransformGestureChanged: (active) =>
                     setState(() => _touchTransforming = active),
@@ -843,7 +857,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return;
     }
     final selected = visible.pageNumber;
-    if (_desktopMode == ReaderViewMode.continuous) {
+    if (!_isCompact && _desktopMode == ReaderViewMode.continuous) {
       _continuousRestore = _continuous.anchor;
       _continuousEditStart = visible;
       _continuousAnchorFocus = visible;
@@ -860,11 +874,29 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (_writing || !_editing || !await _textControls.finish() || !mounted) {
       return;
     }
-    if (_desktopMode == ReaderViewMode.continuous &&
+    if (!_isCompact &&
+        _desktopMode == ReaderViewMode.continuous &&
         _session.pageKey != _continuousEditStart) {
       _continuousRestore = null;
     }
     _setEditing(false);
+  }
+
+  Future<void> _addToSetList() async {
+    if (_writing || !await _textControls.finish() || !mounted) return;
+    final target = _visibleDocument?.target ?? _session.current?.target;
+    if (target == null) return;
+    setState(() => _desktopMenuOpen = true);
+    try {
+      await showAddToSetList(
+        context,
+        workspace: widget.workspace,
+        entryId: target.entryId,
+        displayPath: target.displayPath,
+      );
+    } finally {
+      if (mounted) setState(() => _desktopMenuOpen = false);
+    }
   }
 
   Future<void> _jumpDialog() async {
@@ -966,6 +998,21 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         onNext: () => _navigate(NavigationDirection.forward),
         blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
         contentBuilder: (_) => DesktopReaderShell(
+          primaryActions: [
+            if (widget.allowAnnotations)
+              if (MediaQuery.sizeOf(context).width >= 1200)
+                TextButton.icon(
+                  onPressed: _writing ? null : _addToSetList,
+                  icon: const ReaderIcon(ReaderGlyph.playlistAdd, size: 20),
+                  label: const Text('加入曲单'),
+                )
+              else
+                IconButton(
+                  tooltip: '加入曲单',
+                  onPressed: _writing ? null : _addToSetList,
+                  icon: const ReaderIcon(ReaderGlyph.playlistAdd),
+                ),
+          ],
           actions: [
             const ThemeAction(),
             if (document != null)
@@ -1487,102 +1534,89 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         size: size,
       );
     }
-    return Align(
-      alignment: Alignment.center,
-      child: Container(
-        key: _textToolsKey,
-        width: double.infinity,
-        color: Theme.of(context).colorScheme.surface,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Divider(
-              height: 1,
-              thickness: 1,
-              color: Theme.of(context).colorScheme.outlineVariant,
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: double.infinity,
-                    child: Row(
-                      children: [
-                        for (final tool in ReaderTool.values)
-                          ReaderToolButton(
-                            key: ValueKey(tool),
-                            tool: tool,
-                            selected: !_picking && !_textTool && _tool == tool,
-                            value: _sizes[tool]!,
-                            onSelect: () => _selectTool(tool),
-                          ),
-                        SizedBox(
-                          width: 72,
-                          height: 44,
-                          child: Tooltip(
-                            message: '文字批注',
-                            child: TextButton.icon(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final available = (constraints.maxWidth - 16).clamp(
+          0.0,
+          double.infinity,
+        );
+        const controlsWidth = 664.0;
+        Widget separator() => const SizedBox(
+          width: 12,
+          height: 22,
+          child: VerticalDivider(width: 1),
+        );
+        Widget history(bool undo) => SizedBox.square(
+          dimension: 44,
+          child: IconButton(
+            tooltip: undo ? '撤销' : '重做',
+            onPressed:
+                (undo
+                        ? widget.workspace.store.canUndo(page)
+                        : widget.workspace.store.canRedo(page)) ||
+                    widget.workspace.savingAnnotations
+                ? () => _queueAnnotationHistory(page, undo: undo)
+                : null,
+            icon: ReaderIcon(undo ? ReaderGlyph.undo : ReaderGlyph.redo),
+          ),
+        );
+        return Container(
+          key: _textToolsKey,
+          color: Theme.of(context).colorScheme.surface,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Divider(height: 1, thickness: 1),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                child: Scrollbar(
+                  controller: _toolsScrollController,
+                  thumbVisibility: available < controlsWidth,
+                  child: SingleChildScrollView(
+                    key: const ValueKey('reader-ipad-annotation-scroll'),
+                    controller: _toolsScrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: available > controlsWidth
+                          ? available
+                          : controlsWidth,
+                      height: 44,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          for (final tool in ReaderTool.values)
+                            ReaderToolButton(
+                              key: ValueKey(tool),
+                              tool: tool,
+                              selected:
+                                  !_picking && !_textTool && _tool == tool,
+                              value: _sizes[tool]!,
+                              onSelect: () => _selectTool(tool),
+                              buttonWidth: 44,
+                              buttonHeight: 44,
+                              iconOnly: true,
+                            ),
+                          SizedBox.square(
+                            dimension: 44,
+                            child: IconButton(
+                              tooltip: '文字批注',
                               onPressed: _toggleTextTool,
-                              icon: const Icon(Icons.text_fields, size: 19),
-                              label: const Text('文字'),
-                              style: TextButton.styleFrom(
-                                fixedSize: const Size(72, 44),
-                                minimumSize: const Size(72, 44),
-                                maximumSize: const Size(72, 44),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                ),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              isSelected: _textTool,
+                              style: IconButton.styleFrom(
+                                padding: EdgeInsets.zero,
                                 backgroundColor: _textTool
                                     ? Theme.of(context)
                                           .colorScheme
                                           .secondaryContainer
                                     : Colors.transparent,
-                                foregroundColor: _textTool
-                                    ? Theme.of(context)
-                                          .colorScheme
-                                          .onSecondaryContainer
-                                    : Theme.of(context).colorScheme.onSurface,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
                               ),
+                              icon: const ReaderIcon(ReaderGlyph.text),
                             ),
                           ),
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          tooltip: '撤销',
-                          onPressed:
-                              widget.workspace.store.canUndo(page) ||
-                                  widget.workspace.savingAnnotations
-                              ? () => _queueAnnotationHistory(page, undo: true)
-                              : null,
-                          icon: const Icon(Icons.undo),
-                        ),
-                        IconButton(
-                          tooltip: '重做',
-                          onPressed:
-                              widget.workspace.store.canRedo(page) ||
-                                  widget.workspace.savingAnnotations
-                              ? () => _queueAnnotationHistory(page, undo: false)
-                              : null,
-                          icon: const Icon(Icons.redo),
-                        ),
-                      ],
-                    ),
-                  ),
-                  SizedBox(
-                    height: 48,
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
+                          separator(),
                           ReaderAnnotationColors(
+                            compact: true,
+                            showCustomColor: false,
                             argb: _color,
                             onChanged: _textControls.saving
                                 ? null
@@ -1597,7 +1631,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                                     }
                                   },
                           ),
-                          const SizedBox(width: 8),
                           ReaderSampleColorButton(
                             sample: _lastSample == null
                                 ? null
@@ -1612,100 +1645,45 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                                 ? null
                                 : _sampleAction,
                           ),
-                          ReaderSampleReuseButton(
-                            sample: _lastSample == null
+                          separator(),
+                          ReaderSizeButton(
+                            key: const ValueKey('annotation-size-button'),
+                            value: currentSize.clamp(minSize, maxSize),
+                            min: minSize,
+                            max: maxSize,
+                            label: sizeLabel,
+                            tool: activeTool,
+                            color: Color(_color),
+                            textMode: _textTool,
+                            onChanged: _textTool && _textControls.saving
                                 ? null
-                                : Color(_lastSample!),
-                            selected: _usingSample,
-                            onPressed: _lastSample == null || _writing
-                                ? null
-                                : _useSampleColor,
+                                : (value) => setState(() {
+                                    if (_textTool) {
+                                      _textControls.changeFontSizeFraction(
+                                        value,
+                                      );
+                                    } else {
+                                      _sizes[activeTool] = value;
+                                    }
+                                  }),
+                            onChangeEnd: _textTool
+                                ? (_) =>
+                                      unawaited(_textControls.commitFontSize())
+                                : null,
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            sizeLabel,
-                            style: Theme.of(context).textTheme.labelMedium,
-                          ),
-                          SizedBox(
-                            width: DeviceLayoutScope.isCompact(context)
-                                ? 116
-                                : 164,
-                            child: Slider(
-                              key: const ValueKey('annotation-size-slider'),
-                              min: minSize,
-                              max: maxSize,
-                              divisions: 100,
-                              value: currentSize.clamp(minSize, maxSize),
-                              label: _textTool
-                                  ? (currentSize * 1024).toStringAsFixed(0)
-                                  : currentSize.toStringAsFixed(1),
-                              onChanged: _textTool && _textControls.saving
-                                  ? null
-                                  : (value) => setState(() {
-                                      if (_textTool) {
-                                        _textControls.changeFontSizeFraction(
-                                          value,
-                                        );
-                                      } else {
-                                        _sizes[activeTool] = value;
-                                      }
-                                    }),
-                              onChangeEnd: _textTool
-                                  ? (_) => unawaited(
-                                      _textControls.commitFontSize(),
-                                    )
-                                  : null,
-                            ),
-                          ),
-                          SizedBox(
-                            width: 34,
-                            child: Text(
-                              _textTool
-                                  ? (currentSize * 1024).toStringAsFixed(0)
-                                  : currentSize.toStringAsFixed(1),
-                              textAlign: TextAlign.end,
-                            ),
-                          ),
-                          SizedBox(
-                            width: 36,
-                            height: 28,
-                            child: _textTool
-                                ? Center(
-                                    child: Text(
-                                      'A',
-                                      key: const ValueKey(
-                                        'annotation-size-preview',
-                                      ),
-                                      style: TextStyle(
-                                        color: Color(_color),
-                                        fontSize: (currentSize * 1024).clamp(
-                                          8,
-                                          28,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                : CustomPaint(
-                                    key: const ValueKey(
-                                      'annotation-size-preview',
-                                    ),
-                                    painter: ReaderToolSizePreview(
-                                      activeTool,
-                                      size,
-                                      Color(_color),
-                                    ),
-                                  ),
-                          ),
+                          separator(),
+                          history(true),
+                          history(false),
                         ],
                       ),
                     ),
                   ),
-                ],
+                ),
               ),
-            ),
-          ],
-        ),
-      ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1774,7 +1752,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               padding: EdgeInsets.zero,
               constraints: BoxConstraints.tight(Size(iconSize, iconSize)),
               iconSize: 20,
-              icon: Icon(undo ? Icons.undo : Icons.redo),
+              icon: ReaderIcon(undo ? ReaderGlyph.undo : ReaderGlyph.redo),
             ),
           );
         }
@@ -1839,9 +1817,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                                 child: showLabels
                                     ? TextButton.icon(
                                         onPressed: _toggleTextTool,
-                                        icon: const Icon(
-                                          Icons.text_fields,
-                                          size: 18,
+                                        icon: const ReaderIcon(
+                                          ReaderGlyph.text,
+                                          size: 20,
                                         ),
                                         label: const Text('文字'),
                                         style: _desktopToolButtonStyle(
@@ -1852,7 +1830,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                                       )
                                     : IconButton(
                                         onPressed: _toggleTextTool,
-                                        icon: const Icon(Icons.text_fields),
+                                        icon: const ReaderIcon(
+                                          ReaderGlyph.text,
+                                        ),
                                         style: IconButton.styleFrom(
                                           fixedSize: Size(
                                             textButtonWidth,

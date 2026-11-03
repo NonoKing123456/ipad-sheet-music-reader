@@ -19,6 +19,8 @@ import 'package:reader_state/reader_state.dart' show PageKey;
 import '../reader/library_reader_screen.dart';
 import '../reader/reader_session.dart';
 import '../reader/set_lists_screen.dart';
+import '../reader/add_to_set_list_dialog.dart';
+import '../theme/reader_icons.dart';
 import 'sync_controller.dart';
 import 'sync_screen.dart';
 import '../theme/app_theme.dart';
@@ -757,6 +759,18 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                     ),
                                     onTap: () => unawaited(_open(entry)),
                                     trailing: ScoreFileTrailing(
+                                      addToSetListAction: IconButton(
+                                        tooltip: '加入曲单',
+                                        icon: const ReaderIcon(
+                                          ReaderGlyph.playlistAdd,
+                                        ),
+                                        onPressed: () => showAddToSetList(
+                                          context,
+                                          workspace: sync.workspace,
+                                          entryId: entry.id,
+                                          displayPath: entry.relativePath,
+                                        ),
+                                      ),
                                       metadata: ScoreFileMetadata(
                                         key: ValueKey((
                                           entry.id,

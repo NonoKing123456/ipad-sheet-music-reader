@@ -234,9 +234,13 @@ class ReaderAnnotationColors extends StatelessWidget {
     super.key,
     required this.argb,
     required this.onChanged,
+    this.compact = false,
+    this.showCustomColor = true,
   });
   final int argb;
   final ValueChanged<int>? onChanged;
+  final bool compact;
+  final bool showCustomColor;
 
   static const _palette = [
     ('黑色', 0xff222222),
@@ -261,8 +265,8 @@ class ReaderAnnotationColors extends StatelessWidget {
           height: 44,
           child: Center(
             child: SizedBox(
-              width: 36,
-              height: 36,
+              width: compact ? 30 : 36,
+              height: compact ? 30 : 36,
               child: Stack(
                 alignment: Alignment.center,
                 children: [
@@ -281,8 +285,8 @@ class ReaderAnnotationColors extends StatelessWidget {
                     ),
                   SizedBox(
                     key: ValueKey('annotation-color-dot-$color'),
-                    width: 28,
-                    height: 28,
+                    width: compact ? 24 : 28,
+                    height: compact ? 24 : 28,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
@@ -308,9 +312,9 @@ class ReaderAnnotationColors extends StatelessWidget {
     mainAxisSize: MainAxisSize.min,
     children: [
       for (final (name, color) in _palette) _swatch(context, name, color),
-      if (_palette.every((entry) => entry.$2 != argb))
+      if (showCustomColor && _palette.every((entry) => entry.$2 != argb))
         _swatch(context, '当前颜色', argb)
-      else
+      else if (showCustomColor)
         const SizedBox(
           key: ValueKey('annotation-color-current-slot'),
           width: 44,

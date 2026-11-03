@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../theme/reader_icons.dart';
 import '../theme/tokens.dart';
 
 enum ReaderTool { pen, highlighter, eraser }
@@ -14,6 +16,11 @@ extension ReaderToolAppearance on ReaderTool {
     ReaderTool.pen => Icons.edit,
     ReaderTool.highlighter => Icons.highlight,
     ReaderTool.eraser => Icons.auto_fix_normal,
+  };
+  ReaderGlyph get glyph => switch (this) {
+    ReaderTool.pen => ReaderGlyph.pen,
+    ReaderTool.highlighter => ReaderGlyph.highlighter,
+    ReaderTool.eraser => ReaderGlyph.eraser,
   };
   double get minSize => this == ReaderTool.pen ? 1 : 4;
   double get maxSize => this == ReaderTool.highlighter ? 64 : 48;
@@ -40,11 +47,14 @@ class ReaderToolButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compactButton = Size(buttonWidth, buttonHeight);
+    final tokens = ScoreTokens.of(context);
     final foreground = selected
-        ? Theme.of(context).colorScheme.onSecondaryContainer
+        ? tokens.pine
         : Theme.of(context).colorScheme.onSurface;
     final background = selected
-        ? Theme.of(context).colorScheme.secondaryContainer
+        ? tokens.pineWash
+        : iconOnly
+        ? tokens.paper2.withValues(alpha: .4)
         : Colors.transparent;
     final shape = RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(10),
@@ -63,7 +73,7 @@ class ReaderToolButton extends StatelessWidget {
           child: iconOnly
               ? IconButton(
                   onPressed: onSelect,
-                  icon: Icon(tool.icon, size: 18),
+                  icon: ReaderIcon(tool.glyph, size: 22),
                   style: IconButton.styleFrom(
                     fixedSize: compactButton,
                     minimumSize: compactButton,
@@ -77,7 +87,7 @@ class ReaderToolButton extends StatelessWidget {
                 )
               : TextButton.icon(
                   onPressed: onSelect,
-                  icon: Icon(tool.icon, size: 19),
+                  icon: ReaderIcon(tool.glyph, size: 22),
                   label: Text(
                     tool.label,
                     maxLines: 1,
@@ -101,6 +111,207 @@ class ReaderToolButton extends StatelessWidget {
   }
 }
 
+/// A direct horizontal adjustment confined to its own 56 × 44 touch target.
+/// Updates preview immediately; one release creates one committed change.
+class ReaderSizeButton extends StatefulWidget {
+  const ReaderSizeButton({
+    super.key,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+    required this.onChangeEnd,
+    required this.label,
+    this.tool = ReaderTool.pen,
+    this.color,
+    this.textMode = false,
+  }) : assert(min < max);
+
+  final double value, min, max;
+  final ValueChanged<double>? onChanged, onChangeEnd;
+  final String label;
+  final ReaderTool tool;
+  final Color? color;
+  final bool textMode;
+
+  @override
+  State<ReaderSizeButton> createState() => _ReaderSizeButtonState();
+}
+
+class _ReaderSizeButtonState extends State<ReaderSizeButton> {
+  final _focus = FocusNode();
+  double? _preview, _start;
+  double _dragValue = 0;
+  bool _focused = false;
+  bool get _enabled => widget.onChanged != null;
+  double get _value => (_preview ?? widget.value).clamp(widget.min, widget.max);
+  double get _step => widget.textMode ? 1 / 1024 : .5;
+  String _format(double value) => widget.textMode
+      ? (value * 1024).toStringAsFixed(0)
+      : value.toStringAsFixed(1);
+  String get _formatted => _format(_value);
+
+  void _update(double value) {
+    final next = ((value / _step).round() * _step).clamp(
+      widget.min,
+      widget.max,
+    );
+    if (next == _value) return;
+    setState(() => _preview = next);
+    widget.onChanged?.call(next);
+  }
+
+  void _nudge(double direction) {
+    final before = _value;
+    _update(before + direction * _step);
+    if (_value != before) widget.onChangeEnd?.call(_value);
+    setState(() => _preview = null);
+  }
+
+  void _finish() {
+    final value = _value;
+    final changed = _start != null && value != _start;
+    _start = null;
+    if (changed) widget.onChangeEnd?.call(value);
+    setState(() => _preview = null);
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final tokens = ScoreTokens.of(context);
+    final foreground = widget.color ?? scheme.onSurface;
+    return Semantics(
+      label: widget.label,
+      value: _formatted,
+      enabled: _enabled,
+      increasedValue: _format((_value + _step).clamp(widget.min, widget.max)),
+      decreasedValue: _format((_value - _step).clamp(widget.min, widget.max)),
+      onIncrease: _enabled ? () => _nudge(1) : null,
+      onDecrease: _enabled ? () => _nudge(-1) : null,
+      child: Focus(
+        focusNode: _focus,
+        onFocusChange: (value) => setState(() => _focused = value),
+        onKeyEvent: (_, event) {
+          if (!_enabled ||
+              (event is! KeyDownEvent && event is! KeyRepeatEvent)) {
+            return KeyEventResult.ignored;
+          }
+          final key = event.logicalKey;
+          if (key == LogicalKeyboardKey.arrowRight ||
+              key == LogicalKeyboardKey.arrowUp) {
+            _nudge(1);
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.arrowLeft ||
+              key == LogicalKeyboardKey.arrowDown) {
+            _nudge(-1);
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Tooltip(
+          message: '${widget.label}：按住左右拖动调整',
+          child: ExcludeSemantics(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _enabled ? _focus.requestFocus : null,
+              onHorizontalDragStart: !_enabled
+                  ? null
+                  : (_) {
+                      _focus.requestFocus();
+                      _start = _value;
+                      _dragValue = _value;
+                      setState(() => _preview = _value);
+                    },
+              onHorizontalDragUpdate: !_enabled
+                  ? null
+                  : (details) {
+                      _dragValue =
+                          (_dragValue +
+                                  details.delta.dx *
+                                      (widget.max - widget.min) /
+                                      160)
+                              .clamp(widget.min, widget.max);
+                      _update(_dragValue);
+                    },
+              onHorizontalDragEnd: !_enabled ? null : (_) => _finish(),
+              onHorizontalDragCancel: !_enabled
+                  ? null
+                  : () {
+                      final start = _start;
+                      _start = null;
+                      if (start != null) widget.onChanged?.call(start);
+                      setState(() => _preview = null);
+                    },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 100),
+                width: 56,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: _start != null
+                      ? tokens.pineWash
+                      : tokens.paper2.withValues(alpha: .4),
+                  borderRadius: BorderRadius.circular(10),
+                  border: _focused
+                      ? Border.all(color: scheme.primary, width: 1)
+                      : null,
+                ),
+                child: Opacity(
+                  opacity: _enabled ? 1 : .38,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: widget.textMode
+                              ? Center(
+                                  child: Text(
+                                    'A',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelMedium,
+                                  ),
+                                )
+                              : CustomPaint(
+                                  painter: ReaderToolSizePreview(
+                                    widget.tool,
+                                    _value,
+                                    foreground,
+                                  ),
+                                ),
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              _formatted,
+                              style: Theme.of(context).textTheme.labelMedium,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ReaderToolSizePreview extends CustomPainter {
   ReaderToolSizePreview(this.tool, this.value, this.color);
   final ReaderTool tool;
@@ -116,14 +327,20 @@ class ReaderToolSizePreview extends CustomPainter {
       paint.strokeWidth = 1.5;
       canvas.drawCircle(
         size.center(Offset.zero),
-        (value / 2).clamp(2.0, 14.0),
+        (value / 2).clamp(2.0, (size.shortestSide / 2 - 1).clamp(2.0, 14.0)),
         paint,
       );
     } else {
-      paint.strokeWidth = (value / 2).clamp(1.0, 24.0);
+      paint.strokeWidth = (value / 2).clamp(
+        1.0,
+        (size.height - 2).clamp(1.0, 24.0),
+      );
       canvas.drawLine(
-        Offset(10, size.height / 2),
-        Offset(size.width - 10, size.height / 2),
+        Offset((size.width * .2).clamp(0.0, 10.0), size.height / 2),
+        Offset(
+          size.width - (size.width * .2).clamp(0.0, 10.0),
+          size.height / 2,
+        ),
         paint,
       );
     }
@@ -135,7 +352,7 @@ class ReaderToolSizePreview extends CustomPainter {
 }
 
 /// The last successful sample belongs to the eyedropper, independently of the
-/// active palette color. An empty swatch has a slash; white samples have a rim.
+/// active palette color. Its fine underline shows the last sampled color.
 class ReaderSampleColorButton extends StatelessWidget {
   const ReaderSampleColorButton({
     super.key,
@@ -185,13 +402,31 @@ class ReaderSampleColorButton extends StatelessWidget {
             dimension: 28,
             child: Stack(
               children: [
-                const Center(child: Icon(Icons.colorize, size: 22)),
-                if (picking)
-                  const Positioned(
-                    right: 0,
-                    top: 0,
-                    child: Icon(Icons.add_circle, size: 11),
+                const Positioned(
+                  top: 0,
+                  left: 2,
+                  child: ReaderIcon(ReaderGlyph.eyedropper, size: 24),
+                ),
+                Positioned(
+                  left: 5,
+                  right: 5,
+                  bottom: 0,
+                  child: Container(
+                    key: const ValueKey('reader-sample-underline'),
+                    height: 3,
+                    decoration: BoxDecoration(
+                      color:
+                          sample ??
+                          Theme.of(context).colorScheme.outlineVariant,
+                      borderRadius: BorderRadius.circular(2),
+                      border: Border.all(
+                        color: Theme.of(context).colorScheme.outline
+                            .withValues(alpha: .45),
+                        width: .5,
+                      ),
+                    ),
                   ),
+                ),
                 if (busy)
                   const Positioned.fill(
                     child: CircularProgressIndicator(strokeWidth: 1.5),
