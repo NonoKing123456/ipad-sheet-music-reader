@@ -140,22 +140,13 @@ class _ReaderIconPainter extends CustomPainter {
         path(const [Offset(6.5, 9), Offset(3.5, 12), Offset(6.5, 15)]);
         path(const [Offset(17.5, 9), Offset(20.5, 12), Offset(17.5, 15)]);
       case ReaderGlyph.width:
-        line(4, 7, 4, 17);
-        line(20, 7, 20, 17);
         line(4, 12, 20, 12);
         path(const [Offset(7, 9), Offset(4, 12), Offset(7, 15)]);
         path(const [Offset(17, 9), Offset(20, 12), Offset(17, 15)]);
       case ReaderGlyph.transform:
-        path(const [Offset(5, 10), Offset(5, 5), Offset(10, 5)]);
-        path(const [Offset(14, 19), Offset(19, 19), Offset(19, 14)]);
-        line(5, 5, 10, 10);
-        line(14, 14, 19, 19);
-        canvas.drawPath(
-          Path()
-            ..moveTo(19, 9)
-            ..cubicTo(17, 3, 10, 2, 6, 5),
-          paint,
-        );
+        line(5, 19, 19, 5);
+        path(const [Offset(13, 5), Offset(19, 5), Offset(19, 11)]);
+        path(const [Offset(5, 13), Offset(5, 19), Offset(11, 19)]);
       case ReaderGlyph.playlistAdd:
         line(4, 6, 18, 6);
         line(4, 11, 14, 11);

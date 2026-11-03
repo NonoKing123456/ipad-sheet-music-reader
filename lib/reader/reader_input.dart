@@ -267,6 +267,10 @@ class _ReaderInputState extends State<ReaderInput> {
       return;
     }
     _pointers.add(event.pointer);
+    if (widget.textControls?.selectionPointers.contains(event.pointer) ??
+        false) {
+      _textMoves.add(event.pointer);
+    }
     if (_pointers.length == 1) {
       _touchGeneration++;
       _singleAxis = null;

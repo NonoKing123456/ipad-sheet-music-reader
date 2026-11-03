@@ -1412,7 +1412,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             enabled:
                 active &&
                 _editing &&
-                (_tool != null || _textTool) &&
                 (_isCompact ||
                     editableSpread ||
                     (_editing &&
@@ -1421,6 +1420,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 !_session.sourceChanged &&
                 (!_textTool || editableSpread || surfacePage == _visiblePage),
             textTool: _textTool,
+            onTextToolRequested: _tool == null && !_textTool && !_picking
+                ? () => setState(() => _textTool = true)
+                : null,
             style: _textTool
                 ? StrokeStyle(
                     tool: AnnotationTool.pen,

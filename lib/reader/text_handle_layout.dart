@@ -18,7 +18,7 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
   required double scale,
   Offset? rotationCentre,
 }) {
-  final unit = 1 / scale, side = 44 * unit, visual = 28 * unit;
+  final unit = 1 / scale, side = 44 * unit, visual = 24 * unit;
   TextHandlePlacement at(Offset hitTopLeft, Offset visualTopLeft) =>
       TextHandlePlacement(
         hitTopLeft & Size.square(side),
@@ -28,6 +28,20 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
       top = frame.top,
       right = frame.right,
       bottom = frame.bottom;
+  // Frame includes the editor's outer padding. Anchor the visible controls
+  // on its border while pushing most of each touch target outside the input.
+  final cornerMove = at(
+    Offset(left - 32 * unit, top - 32 * unit),
+    Offset(left - 12 * unit, top - 12 * unit),
+  );
+  final edgeWidth = at(
+    Offset(right - 12 * unit, frame.center.dy - 32 * unit),
+    Offset(right - 12 * unit, frame.center.dy - 12 * unit),
+  );
+  final cornerTransform = at(
+    Offset(right - 12 * unit, bottom - 12 * unit),
+    Offset(right - 12 * unit, bottom - 12 * unit),
+  );
   final aboveLeft = at(
     Offset(left, top - 46 * unit),
     Offset(left, top - 32 * unit),
@@ -74,6 +88,7 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
   );
   final candidates = {
     TextHandleKind.move: [
+      cornerMove,
       diagonalMove,
       aboveLeft,
       leftTop,
@@ -84,6 +99,7 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
       belowRight,
     ],
     TextHandleKind.transform: [
+      cornerTransform,
       belowRight,
       rightBottom,
       belowLeft,
@@ -94,6 +110,7 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
       leftTop,
     ],
     TextHandleKind.width: [
+      edgeWidth,
       rightMiddle,
       rightTop,
       rightBottom,
@@ -132,14 +149,22 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
         return result;
       });
 
+  // A 48px control frame makes width and transform targets meet exactly.
+  // Ignore only arithmetic noise at that shared edge, in screen-sized units.
+  bool overlaps(Rect a, Rect b) {
+    final intersection = a.intersect(b);
+    final epsilon = 1e-7 * unit;
+    return intersection.width > epsilon && intersection.height > epsilon;
+  }
+
   Map<TextHandleKind, TextHandlePlacement>? best;
   var bestOverflow = double.infinity;
   for (final move in candidates[TextHandleKind.move]!) {
     for (final transform in candidates[TextHandleKind.transform]!) {
-      if (move.hitRect.overlaps(transform.hitRect)) continue;
+      if (overlaps(move.hitRect, transform.hitRect)) continue;
       for (final width in candidates[TextHandleKind.width]!) {
-        if (width.hitRect.overlaps(move.hitRect) ||
-            width.hitRect.overlaps(transform.hitRect)) {
+        if (overlaps(width.hitRect, move.hitRect) ||
+            overlaps(width.hitRect, transform.hitRect)) {
           continue;
         }
         final total = overflow(move) + overflow(transform) + overflow(width);
@@ -155,7 +180,7 @@ Map<TextHandleKind, TextHandlePlacement> layoutTextHandles({
       }
     }
   }
-  // An offscreen text edge stays offscreen rather than pushing its target onto
-  // the input. The portal clips overflow to the actual reader viewport.
+  // When no candidate fully fits, retain the least overflowing separate targets.
+  // The portal clips overflow to the actual reader viewport.
   return best!;
 }

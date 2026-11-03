@@ -37,6 +37,16 @@ class ReaderTextEditorController extends ChangeNotifier {
   Future<bool>? _finishing, _formatting;
   bool get saving => _finishing != null || _formatting != null;
   bool availableTo(Object owner) => !editing || identical(_owner, owner);
+
+  final selectionPointers = <int>{};
+
+  /// Reflect a canvas gesture or history change without starting a new edit.
+  void reflectFontSize(Object owner, double value) {
+    if (!identical(_owner, owner) || fontSizeFraction == value) return;
+    fontSizeFraction = value;
+    _changed();
+  }
+
   final _paperPointers = <int>{};
   int? _tapPointer;
   Offset? _tapOrigin;

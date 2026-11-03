@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import '../theme/tokens.dart';
 import '../theme/reader_icons.dart';
+import '../theme/device_layout.dart';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -18,7 +19,7 @@ import 'text_handle_layout.dart';
 
 // Editing chrome sits on the unchanged white paper, even in dark app chrome.
 
-/// Paper-relative text. Only explicit T mode accepts finger/mouse text actions.
+/// Paper-relative text, with optional selection from idle annotation mode.
 class AnnotationTextLayer extends StatefulWidget {
   const AnnotationTextLayer({
     super.key,
@@ -40,6 +41,7 @@ class AnnotationTextLayer extends StatefulWidget {
     this.onInteractionStart,
     this.clipToPage = false,
     this.transferTextOnTap = false,
+    this.onTextToolRequested,
   });
   final ReaderWorkspace workspace;
   final PageKey page;
@@ -51,6 +53,7 @@ class AnnotationTextLayer extends StatefulWidget {
   final ReaderTextEditorController? textControls;
   final ValueChanged<bool>? onWritingChanged;
   final VoidCallback? onInteractionStart;
+  final VoidCallback? onTextToolRequested;
   final bool clipToPage, transferTextOnTap;
   @override
   State<AnnotationTextLayer> createState() => _AnnotationTextLayerState();
@@ -291,6 +294,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   void _cancelHandle({bool defer = false}) {
     if (_handlePointer != null) {
       if (_editorOpen && _handleBase != null) _draft = _handleBase;
+      if (_handleBase case final base?) {
+        _controls.reflectFontSize(this, base.fontSizeFraction);
+      }
       _writingEnd(defer: defer);
     }
     _endHandle?.call();
@@ -1039,6 +1045,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         _preview = value;
       }
     });
+    _controls.reflectFontSize(this, value.fontSizeFraction);
   }
 
   void _handleUp(PointerUpEvent event, Size size) {
@@ -1151,22 +1158,11 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                       ),
                       errorText: _error,
                       errorStyle: TextStyle(color: tokens.dangerInk),
-                      border: const UnderlineInputBorder(),
-                      enabledBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: tokens.ink500),
-                      ),
-                      focusedBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: tokens.pine, width: 2),
-                      ),
-                      errorBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: tokens.dangerInk),
-                      ),
-                      focusedErrorBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(
-                          color: tokens.dangerInk,
-                          width: 2,
-                        ),
-                      ),
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
+                      errorBorder: InputBorder.none,
+                      focusedErrorBorder: InputBorder.none,
                     ),
                   ),
                 );
@@ -1183,6 +1179,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         ? box.getTransformTo(null).getMaxScaleOnAxis().clamp(.1, 20.0)
         : 1;
   }
+
+  // Selection chrome adds breathing room without changing saved text geometry.
+  Rect _controlFrame(Rect textFrame, TextAnnotation value, Size size) =>
+      textFrame.inflate(value.fontSizeFraction * size.shortestSide * .8);
 
   Widget _handleOverlay(
     BuildContext overlayContext,
@@ -1249,11 +1249,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       paper.globalToLocal(overlay.localToGlobal(visible.topLeft)),
       paper.globalToLocal(overlay.localToGlobal(visible.bottomRight)),
     );
-    // The editable underline has four pixels of bottom padding. Keep target
-    // geometry outside that padding as well as outside the painted text.
-    final controlFrame = _editorOpen
-        ? Rect.fromLTRB(frame.left, frame.top, frame.right, frame.bottom + 4)
-        : frame;
+    final controlFrame = _controlFrame(frame, value, size);
     final placements = layoutTextHandles(
       frame: controlFrame,
       rotationCentre: frame.center,
@@ -1263,7 +1259,12 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     );
     final clipRect = visible;
     final screenCorners =
-        [frame.topLeft, frame.topRight, frame.bottomLeft, frame.bottomRight]
+        [
+              controlFrame.topLeft,
+              controlFrame.topRight,
+              controlFrame.bottomLeft,
+              controlFrame.bottomRight,
+            ]
             .map(
               (point) => overlay.globalToLocal(
                 paper.localToGlobal(
@@ -1279,8 +1280,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       screenCorners.map((point) => point.dy).reduce(math.max),
     );
     final actionBarHeight = math.min(44.0, clipRect.height);
+    final compact = DeviceLayoutScope.isCompact(context);
     final actionBarWidth = math.min(
-      _editorOpen ? 144.0 : 210.0,
+      _editorOpen ? (compact ? 168.0 : 144.0) : (compact ? 216.0 : 168.0),
       clipRect.width,
     );
     Rect? actionBarRect;
@@ -1290,10 +1292,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       final screenHandleRects = placements.values.map((placement) {
         final corners =
             [
-              placement.hitRect.topLeft,
-              placement.hitRect.topRight,
-              placement.hitRect.bottomLeft,
-              placement.hitRect.bottomRight,
+              placement.visualRect.topLeft,
+              placement.visualRect.topRight,
+              placement.visualRect.bottomLeft,
+              placement.visualRect.bottomRight,
             ].map((point) {
               final rotated = rotateTextPoint(
                 point,
@@ -1318,14 +1320,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     }
     return Stack(
       children: [
-        if (actionBarRect != null)
-          Positioned(
-            left: actionBarRect.left,
-            top: actionBarRect.top,
-            width: actionBarRect.width,
-            height: actionBarRect.height,
-            child: _textActionBar(actionBarHeight),
-          ),
         Positioned.fromRect(
           rect: clipRect,
           child: ClipRect(
@@ -1347,6 +1341,16 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
             ),
           ),
         ),
+        // The strip owns overlapping invisible hit padding, so its buttons
+        // remain clickable while the circular handles stay on the frame edge.
+        if (actionBarRect != null)
+          Positioned(
+            left: actionBarRect.left,
+            top: actionBarRect.top,
+            width: actionBarRect.width,
+            height: actionBarRect.height,
+            child: _textActionBar(actionBarHeight),
+          ),
       ],
     );
   }
@@ -1360,12 +1364,12 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     if (size.width > viewport.width || size.height > viewport.height) {
       return null;
     }
-    final preferredLeft = textFrame.left
+    final preferredLeft = (textFrame.center.dx - size.width / 2)
         .clamp(viewport.left, viewport.right - size.width)
         .toDouble();
-    final preferredTop = textFrame.top - size.height - 5 >= viewport.top
-        ? textFrame.top - size.height - 5
-        : textFrame.bottom + 5;
+    final preferredTop = textFrame.top - size.height - 14 >= viewport.top
+        ? textFrame.top - size.height - 14
+        : textFrame.bottom + 14;
     final preferred = Offset(
       preferredLeft,
       preferredTop
@@ -1429,47 +1433,82 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   Widget _textActionBar(double height) {
     final busy = _committing || _controls.saving;
+    const tokens = ScoreTokens.light;
+    final labelStyle = DeviceLayoutScope.isCompact(context)
+        ? ScoreText.body.copyWith(fontWeight: FontWeight.w600)
+        : ScoreText.caption;
     Widget action(
       String name,
       String label,
       VoidCallback? onPressed, {
       bool destructive = false,
+      bool primary = false,
     }) => Expanded(
       child: TextButton(
         key: ValueKey('text-action-$name'),
         onPressed: busy ? null : onPressed,
         style: TextButton.styleFrom(
-          foregroundColor: destructive
-              ? Theme.of(context).colorScheme.error
-              : null,
+          foregroundColor: destructive ? tokens.dangerInk : tokens.ink900,
+          textStyle: Theme.of(context).textTheme.labelLarge?.merge(labelStyle),
           minimumSize: Size(44, height),
           visualDensity: VisualDensity.standard,
           padding: const EdgeInsets.symmetric(horizontal: 4),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
-        child: Text(label),
+        child: primary
+            ? Container(
+                height: 34,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: busy ? tokens.ink300 : tokens.pine,
+                  borderRadius: ScoreRadius.cardAll,
+                ),
+                child: Text(label, style: const TextStyle(color: Colors.white)),
+              )
+            : Text(label),
       ),
     );
     return Listener(
       key: _actionBarKey,
       onPointerDown: (_) => _controls.cancelPaperTap(),
       child: Material(
-        color: Theme.of(context).colorScheme.surface,
-        elevation: 3,
-        shadowColor: Colors.black26,
+        color: tokens.paper0,
+        elevation: 1,
+        shadowColor: Colors.black12,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+          borderRadius: ScoreRadius.overlayAll,
+          side: BorderSide(color: tokens.paper2),
         ),
         child: Row(
           children: _editorOpen
               ? [
                   action('cancel', '取消', _controls.onCancel),
-                  action('done', '完成', () => unawaited(_controls.finish())),
+                  action(
+                    'done',
+                    '完成',
+                    () => unawaited(_controls.finish()),
+                    primary: true,
+                  ),
                 ]
               : [
                   action('edit', '编辑', _controls.onEdit),
+                  SizedBox(
+                    height: 18,
+                    child: VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: tokens.paper2,
+                    ),
+                  ),
                   action('copy', '复制', () => unawaited(_copySelection())),
+                  SizedBox(
+                    height: 18,
+                    child: VerticalDivider(
+                      width: 1,
+                      thickness: 1,
+                      color: tokens.paper2,
+                    ),
+                  ),
                   action(
                     'delete',
                     '删除',
@@ -1536,21 +1575,22 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                   Positioned(
                     left: visualOffset.dx,
                     top: visualOffset.dy,
-                    width: 28,
-                    height: 28,
+                    width: 24,
+                    height: 24,
                     child: DecoratedBox(
                       key: ValueKey('text-handle-visual-${handle.name}'),
                       decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surface,
-                        borderRadius: BorderRadius.circular(7),
+                        color: ScoreTokens.light.paper0,
+                        shape: BoxShape.circle,
                         border: Border.all(
-                          color: Theme.of(context).colorScheme.outlineVariant,
+                          color: ScoreTokens.light.pine,
+                          width: 1.4,
                         ),
                       ),
                       child: ReaderIcon(
                         icon,
                         size: 16,
-                        color: Theme.of(context).colorScheme.onSurface,
+                        color: ScoreTokens.light.pine,
                       ),
                     ),
                   ),
@@ -1575,6 +1615,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
             : null;
         final frame = value == null ? null : _frame(value, size);
         final bounds = value == null ? null : _bounds(value, size);
+        if (value != null) {
+          _controls.reflectFontSize(this, value.fontSizeFraction);
+        }
         return Listener(
           behavior: HitTestBehavior.opaque,
           onPointerSignal: (_) => _controls.cancelPaperTap(),
@@ -1596,7 +1639,10 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
               AnnotationCanvas(
                 workspace: widget.workspace,
                 page: widget.page,
-                enabled: widget.enabled && !widget.textTool,
+                enabled:
+                    widget.enabled &&
+                    !widget.textTool &&
+                    widget.onTextToolRequested == null,
                 style: widget.style,
                 eraser: widget.eraser,
                 eraserRadiusFraction: widget.eraserRadiusFraction,
@@ -1608,6 +1654,41 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                 onInteractionStart: widget.onInteractionStart,
                 clipToPage: widget.clipToPage,
               ),
+              if (widget.enabled &&
+                  !widget.textTool &&
+                  !widget.suspended &&
+                  widget.onTextToolRequested != null &&
+                  !_controls.saving &&
+                  !widget.workspace.savingAnnotations)
+                for (final text
+                    in widget.workspace
+                        .annotationsFor(widget.page)
+                        .whereType<TextAnnotation>())
+                  Positioned.fromRect(
+                    rect: _frame(text, size),
+                    child: Transform.rotate(
+                      angle: text.rotation,
+                      child: Listener(
+                        onPointerDown: (event) =>
+                            _controls.selectionPointers.add(event.pointer),
+                        onPointerUp: (event) =>
+                            _controls.selectionPointers.remove(event.pointer),
+                        onPointerCancel: (event) =>
+                            _controls.selectionPointers.remove(event.pointer),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            if (!_controls.availableTo(this)) return;
+                            widget.onInteractionStart?.call();
+                            widget.onTextToolRequested?.call();
+                            setState(() => _selected = text.id);
+                            _bindSelection(text, size);
+                          },
+                          child: const SizedBox.expand(),
+                        ),
+                      ),
+                    ),
+                  ),
               if (value != null && frame != null && bounds != null) ...[
                 Positioned.fromRect(
                   rect: bounds,
@@ -1616,15 +1697,16 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                   ),
                 ),
                 Positioned.fromRect(
-                  rect: frame,
+                  rect: _controlFrame(frame, value, size),
                   child: IgnorePointer(
                     child: Transform.rotate(
                       angle: value.rotation,
                       child: DecoratedBox(
+                        key: const ValueKey('text-control-frame'),
                         decoration: BoxDecoration(
                           border: Border.all(
                             color: const Color(0xff236459),
-                            width: 1 / _screenScale,
+                            width: 1.2 / _screenScale,
                           ),
                         ),
                       ),
