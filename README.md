@@ -8,7 +8,33 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码版本：`0.8.10+33`。Windows `+33` 已交付：唯一构建114.2秒，完整19成员逐SHA及share-v1发布通过，固定入口/launcher/Start/cmd保持；根 iPad `+33` 包已完整核验并原子交付，来自唯一 Intel [run24](https://github.com/NonoKing123456/ipad-sheet-music-reader/actions/runs/41488644321) / 编译源 `a9a84fdd`，设备目标为 iOS arm64。此前 +32 run23 未获得 ARM64 runner 的容量失败记录保留在验证历史中。真实 iPad 交互、后台调度和系统分享仍待装机验证。
+> 当前源码版本：`0.8.10+41`。Windows 正式入口和两端本地分发包已更新；iPad IPA 需本地签名安装。
+
+## +41 更新
+
+文字操作条与圆形控制点统一；缩放按比例调整文字和选框，上方字号同步。批注模式没有选工具时，点击文字自动选中框及文字工具。iPad 保持单行批注工具栏和独立批注入口；阅读页与文件浏览页均可加入曲单。详见 [本轮修改、验证与安装说明](docs/RELEASE_0.8.10_41.md)。
+
+## +37 更新
+
+Windows 常规宽度阅读页采用左侧返回与曲名、中间翻页与阅读模式、右侧批注与文档操作的布局。批注工具整体居中，保持单行；窄窗口仍可横向滚动。增加宽屏对齐、窄宽窗口切换和菜单打开时调整窗口的回归检查，见 [宽屏布局验收](docs/UI37_ACCEPTANCE.md)。
+
+iPad 真机安装包也已更新为 `0.8.10+37`，位于根目录 `曲谱阅读器-iPad.ipa`。云端编译、原生检查及下载校验通过，使用 Sideloadly 本地签名安装，见 [安装包记录](docs/IPAD_RELEASE_0.8.10_37.md)。
+
+## +36 更新
+
+快速跳页面板和编排菜单外点只关闭菜单，避免误翻页、误落笔和滚轮穿透。刚落笔立即撤销会等待保存完成，保存失败保留草稿且不会撤销旧笔迹。文字编辑浮层避开旋转后的调整手柄，保留编辑、复制和删除入口。验收记录见 [文字、快捷键与翻页回归](docs/UI36_ACCEPTANCE.md)。
+
+## +35 更新
+
+Windows 阅读主栏固定为一行，单页、双页和纵向切换保持同高，双页首页编排放在模式旁的固定位置。批注工具与颜色、粗细、吸色、撤销合成一行；常用窗口直接展开，窄窗口保留横向滚动入口。iPad 仍使用原有两行触控工具。
+
+修复收起工具栏后残留顶部空白、隐藏工具抢焦点、文字编辑时按钮跳位、初次加载闪出重试入口，以及落笔未结束时返回可能丢失笔迹的问题。验收记录见 [Windows 阅读器修正](docs/UI35_ACCEPTANCE.md)。
+
+## +34 更新
+
+保留原来的暖纸色与松绿，统一字体、按钮、菜单及弹窗，去掉扩散水波纹。批注工具仅保留两行，常用颜色横向排列，画笔和荧光笔粗细直接用滑条调整，吸色与样本复用分开。文字继续在谱面原位输入并调整宽度和大小，附近提供编辑、复制与删除。
+
+Windows 保留单页、双页、纵向连续阅读，模式按钮位置固定；双页编排紧邻模式选择，页码位于右下角并提供紧凑跳页面板。Ctrl+Z 撤销，Ctrl+Shift+Z 或 Ctrl+Y 重做，文字输入和菜单焦点不会误触阅读快捷键。iPad 固定单页，纸内底部页点支持滑动选页。Windows 谱库顶部可切换 iPad 竖屏布局，也可使用 `--simulate-ipad` 启动；两种布局运行同一套正式业务与数据。详见 [发行说明](docs/RELEASE_0.8.10_34.md)。
 
 ## +33 更新
 
@@ -88,11 +114,12 @@ flutter analyze lib test tool
 **Windows：** 需要 Visual Studio 的 C++ 桌面开发组件及 Windows SDK。
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\flutter-patches\apply-193372.ps1
 flutter run -d windows
-flutter build windows --release --no-pub
+.\tools\windows\Build-Reader.ps1
 ```
 
-发布时需保留完整 `build/windows/x64/runner/Release/`，不能只复制 EXE。固定启动入口的安装及插件链接问题见 [构建文档](docs/BUILDING.md)。
+Windows SDK 目前需要本机 Flutter framework 的 PR #193372 semantics 修复；release helper 会在构建前检查并幂等应用，debug `flutter run` 前也需应用一次。补丁锁定 SDK revision/hash、保留原文件备份，来源和 Flutter BSD 许可证见 [补丁说明](tools/flutter-patches/README.md)。Windows 测试请使用 `.	oolswindowsTest-Reader.ps1 <测试路径> --no-pub`：它通过本机 Flutter tools 开关关闭 `flutter_tester` Dart CPU 采样器，以避开已知 Windows profiler 原生崩溃；测试用例、断言和覆盖率仍照常运行。若 SDK 不在 `PATH`，可用 `-FlutterRoot` 给 helper 指定 SDK 根目录。发布时需保留完整 `build/windows/x64/runner/Release/`，不能只复制 EXE。固定启动入口的安装及插件链接问题见 [Windows 工具说明](tools/windows/README.md) 和 [构建文档](docs/BUILDING.md)。
 
 **iOS：** 需要 macOS 和匹配的 Xcode；现有云构建使用 `macos-26` / Xcode `26.6`。
 
