@@ -6,6 +6,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../theme/device_layout.dart';
+import 'reader_spreads.dart';
+
 bool get isMobileReader =>
     defaultTargetPlatform == TargetPlatform.iOS ||
     defaultTargetPlatform == TargetPlatform.android;
@@ -78,6 +81,7 @@ class ReaderStage extends StatefulWidget {
     this.notices = const [],
     this.drawing = false,
     this.onViewportChanged,
+    this.onToolsLayoutSettled,
     this.onPrevious,
     this.onNext,
     this.allowOverlayPageKeys = false,
@@ -95,6 +99,7 @@ class ReaderStage extends StatefulWidget {
   final List<Widget> notices;
   final bool drawing;
   final VoidCallback? onViewportChanged;
+  final VoidCallback? onToolsLayoutSettled;
   final VoidCallback? onPrevious, onNext;
   final bool allowOverlayPageKeys;
   final bool blockArrowKeys;
@@ -111,9 +116,12 @@ class ReaderStage extends StatefulWidget {
 class _ReaderStageState extends State<ReaderStage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late bool _tools = !isMobileReader;
+  bool? _lastCompact;
   Size? _viewport;
+  double _paperTopInset = 0;
   final _topKey = GlobalKey();
   EdgeInsets? _reportedObstruction;
+  EdgeInsets? _reportedPanInsets;
   bool _measurementScheduled = false;
   late final AnimationController _animation;
   late final Animation<double> _curve;
@@ -182,6 +190,14 @@ class _ReaderStageState extends State<ReaderStage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final compact = DeviceLayoutScope.isCompact(context);
+    if (_lastCompact != compact) {
+      final initialLayout = _lastCompact == null;
+      _lastCompact = compact;
+      _tools = !compact;
+      _animation.value = _tools ? 1 : 0;
+      if (!initialLayout) widget.onToolsVisibilityChanged?.call(_tools);
+    }
     _route = ModalRoute.of(context);
     _updateWake();
     _reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -203,10 +219,21 @@ class _ReaderStageState extends State<ReaderStage>
       reverseCurve: Curves.easeInCubic,
     );
     _animation.addListener(_measureObstruction);
+    _animation.addStatusListener(_toolsAnimationStatus);
     WidgetsBinding.instance.addObserver(this);
     readerRouteVisibility.addListener(_updateWake);
     FocusManager.instance.addEarlyKeyEventHandler(_pageKey);
     _immerse();
+  }
+
+  void _toolsAnimationStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed &&
+        status != AnimationStatus.dismissed) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onToolsLayoutSettled?.call();
+    });
   }
 
   KeyEventResult _pageKey(KeyEvent event) {
@@ -220,7 +247,11 @@ class _ReaderStageState extends State<ReaderStage>
         (event.logicalKey == LogicalKeyboardKey.arrowRight ||
             event.logicalKey == LogicalKeyboardKey.arrowDown);
     final arrow = arrowPrevious || arrowNext;
-    if (arrow && widget.blockArrowKeys) return KeyEventResult.ignored;
+    final pagePrevious = event.logicalKey == LogicalKeyboardKey.pageUp;
+    final pageNext = event.logicalKey == LogicalKeyboardKey.pageDown;
+    if (widget.blockArrowKeys && (arrow || pagePrevious || pageNext)) {
+      return KeyEventResult.ignored;
+    }
     if (!mounted ||
         (!(ModalRoute.of(context)?.isCurrent ?? true) &&
             (!widget.allowOverlayPageKeys || arrow))) {
@@ -231,15 +262,23 @@ class _ReaderStageState extends State<ReaderStage>
         focus?.findAncestorWidgetOfExactType<EditableText>() != null) {
       return KeyEventResult.ignored;
     }
+    if (arrow &&
+        focus
+                ?.findAncestorWidgetOfExactType<
+                  SegmentedButton<ReaderViewMode>
+                >() !=
+            null) {
+      return KeyEventResult.ignored;
+    }
     final keyboard = HardwareKeyboard.instance;
     if (keyboard.isAltPressed ||
         keyboard.isControlPressed ||
         keyboard.isMetaPressed) {
       return KeyEventResult.ignored;
     }
-    final action = event.logicalKey == LogicalKeyboardKey.pageDown || arrowNext
+    final action = pageNext || arrowNext
         ? widget.onNext
-        : event.logicalKey == LogicalKeyboardKey.pageUp || arrowPrevious
+        : pagePrevious || arrowPrevious
         ? widget.onPrevious
         : null;
     if (action == null) return KeyEventResult.ignored;
@@ -274,6 +313,7 @@ class _ReaderStageState extends State<ReaderStage>
     readerRouteVisibility.removeListener(_updateWake);
     WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeEarlyKeyEventHandler(_pageKey);
+    _animation.removeStatusListener(_toolsAnimationStatus);
     _animation.dispose();
     if (isMobileReader) {
       unawaited(
@@ -287,20 +327,28 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   void _measureObstruction() {
-    if (widget.onObstructionChanged == null || _measurementScheduled) return;
+    if (_measurementScheduled) return;
     _measurementScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _measurementScheduled = false;
       if (!mounted) return;
       final top = _topKey.currentContext?.findRenderObject() as RenderBox?;
-      final value = EdgeInsets.only(
-        top: !_tools || top == null || !top.hasSize
-            ? 0
-            : top.localToGlobal(Offset(0, top.size.height)).dy,
+      final compact = DeviceLayoutScope.isCompact(context);
+      final topHeight = top == null || !top.hasSize ? 0.0 : top.size.height;
+      final paperTop = compact ? topHeight : 0.0;
+      if ((_paperTopInset - paperTop).abs() > .5) {
+        setState(() => _paperTopInset = paperTop);
+      }
+      final obstruction = EdgeInsets.only(
+        top: compact ? topHeight * _curve.value : (_tools ? topHeight : 0),
       );
-      if (value != _reportedObstruction) {
-        _reportedObstruction = value;
-        widget.onObstructionChanged?.call(value);
+      if (obstruction != _reportedObstruction) {
+        _reportedObstruction = obstruction;
+      }
+      final panInsets = EdgeInsets.only(top: compact ? 0 : obstruction.top);
+      if (panInsets != _reportedPanInsets) {
+        _reportedPanInsets = panInsets;
+        widget.onObstructionChanged?.call(panInsets);
       }
     });
   }
@@ -321,6 +369,7 @@ class _ReaderStageState extends State<ReaderStage>
         child: LayoutBuilder(
           builder: (context, constraints) {
             final size = constraints.biggest;
+            final compact = DeviceLayoutScope.isCompact(context);
             _measureObstruction();
             if (_viewport != null && _viewport != size) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -328,11 +377,22 @@ class _ReaderStageState extends State<ReaderStage>
               });
             }
             _viewport = size;
+            final content = widget.contentBuilder(_toggle);
             return Stack(
               key: const ValueKey('reading-viewport'),
               fit: StackFit.expand,
               children: [
-                widget.contentBuilder(_toggle),
+                AnimatedBuilder(
+                  animation: _animation,
+                  builder: (context, child) => Padding(
+                    key: const ValueKey('reader-paper-top-spacer'),
+                    padding: EdgeInsets.only(
+                      top: compact ? _paperTopInset * _curve.value : 0,
+                    ),
+                    child: child,
+                  ),
+                  child: content,
+                ),
                 Positioned(
                   left: 0,
                   right: 0,

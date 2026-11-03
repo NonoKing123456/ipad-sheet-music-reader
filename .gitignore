@@ -239,3 +239,9 @@
 !/windows/runner/utils.h
 !/windows/runner/win32_window.cpp
 !/windows/runner/win32_window.h
+
+# Reader 0.8.10+37 build inputs
+!/lib/theme/device_layout.dart
+!/tools/
+!/tools/flutter-patches/
+!/tools/flutter-patches/193372-semantics.patch

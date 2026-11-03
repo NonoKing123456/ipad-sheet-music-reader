@@ -30,6 +30,7 @@ import '../sync/sync_controller.dart';
 import '../sync/sync_screen.dart';
 import '../sync/offline_library_screen.dart';
 import '../theme/app_theme.dart';
+import '../theme/device_layout.dart';
 import '../theme/tokens.dart';
 import '../sharing/score_share.dart';
 
@@ -633,7 +634,9 @@ class _LibraryScreenState extends State<LibraryScreen>
     final library = _library;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 850;
+        final wide =
+            !DeviceLayoutScope.isCompact(context) &&
+            constraints.maxWidth >= 850;
         return Scaffold(
           appBar: AppBar(
             title: wide
@@ -676,6 +679,19 @@ class _LibraryScreenState extends State<LibraryScreen>
                     ],
                   ),
             actions: [
+              if (defaultTargetPlatform == TargetPlatform.windows)
+                IconButton(
+                  key: const ValueKey('ipad-layout-toggle'),
+                  tooltip: DeviceLayoutScope.isSimulatedIpad(context)
+                      ? '返回桌面布局'
+                      : '模拟 iPad 界面',
+                  icon: Icon(
+                    DeviceLayoutScope.isSimulatedIpad(context)
+                        ? Icons.desktop_windows_outlined
+                        : Icons.tablet_mac_outlined,
+                  ),
+                  onPressed: DeviceLayoutScope.maybeOf(context)?.toggle,
+                ),
               IconButton(
                 tooltip: _searchOpen ? '关闭搜索' : '搜索',
                 icon: Icon(_searchOpen ? Icons.close : Icons.search),

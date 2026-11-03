@@ -397,78 +397,75 @@ class _SetListDetail extends StatelessWidget {
                       itemBuilder: (context, index) {
                         final item = items[index];
                         final target = metadata[item.entryId];
-                        return Card(
+                        return ListTile(
                           key: ValueKey(item.id),
-                          child: ListTile(
-                            leading: CircleAvatar(child: Text('${index + 1}')),
-                            title: Text(
-                              target == null
-                                  ? '目录尚未更新的曲谱'
-                                  : p.posix.basename(
-                                      target.displayPath.replaceAll('\\', '/'),
-                                    ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: Text(
-                              target == null
-                                  ? '请更新目录。'
-                                  : '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            onTap: () =>
-                                unawaited(_open(context, item, target)),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (target != null)
-                                  Tooltip(
-                                    message: target.statusLabel,
-                                    child: Icon(
-                                      target.state == ScoreContentState.ready
-                                          ? Icons.check_circle_outline
-                                          : target.state ==
-                                                ScoreContentState.readableOld
-                                          ? Icons.update
-                                          : target.state ==
-                                                    ScoreContentState.missing ||
-                                                target.state ==
-                                                    ScoreContentState
-                                                        .sourceOffline
-                                          ? Icons.error_outline
-                                          : Icons.cloud_download_outlined,
-                                      size: 18,
-                                    ),
+                          leading: CircleAvatar(child: Text('${index + 1}')),
+                          title: Text(
+                            target == null
+                                ? '目录尚未更新的曲谱'
+                                : p.posix.basename(
+                                    target.displayPath.replaceAll('\\', '/'),
                                   ),
-                                if (prepare != null &&
-                                    target?.needsPreparation == true)
-                                  IconButton(
-                                    tooltip: '准备这份曲谱',
-                                    icon: const Icon(Icons.download_outlined),
-                                    onPressed: () => unawaited(
-                                      _prepare(context, {item.entryId}),
-                                    ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            target == null
+                                ? '请更新目录。'
+                                : '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => unawaited(_open(context, item, target)),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (target != null)
+                                Tooltip(
+                                  message: target.statusLabel,
+                                  child: Icon(
+                                    target.state == ScoreContentState.ready
+                                        ? Icons.check_circle_outline
+                                        : target.state ==
+                                              ScoreContentState.readableOld
+                                        ? Icons.update
+                                        : target.state ==
+                                                  ScoreContentState.missing ||
+                                              target.state ==
+                                                  ScoreContentState
+                                                      .sourceOffline
+                                        ? Icons.error_outline
+                                        : Icons.cloud_download_outlined,
+                                    size: 18,
                                   ),
+                                ),
+                              if (prepare != null &&
+                                  target?.needsPreparation == true)
                                 IconButton(
-                                  tooltip: '从曲单移除',
+                                  tooltip: '准备这份曲谱',
+                                  icon: const Icon(Icons.download_outlined),
                                   onPressed: () => unawaited(
-                                    workspace.edit(
-                                      (store) =>
-                                          store.removeItem(listId, item.id),
-                                    ),
-                                  ),
-                                  icon: const Icon(Icons.remove_circle_outline),
-                                ),
-                                ReorderableDragStartListener(
-                                  index: index,
-                                  child: const Padding(
-                                    padding: EdgeInsets.all(12),
-                                    child: Icon(Icons.drag_handle),
+                                    _prepare(context, {item.entryId}),
                                   ),
                                 ),
-                              ],
-                            ),
+                              IconButton(
+                                tooltip: '从曲单移除',
+                                onPressed: () => unawaited(
+                                  workspace.edit(
+                                    (store) =>
+                                        store.removeItem(listId, item.id),
+                                  ),
+                                ),
+                                icon: const Icon(Icons.remove_circle_outline),
+                              ),
+                              ReorderableDragStartListener(
+                                index: index,
+                                child: const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: Icon(Icons.drag_handle),
+                                ),
+                              ),
+                            ],
                           ),
                         );
                       },

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -13,26 +14,111 @@ import 'tokens.dart';
 ThemeData scoreReaderTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   final tokens = dark ? ScoreTokens.dark : ScoreTokens.light;
-  final scheme = ColorScheme.fromSeed(
-    seedColor: tokens.pine,
-    brightness: brightness,
-    surface: tokens.paper0,
-  );
+  final primary = dark ? tokens.pineDeep : tokens.pine;
+  final onEmphasis = dark ? tokens.paper0 : Colors.white;
+  final scheme =
+      ColorScheme.fromSeed(
+        seedColor: tokens.pine,
+        brightness: brightness,
+        surface: tokens.paper0,
+      ).copyWith(
+        primary: primary,
+        onPrimary: onEmphasis,
+        primaryContainer: tokens.pineWash,
+        onPrimaryContainer: tokens.ink900,
+        secondary: tokens.pineDeep,
+        onSecondary: onEmphasis,
+        secondaryContainer: tokens.pineWash,
+        onSecondaryContainer: dark ? tokens.ink900 : tokens.pineDeep,
+        tertiary: tokens.pineDeep,
+        onTertiary: tokens.paper0,
+        tertiaryContainer: tokens.pineWash,
+        onTertiaryContainer: tokens.ink900,
+        error: tokens.dangerInk,
+        onError: tokens.paper0,
+        errorContainer: tokens.dangerBg,
+        onErrorContainer: tokens.dangerInk,
+        surface: tokens.paper0,
+        onSurface: tokens.ink900,
+        surfaceContainerLowest: tokens.paper0,
+        surfaceContainerLow: tokens.paper1,
+        surfaceContainer: tokens.paper2,
+        surfaceContainerHigh: tokens.paper2,
+        surfaceContainerHighest: tokens.paper2,
+        onSurfaceVariant: tokens.ink500,
+        outline: tokens.ink500,
+        outlineVariant: tokens.paper2,
+        surfaceTint: tokens.pine,
+      );
+  final uiFont = defaultTargetPlatform == TargetPlatform.windows
+      ? 'Microsoft YaHei UI'
+      : null;
   return ThemeData(
     useMaterial3: true,
+    fontFamily: uiFont,
+    splashFactory: NoSplash.splashFactory,
+    highlightColor: Colors.transparent,
     colorScheme: scheme,
     scaffoldBackgroundColor: tokens.paper1,
     extensions: [tokens],
+    textTheme: TextTheme(
+      displayLarge: ScoreText.display.copyWith(
+        color: tokens.ink900,
+        fontFamily: uiFont,
+      ),
+      titleLarge: ScoreText.title.copyWith(
+        color: tokens.ink900,
+        fontFamily: uiFont,
+      ),
+      titleMedium: ScoreText.headline.copyWith(
+        color: tokens.ink900,
+        fontFamily: uiFont,
+      ),
+      bodyLarge: ScoreText.body.copyWith(
+        color: tokens.ink700,
+        fontFamily: uiFont,
+      ),
+      bodyMedium: ScoreText.body.copyWith(
+        color: tokens.ink700,
+        fontFamily: uiFont,
+      ),
+      bodySmall: ScoreText.caption.copyWith(
+        color: tokens.ink500,
+        fontFamily: uiFont,
+      ),
+      labelLarge: ScoreText.caption.copyWith(
+        color: tokens.ink900,
+        fontFamily: uiFont,
+      ),
+      labelMedium: ScoreText.note.copyWith(
+        color: tokens.ink700,
+        fontFamily: uiFont,
+      ),
+      labelSmall: ScoreText.micro.copyWith(
+        color: tokens.ink500,
+        fontFamily: uiFont,
+      ),
+    ),
     visualDensity: VisualDensity.standard,
     materialTapTargetSize: MaterialTapTargetSize.padded,
+    dialogTheme: DialogThemeData(
+      backgroundColor: tokens.paper0,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(borderRadius: ScoreRadius.overlayAll),
+      titleTextStyle: ScoreText.title.copyWith(color: tokens.ink900),
+      contentTextStyle: ScoreText.body.copyWith(color: tokens.ink700),
+    ),
     appBarTheme: AppBarTheme(
       backgroundColor: scheme.surface,
       foregroundColor: scheme.onSurface,
       surfaceTintColor: Colors.transparent,
       centerTitle: false,
+      elevation: 0,
+      scrolledUnderElevation: 0,
     ),
     dividerTheme: DividerThemeData(color: scheme.outlineVariant),
     listTileTheme: ListTileThemeData(
+      tileColor: Colors.transparent,
       iconColor: scheme.onSurfaceVariant,
       selectedColor: scheme.onSecondaryContainer,
       selectedTileColor: scheme.secondaryContainer,
@@ -41,10 +127,11 @@ ThemeData scoreReaderTheme(Brightness brightness) {
     iconButtonTheme: const IconButtonThemeData(
       style: ButtonStyle(minimumSize: WidgetStatePropertyAll(Size(48, 48))),
     ),
-    popupMenuTheme: const PopupMenuThemeData(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(16)),
-      ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: tokens.paper0,
+      surfaceTintColor: Colors.transparent,
+      textStyle: ScoreText.body.copyWith(color: tokens.ink900),
+      shape: const RoundedRectangleBorder(borderRadius: ScoreRadius.overlayAll),
     ),
   );
 }

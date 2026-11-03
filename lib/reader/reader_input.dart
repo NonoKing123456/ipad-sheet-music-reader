@@ -68,6 +68,7 @@ class ReaderInput extends StatefulWidget {
     this.textSelectionKey,
     this.textControls,
     this.mouseWheel = false,
+    this.ignorePointerGestures = false,
   });
 
   final Widget child;
@@ -91,6 +92,10 @@ class ReaderInput extends StatefulWidget {
   final ReaderTextEditorController? textControls;
   final bool mouseWheel;
 
+  /// Ignores a pointer sequence that began while an overlay menu was open.
+  /// This is latched per pointer because the menu closes on pointer-down.
+  final bool ignorePointerGestures;
+
   @override
   State<ReaderInput> createState() => _ReaderInputState();
 }
@@ -100,6 +105,7 @@ class _ReaderInputState extends State<ReaderInput> {
   final Set<int> _pointers = {};
   final Set<int> _inkPointers = {};
   final Set<int> _textMoves = {};
+  final Set<int> _ignoredPointers = {};
   bool _textPanning = false;
   final Map<int, Offset> _touches = {};
   double _pinchDistance = 1, _startScale = 1;
@@ -236,6 +242,10 @@ class _ReaderInputState extends State<ReaderInput> {
 
   void _down(PointerDownEvent event) {
     if (readerTextHandleActive) return;
+    if (widget.ignorePointerGestures) {
+      _ignoredPointers.add(event.pointer);
+      return;
+    }
     if (event.kind == PointerDeviceKind.touch ||
         event.kind == PointerDeviceKind.mouse) {
       final box = widget.touchControlKey?.currentContext?.findRenderObject();
@@ -293,6 +303,7 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _move(PointerMoveEvent event) {
+    if (_ignoredPointers.contains(event.pointer)) return;
     widget.textControls?.paperMove(event);
     if (!_pointers.contains(event.pointer)) return;
     if (_touches.containsKey(event.pointer)) {
@@ -349,6 +360,7 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _up(PointerUpEvent event, double width) {
+    if (_ignoredPointers.remove(event.pointer)) return;
     widget.textControls?.paperUp(event);
     if (readerTextHandleActive) {
       _pointers.remove(event.pointer);
@@ -396,6 +408,7 @@ class _ReaderInputState extends State<ReaderInput> {
   }
 
   void _signal(PointerSignalEvent event) {
+    if (widget.ignorePointerGestures) return;
     widget.textControls?.cancelPaperTap();
     if (readerTextHandleActive ||
         !widget.mouseWheel ||
@@ -471,6 +484,7 @@ class _ReaderInputState extends State<ReaderInput> {
             onPointerMove: _move,
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {
+              if (_ignoredPointers.remove(event.pointer)) return;
               widget.textControls?.paperCancel(event.pointer);
               _inkPointers.remove(event.pointer);
               _textMoves.remove(event.pointer);
@@ -483,7 +497,10 @@ class _ReaderInputState extends State<ReaderInput> {
               _cancelled = true;
               if (_pointers.isEmpty) _origin = null;
             },
-            child: content,
+            child: IgnorePointer(
+              ignoring: widget.ignorePointerGestures,
+              child: content,
+            ),
           );
         },
       ),

@@ -64,6 +64,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   final _controller = TextEditingController();
   final _focus = FocusNode();
   final _inputKey = GlobalKey();
+  final _actionBarKey = GlobalKey();
   final _handleKeys = {
     for (final handle in TextHandleKind.values) handle: GlobalKey(),
   };
@@ -90,10 +91,13 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   VoidCallback? _endEditing, _endHandle;
   Matrix4? _beforeReveal, _revealedTransform;
   bool _revealWaitingForPaint = false;
-  double _nextSize = 20 / 1024;
   bool _automaticNewWidth = false;
   bool get _editorOpen => _draft != null;
-  bool get _enabled => widget.enabled && widget.textTool && !widget.suspended;
+  bool get _enabled =>
+      widget.enabled &&
+      widget.textTool &&
+      !widget.suspended &&
+      !_controls.saving;
   String? get _family => Theme.of(context).textTheme.bodyMedium?.fontFamily;
   Rect _frame(TextAnnotation value, Size size) =>
       textAnnotationFrame(value, size, fontFamily: _family);
@@ -324,6 +328,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       }
       final blank =
           !_inside(_inputKey, event.position) &&
+          !_inside(_actionBarKey, event.position) &&
           !_inside(_deleteKey, event.position) &&
           !_handleKeys.values.any((key) => _inside(key, event.position));
       _paperSessionPointers.add(event.pointer);
@@ -341,6 +346,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         !_controls.availableTo(this) ||
         widget.workspace.savingAnnotations ||
         _handleKeys.values.any((key) => _inside(key, event.position)) ||
+        _inside(_actionBarKey, event.position) ||
         _inside(_deleteKey, event.position) ||
         _inside(widget.mouseControlKey, event.position) ||
         !_primary(event)) {
@@ -550,11 +556,102 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       this,
       argb: value.argb,
       editing: false,
+      fontSizeFraction: value.fontSizeFraction,
       release: _releaseSelection,
       onEdit: () => _editor(size),
       onDelete: _deleteSelection,
       onColor: _colorSelection,
+      onFontSizePreview: _fontSizePreview,
+      onFontSizeCommit: _commitFontSize,
     );
+  }
+
+  Future<bool> _copySelection() async {
+    if (_committing || _controls.saving || widget.workspace.savingAnnotations) {
+      return false;
+    }
+    if (_controls.editing && !await _controls.finish()) return false;
+    if (!mounted || _lastSize.isEmpty || _selected == null) return false;
+    final source = widget.workspace
+        .annotationsFor(widget.page)
+        .whereType<TextAnnotation>()
+        .where((item) => item.id == _selected)
+        .firstOrNull;
+    if (source == null || source.isDeleted) return false;
+
+    final offset = 20 / _screenScale;
+    final anchor = NormalizedPoint(
+      (source.anchor.x + offset / _lastSize.width).clamp(0.0, 1.0),
+      (source.anchor.y + offset / _lastSize.height).clamp(0.0, 1.0),
+    );
+    final duplicate = _fit(
+      widget.workspace.store
+          .newText(
+            text: source.text,
+            anchor: anchor,
+            argb: source.argb,
+            fontSizeFraction: source.fontSizeFraction,
+            widthFraction: source.widthFraction,
+            font: source.font,
+          )
+          .revise(
+            rotation: source.rotation,
+            now: DateTime.now().toUtc(),
+            version: 1,
+          ),
+      _lastSize,
+    );
+    setState(() => _committing = true);
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      duplicate,
+      expected: const TextEditBase(null),
+    );
+    if (!mounted) return saved;
+    setState(() {
+      _committing = false;
+      _selected = duplicate.id;
+      _preview = null;
+    });
+    _bindSelection(duplicate, _lastSize);
+    return saved;
+  }
+
+  void _fontSizePreview(double value) {
+    if (!mounted || _controls.saving) return;
+    setState(() {
+      if (_editorOpen) {
+        _draft = _fit(_revise(_draft!, size: value), _lastSize);
+      } else if (_selection case final selected?) {
+        _preview = _fit(_revise(selected, size: value), _lastSize);
+      }
+    });
+  }
+
+  Future<bool> _commitFontSize() async {
+    if (_editorOpen || _committing) return true;
+    final selected = _selection;
+    final desired = _preview;
+    if (selected == null || desired == null) return true;
+    final original = widget.workspace
+        .annotationsFor(widget.page)
+        .whereType<TextAnnotation>()
+        .where((item) => item.id == selected.id)
+        .firstOrNull;
+    if (original == null) return false;
+    final saved = await widget.workspace.saveText(
+      widget.page,
+      desired,
+      expected: TextEditBase(original),
+    );
+    if (!mounted) return saved;
+    if (!saved) {
+      _restoreFailedTextEdit();
+      return false;
+    }
+    setState(() => _preview = null);
+    _bindSelection(desired, _lastSize);
+    return true;
   }
 
   Future<bool> _colorSelection(int argb) async {
@@ -566,11 +663,18 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       desired,
       expected: TextEditBase(value),
     );
-    if (!saved && mounted) {
-      _editor(_lastSize);
-      setState(() => _error = '未能保存，内容已保留。请再次点谱面重试。');
-    }
+    if (!saved && mounted) _restoreFailedTextEdit();
     return saved;
+  }
+
+  void _restoreFailedTextEdit() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _editor(_lastSize);
+      if (mounted) {
+        setState(() => _error = '未能保存，内容已保留。请再次点谱面重试。');
+      }
+    });
   }
 
   Future<bool> _changeColor(int argb) async {
@@ -710,18 +814,22 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           text: '\u200b',
           anchor: anchor!,
           argb: _controls.argb | 0xff000000,
-          fontSizeFraction: _nextSize,
+          fontSizeFraction: _controls.fontSizeFraction,
         );
     if (selected == null) _draft = _sizeNewDraft(_draft!, size);
     final bound = _controls.bind(
       this,
       argb: _draft!.argb,
       editing: true,
+      fontSizeFraction: _draft!.fontSizeFraction,
       release: _releaseSelection,
+      onEdit: _focus.requestFocus,
       onColor: _changeColor,
       onCancel: _cancelEditor,
       onDelete: _deleteEditing,
       onDone: () => _finishEditor(_lastSize),
+      onFontSizePreview: _fontSizePreview,
+      onFontSizeCommit: _commitFontSize,
     );
     if (!bound) {
       _draft = _editBase = null;
@@ -763,7 +871,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       _focus.requestFocus();
       return false;
     }
-    _nextSize = desired.fontSizeFraction;
     setState(() {
       _selected = desired.id;
       _closeEditor();
@@ -1082,36 +1189,52 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         !overlay.hasSize) {
       return const SizedBox.shrink();
     }
-    final media = MediaQuery.of(overlayContext), view = View.of(overlayContext);
+    final view = View.of(overlayContext);
     final viewportBox = widget.viewportKey?.currentContext?.findRenderObject();
-    final viewport = viewportBox is RenderBox && viewportBox.hasSize
+    final viewportGlobal = viewportBox is RenderBox && viewportBox.hasSize
         ? Rect.fromPoints(
             viewportBox.localToGlobal(Offset.zero),
             viewportBox.localToGlobal(
               viewportBox.size.bottomRight(Offset.zero),
             ),
           )
-        : Offset.zero & media.size;
+        : Rect.fromPoints(
+            overlay.localToGlobal(Offset.zero),
+            overlay.localToGlobal(overlay.size.bottomRight(Offset.zero)),
+          );
+    final viewport = Rect.fromPoints(
+      overlay.globalToLocal(viewportGlobal.topLeft),
+      overlay.globalToLocal(viewportGlobal.bottomRight),
+    );
     final tools = widget.topControlsKey?.currentContext?.findRenderObject();
     final top = tools is RenderBox && tools.hasSize
         ? math.max(
             viewport.top,
-            tools.localToGlobal(Offset(0, tools.size.height)).dy,
+            overlay
+                .globalToLocal(
+                  tools.localToGlobal(Offset(0, tools.size.height)),
+                )
+                .dy,
           )
         : viewport.top;
+    final overlayScale = overlay
+        .getTransformTo(null)
+        .getMaxScaleOnAxis()
+        .clamp(.1, 20.0);
     final visible = Rect.fromLTRB(
       math.max(0, viewport.left),
       top,
-      math.min(media.size.width, viewport.right),
+      math.min(overlay.size.width, viewport.right),
       math.min(
         viewport.bottom,
-        media.size.height - view.viewInsets.bottom / view.devicePixelRatio,
+        overlay.size.height -
+            view.viewInsets.bottom / view.devicePixelRatio / overlayScale,
       ),
     );
     if (visible.isEmpty) return const SizedBox.shrink();
     final paperViewport = Rect.fromPoints(
-      paper.globalToLocal(visible.topLeft),
-      paper.globalToLocal(visible.bottomRight),
+      paper.globalToLocal(overlay.localToGlobal(visible.topLeft)),
+      paper.globalToLocal(overlay.localToGlobal(visible.bottomRight)),
     );
     // The editable underline has four pixels of bottom padding. Keep target
     // geometry outside that padding as well as outside the painted text.
@@ -1133,12 +1256,68 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       scale: scale,
       handles: placements.values,
     );
-    final clipRect = Rect.fromPoints(
-      overlay.globalToLocal(visible.topLeft),
-      overlay.globalToLocal(visible.bottomRight),
+    final clipRect = visible;
+    final screenCorners =
+        [frame.topLeft, frame.topRight, frame.bottomLeft, frame.bottomRight]
+            .map(
+              (point) => overlay.globalToLocal(
+                paper.localToGlobal(
+                  rotateTextPoint(point, frame.center, value.rotation),
+                ),
+              ),
+            )
+            .toList();
+    final screenFrame = Rect.fromLTRB(
+      screenCorners.map((point) => point.dx).reduce(math.min),
+      screenCorners.map((point) => point.dy).reduce(math.min),
+      screenCorners.map((point) => point.dx).reduce(math.max),
+      screenCorners.map((point) => point.dy).reduce(math.max),
     );
+    final actionBarHeight = math.min(38.0, clipRect.height);
+    final actionBarWidth = math.min(210.0, clipRect.width);
+    Rect? actionBarRect;
+    if (_selected != null && actionBarWidth >= 150 && actionBarHeight >= 34) {
+      final screenHandleRects = [...placements.values, deletion].map((
+        placement,
+      ) {
+        final corners =
+            [
+              placement.hitRect.topLeft,
+              placement.hitRect.topRight,
+              placement.hitRect.bottomLeft,
+              placement.hitRect.bottomRight,
+            ].map((point) {
+              final rotated = rotateTextPoint(
+                point,
+                frame.center,
+                value.rotation,
+              );
+              return overlay.globalToLocal(paper.localToGlobal(rotated));
+            }).toList();
+        return Rect.fromLTRB(
+          corners.map((point) => point.dx).reduce(math.min),
+          corners.map((point) => point.dy).reduce(math.min),
+          corners.map((point) => point.dx).reduce(math.max),
+          corners.map((point) => point.dy).reduce(math.max),
+        );
+      });
+      actionBarRect = _findActionBarRect(
+        viewport: clipRect,
+        textFrame: screenFrame,
+        handleRects: screenHandleRects,
+        size: Size(actionBarWidth, actionBarHeight),
+      );
+    }
     return Stack(
       children: [
+        if (actionBarRect != null)
+          Positioned(
+            left: actionBarRect.left,
+            top: actionBarRect.top,
+            width: actionBarRect.width,
+            height: actionBarRect.height,
+            child: _textActionBar(actionBarHeight),
+          ),
         Positioned.fromRect(
           rect: clipRect,
           child: ClipRect(
@@ -1174,6 +1353,138 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       ],
     );
   }
+
+  Rect? _findActionBarRect({
+    required Rect viewport,
+    required Rect textFrame,
+    required Iterable<Rect> handleRects,
+    required Size size,
+  }) {
+    if (size.width > viewport.width || size.height > viewport.height) {
+      return null;
+    }
+    final preferredLeft = textFrame.left
+        .clamp(viewport.left, viewport.right - size.width)
+        .toDouble();
+    final preferredTop = textFrame.top - size.height - 5 >= viewport.top
+        ? textFrame.top - size.height - 5
+        : textFrame.bottom + 5;
+    final preferred = Offset(
+      preferredLeft,
+      preferredTop
+          .clamp(viewport.top, viewport.bottom - size.height)
+          .toDouble(),
+    );
+    final textObstacle = textFrame.inflate(2);
+    final handles = handleRects.map((r) => r.inflate(2)).toList();
+    final xs = <double>{
+      viewport.left,
+      viewport.right - size.width,
+      preferredLeft,
+    };
+    final ys = <double>{
+      viewport.top,
+      viewport.bottom - size.height,
+      preferred.dy,
+    };
+    for (final obstacle in [textObstacle, ...handles]) {
+      xs.add(obstacle.left - size.width - 5);
+      xs.add(obstacle.right + 5);
+      ys.add(obstacle.top - size.height - 5);
+      ys.add(obstacle.bottom + 5);
+    }
+    final candidates = <(Rect, double, double, double)>[];
+    for (final x in xs) {
+      for (final y in ys) {
+        final left = x
+            .clamp(viewport.left, viewport.right - size.width)
+            .toDouble();
+        final top = y
+            .clamp(viewport.top, viewport.bottom - size.height)
+            .toDouble();
+        final candidate = Offset(left, top) & size;
+        double overlapArea(Rect obstacle) {
+          final intersection = candidate.intersect(obstacle);
+          return intersection.isEmpty
+              ? 0
+              : intersection.width * intersection.height;
+        }
+
+        final handleOverlap = handles.fold<double>(
+          0,
+          (total, handle) => total + overlapArea(handle),
+        );
+        final textOverlap = overlapArea(textObstacle);
+        final distance = (candidate.topLeft - preferred).distanceSquared;
+        candidates.add((candidate, handleOverlap, textOverlap, distance));
+      }
+    }
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) {
+      final handles = a.$2.compareTo(b.$2);
+      if (handles != 0) return handles;
+      final text = a.$3.compareTo(b.$3);
+      if (text != 0) return text;
+      return a.$4.compareTo(b.$4);
+    });
+    return candidates.first.$1;
+  }
+
+  Widget _textActionBar(double height) => Material(
+    key: _actionBarKey,
+    color: Theme.of(context).colorScheme.surface,
+    elevation: 5,
+    shadowColor: Colors.black26,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(10),
+      side: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          child: TextButton(
+            key: const ValueKey('text-action-edit'),
+            onPressed: _controls.saving ? null : _controls.onEdit,
+            style: TextButton.styleFrom(
+              minimumSize: Size(0, height),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('编辑'),
+          ),
+        ),
+        Expanded(
+          child: TextButton(
+            key: const ValueKey('text-action-copy'),
+            onPressed: _committing || _controls.saving
+                ? null
+                : () => unawaited(_copySelection()),
+            style: TextButton.styleFrom(
+              minimumSize: Size(0, height),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('复制'),
+          ),
+        ),
+        Expanded(
+          child: TextButton(
+            key: const ValueKey('text-action-delete'),
+            onPressed: _committing || _controls.saving
+                ? null
+                : () => unawaited(_controls.delete()),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+              minimumSize: Size(0, height),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('删除'),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _handleWidget(
     TextHandleKind? handle,

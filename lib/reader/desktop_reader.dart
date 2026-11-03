@@ -70,16 +70,22 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     vsync: this,
     duration: const Duration(milliseconds: 150),
   );
+  late final AnimationController _annotationRowAnimation = AnimationController(
+    vsync: this,
+    value: widget.editing && widget.annotationTools != null ? 1 : 0,
+    duration: const Duration(milliseconds: 200),
+  );
   late final Listenable _animations = Listenable.merge([
     _animation,
     _hoverAnimation,
+    _annotationRowAnimation,
   ]);
-  final _barKey = GlobalKey();
   final _arrangementMenu = MenuController();
   final _arrangementFocus = FocusNode(debugLabel: 'spread arrangement');
   final _annotationFocus = FocusNode(debugLabel: 'annotation');
-  bool _pinned = true, _hover = false, _menu = false, _measureScheduled = false;
-  double _height = 56;
+  final _toolbarScroll = ScrollController();
+  bool _pinned = true, _hover = false, _menu = false, _toolbarOverflow = false;
+  static const double _mainBarHeight = 56, _annotationRowHeight = 52;
   void _pin(bool value) {
     if (value == _pinned) return;
     setState(() {
@@ -129,53 +135,80 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       _pinned = true;
       _animation.forward();
     }
-    _measure();
-  }
-
-  void _measure() {
-    if (_measureScheduled) return;
-    _measureScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _measureScheduled = false;
-      if (!mounted) return;
-      final box = _barKey.currentContext?.findRenderObject() as RenderBox?;
-      if (box != null &&
-          box.hasSize &&
-          (_height - box.size.height).abs() > .5) {
-        setState(() => _height = box.size.height);
-      }
-    });
+    final hadAnnotationRow =
+        oldWidget.editing && oldWidget.annotationTools != null;
+    final hasAnnotationRow = widget.editing && widget.annotationTools != null;
+    if (!hadAnnotationRow && hasAnnotationRow) {
+      _annotationRowAnimation.forward();
+    } else if (hadAnnotationRow && !hasAnnotationRow) {
+      _annotationRowAnimation.reverse();
+    }
+    if (oldWidget.mode == ReaderViewMode.spread &&
+        widget.mode != ReaderViewMode.spread &&
+        _arrangementMenu.isOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _arrangementMenu.close();
+      });
+    }
   }
 
   @override
   void dispose() {
     _animation.dispose();
     _hoverAnimation.dispose();
+    _annotationRowAnimation.dispose();
     _arrangementFocus.dispose();
     _annotationFocus.dispose();
+    _toolbarScroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    _measure();
     final overlay = _hover || _menu || widget.editing;
-    final bar = MouseRegion(
-      onEnter: (_) => _overlayChanged(hover: true),
-      onExit: (_) => _overlayChanged(hover: false),
-      child: Material(
-        key: _barKey,
-        color: Theme.of(context).colorScheme.surface,
-        elevation: 1,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _toolbar(context),
-            if (widget.editing && widget.annotationTools != null)
-              widget.annotationTools!,
-          ],
-        ),
-      ),
+    final bar = AnimatedBuilder(
+      animation: _annotationRowAnimation,
+      builder: (context, _) {
+        final rowProgress = _annotationRowAnimation.value;
+        final keepAnnotationSlot = widget.editing || rowProgress > 0;
+        return MouseRegion(
+          onEnter: (_) => _overlayChanged(hover: true),
+          onExit: (_) => _overlayChanged(hover: false),
+          child: Material(
+            key: const ValueKey('desktop-reader-toolbar'),
+            color: Theme.of(context).colorScheme.surface,
+            elevation: 1,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _toolbar(context),
+                if (keepAnnotationSlot)
+                  IgnorePointer(
+                    ignoring: !widget.editing,
+                    child: ExcludeFocus(
+                      excluding: !widget.editing,
+                      child: ExcludeSemantics(
+                        excluding: !widget.editing,
+                        child: ClipRect(
+                          child: Align(
+                            alignment: Alignment.topCenter,
+                            heightFactor: rowProgress,
+                            child: SizedBox(
+                              height: _annotationRowHeight,
+                              child:
+                                  widget.annotationTools ??
+                                  const SizedBox.shrink(),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
     );
     return AnimatedBuilder(
       animation: _animations,
@@ -186,13 +219,16 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
           progress,
           Curves.easeOutCubic.transform(_hoverAnimation.value),
         );
-        final visible = presence > .001;
+        final barHeight =
+            _mainBarHeight +
+            _annotationRowHeight * _annotationRowAnimation.value;
+        final paperTop = barHeight * progress;
         return Stack(
           fit: StackFit.expand,
           children: [
             Column(
               children: [
-                SizedBox(height: _height * progress),
+                SizedBox(height: paperTop),
                 Expanded(child: child!),
               ],
             ),
@@ -218,7 +254,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                   child: Opacity(
                     opacity: presence,
                     child: Transform.translate(
-                      offset: Offset(0, -_height * (1 - presence)),
+                      offset: Offset(0, -barHeight * (1 - presence)),
                       child: bar,
                     ),
                   ),
@@ -227,7 +263,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             ),
             if (widget.notices.isNotEmpty)
               Positioned(
-                top: visible ? _height + 8 : 8,
+                top: paperTop + 8,
                 right: 8,
                 child: ReaderStatusButton(
                   label: widget.statusLabel,
@@ -245,8 +281,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                   ),
                 ),
               ),
-            if (_pinned || overlay)
-              Positioned(left: 0, right: 0, bottom: 18, child: widget.bottom),
+            Positioned(left: 0, right: 0, bottom: 18, child: widget.bottom),
           ],
         );
       },
@@ -272,11 +307,6 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
           icon: Icons.chevron_left,
           tooltip: '上一页',
           onPressed: disabled ? null : widget.onPrevious,
-        ),
-        _ReaderBarButton(
-          label: widget.pageLabel,
-          tooltip: '跳到页码',
-          onPressed: disabled ? null : widget.onJump,
         ),
         _ReaderBarButton(
           icon: Icons.chevron_right,
@@ -363,13 +393,14 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         ],
         builder: (context, controller, _) => _ReaderBarButton(
           label: widget.arrangement == FirstPageArrangement.alone
-              ? '首页独立'
-              : '首页并排',
+              ? (widget.mode == ReaderViewMode.spread ? '首页独立' : '双页排列')
+              : (widget.mode == ReaderViewMode.spread ? '首页并排' : '双页排列'),
           icon: Icons.expand_more,
           trailingIcon: true,
           tooltip: '双页排列',
           focusNode: _arrangementFocus,
-          onPressed: disabled || widget.editing
+          onPressed:
+              disabled || widget.editing || widget.mode != ReaderViewMode.spread
               ? null
               : () =>
                     controller.isOpen ? controller.close() : controller.open(),
@@ -386,19 +417,21 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       final back = _ReaderBarButton(
         icon: Icons.arrow_back,
         tooltip: '返回目录',
-        onPressed: widget.onBack,
+        onPressed: widget.writing ? null : widget.onBack,
       );
       final collapse = _ReaderBarButton(
         icon: Icons.keyboard_arrow_up,
         tooltip: '收起工具栏',
-        onPressed: () async {
-          _arrangementMenu.close();
-          if (widget.beforeHideTools != null &&
-              !await widget.beforeHideTools!()) {
-            return;
-          }
-          if (mounted) _pin(false);
-        },
+        onPressed: widget.writing || widget.textEditing
+            ? null
+            : () async {
+                _arrangementMenu.close();
+                if (widget.beforeHideTools != null &&
+                    !await widget.beforeHideTools!()) {
+                  return;
+                }
+                if (mounted) _pin(false);
+              },
       );
       final title = Text(
         widget.title,
@@ -406,53 +439,93 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
       );
-      final controls = [
+      final viewControls = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          modes,
+          const SizedBox(width: 8),
+          SizedBox(width: 128, child: arrangement),
+        ],
+      );
+      final readingControls = <Widget>[
         navigation,
-        modes,
-        if (widget.mode == ReaderViewMode.spread) arrangement,
+        const SizedBox(width: 10),
+        viewControls,
       ];
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: constraints.maxWidth >= 1120 + widget.actions.length * 48
-            ? Row(
-                children: [
-                  back,
-                  const SizedBox(width: 8),
-                  Expanded(child: title),
-                  ...widget.actions,
-                  const SizedBox(width: 16),
-                  for (final group in controls) ...[
-                    group,
-                    const SizedBox(width: 10),
-                  ],
-                  if (widget.onAnnotate != null && !widget.textEditing)
-                    annotate,
-                  if (!widget.textEditing) collapse,
-                ],
-              )
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    children: [
-                      back,
-                      const SizedBox(width: 8),
-                      Expanded(child: title),
-                      ...widget.actions,
-                      if (widget.onAnnotate != null && !widget.textEditing)
-                        annotate,
-                      if (!widget.textEditing) collapse,
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.center,
-                    children: controls,
-                  ),
-                ],
+      final documentActions = <Widget>[
+        if (widget.onAnnotate != null) annotate,
+        const SizedBox(width: 4),
+        collapse,
+        if (widget.actions.isNotEmpty) ...[
+          const SizedBox(width: 8),
+          ...widget.actions,
+        ],
+      ];
+      final titleWidth = constraints.maxWidth < 1200
+          ? math.min(120.0, math.max(88.0, (constraints.maxWidth - 200) * .22))
+          : math.min(280.0, 120 + (constraints.maxWidth - 1200) * .3);
+      Widget scrollControls(List<Widget> children) =>
+          NotificationListener<ScrollMetricsNotification>(
+            onNotification: (notification) {
+              final overflow = notification.metrics.maxScrollExtent > 1;
+              if (_toolbarOverflow != overflow) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && _toolbarOverflow != overflow) {
+                    setState(() => _toolbarOverflow = overflow);
+                  }
+                });
+              }
+              return false;
+            },
+            child: Scrollbar(
+              controller: _toolbarScroll,
+              thumbVisibility: _toolbarOverflow,
+              child: SingleChildScrollView(
+                key: const ValueKey('desktop-toolbar-scroll'),
+                controller: _toolbarScroll,
+                scrollDirection: Axis.horizontal,
+                child: Row(mainAxisSize: MainAxisSize.min, children: children),
               ),
+            ),
+          );
+      final leading = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          back,
+          const SizedBox(width: 8),
+          SizedBox(width: titleWidth, child: title),
+        ],
+      );
+      return SizedBox(
+        key: const ValueKey('desktop-reader-main-row'),
+        height: _mainBarHeight,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: constraints.maxWidth >= 1000
+              ? NavigationToolbar(
+                  leading: leading,
+                  middle: scrollControls(readingControls),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: documentActions,
+                  ),
+                  centerMiddle: true,
+                  middleSpacing: 16,
+                )
+              : Row(
+                  children: [
+                    leading,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: scrollControls([
+                        ...readingControls,
+                        const SizedBox(width: 10),
+                        ...documentActions,
+                      ]),
+                    ),
+                  ],
+                ),
+        ),
       );
     },
   );
@@ -480,7 +553,11 @@ class _ReaderBarButton extends StatelessWidget {
       if (icon != null && !trailingIcon) Icon(icon, size: 19),
       if (icon != null && label != null && !trailingIcon)
         const SizedBox(width: 6),
-      if (label != null) Text(label!),
+      if (label != null)
+        Flexible(
+          fit: FlexFit.loose,
+          child: Text(label!, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
       if (icon != null && trailingIcon) ...[
         const SizedBox(width: 5),
         Icon(icon, size: 18),

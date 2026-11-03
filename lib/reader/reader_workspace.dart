@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:reader_state/reader_state.dart';
 
@@ -40,10 +42,45 @@ class ReaderWorkspace extends ChangeNotifier {
   bool _disposed = false;
   int _seenGeneration;
   bool _bookmarkError = false;
+  final Set<Completer<void>> _annotationIdleWaiters = <Completer<void>>{};
   Future<void> _positionWrites = Future.value();
   Future<void> flushPositions() => _positionWrites;
   bool get saving => _operations > 0 || _positionOperations > 0;
-  bool get savingAnnotations => _operations > 0;
+  bool get savingAnnotations =>
+      _operations > 0 ||
+      pending.any((stroke) => stroke.saving) ||
+      pendingPaths.any((edit) => edit.saving) ||
+      pendingText.any((edit) => edit.saving);
+
+  /// Completes after all currently active annotation mutations have settled.
+  /// The operation state is re-read after the wait so callers can safely queue
+  /// history work behind a pointer-up save without racing the store's undo log.
+  Future<void> waitForAnnotationWrites() {
+    if (_disposed || _annotationWritesIdle) return Future<void>.value();
+    final waiter = Completer<void>();
+    _annotationIdleWaiters.add(waiter);
+    if (_disposed || _annotationWritesIdle) {
+      _annotationIdleWaiters.remove(waiter);
+      waiter.complete();
+    }
+    return waiter.future;
+  }
+
+  bool get _annotationWritesIdle =>
+      _operations == 0 &&
+      !pending.any((stroke) => stroke.saving) &&
+      !pendingPaths.any((edit) => edit.saving) &&
+      !pendingText.any((edit) => edit.saving);
+
+  void _completeAnnotationIdleWaiters() {
+    if (!_disposed && !_annotationWritesIdle) return;
+    final waiters = List<Completer<void>>.of(_annotationIdleWaiters);
+    _annotationIdleWaiters.clear();
+    for (final waiter in waiters) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
+  }
+
   int get unsavedCount =>
       pending.where((stroke) => !stroke.saving).length +
       pendingPaths.where((edit) => !edit.saving).length +
@@ -52,6 +89,7 @@ class ReaderWorkspace extends ChangeNotifier {
   void _changed() {
     _seenGeneration = store.snapshot.generation;
     if (!_disposed) notifyListeners();
+    _completeAnnotationIdleWaiters();
   }
 
   /// Peer merges mutate the same store and invalidate its undo/redo history.
@@ -257,6 +295,7 @@ class ReaderWorkspace extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _completeAnnotationIdleWaiters();
     super.dispose();
   }
 }

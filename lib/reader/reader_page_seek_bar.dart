@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:async';
 
 import '../theme/tokens.dart';
 
@@ -33,11 +34,16 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
   Object? _gesture;
   int _epoch = 0;
   bool _scheduled = false;
+  bool _fading = false;
+  Timer? _fadeTimer;
   bool get _enabled => widget.enabled && widget.pageCount > 1;
   void _cancel() {
+    _fadeTimer?.cancel();
+    _fadeTimer = null;
     _epoch++;
     _scheduled = false;
     _pointer = _preview = _pending = _lastSent = null;
+    _fading = false;
     final gesture = _gesture;
     _gesture = null;
     if (gesture != null) widget.onCancel?.call(gesture);
@@ -73,7 +79,10 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                 ((x - left) / math.max(1, length)).clamp(0.0, 1.0) *
                     (widget.pageCount - 1))
             .round();
-    setState(() => _preview = page);
+    setState(() {
+      _preview = page;
+      _fading = false;
+    });
     _pending = page;
     if (_scheduled) return;
     _scheduled = true;
@@ -129,8 +138,12 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                       _epoch++;
                       _scheduled = false;
                       _pointer = null;
-                      _preview = null;
                       _gesture = null;
+                    });
+                    _fadeTimer?.cancel();
+                    setState(() => _fading = true);
+                    _fadeTimer = Timer(const Duration(milliseconds: 650), () {
+                      if (mounted) setState(() => _preview = null);
                     });
                   }
                 },
@@ -154,11 +167,15 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                       if (_preview != null)
                         Align(
                           alignment: Alignment.topCenter,
-                          child: Text(
-                            '$_preview / ${widget.pageCount}',
-                            style: ScoreText.micro.copyWith(
-                              color: ScoreTokens.of(context).ink900,
-                              backgroundColor: ScoreTokens.of(context).paper0,
+                          child: AnimatedOpacity(
+                            opacity: _fading ? 0 : 1,
+                            duration: const Duration(milliseconds: 240),
+                            child: Text(
+                              '$_preview / ${widget.pageCount}',
+                              style: ScoreText.micro.copyWith(
+                                color: ScoreTokens.of(context).ink900,
+                                backgroundColor: ScoreTokens.of(context).paper0,
+                              ),
                             ),
                           ),
                         ),
@@ -193,12 +210,12 @@ class ReaderPageDotsPainter extends CustomPainter {
     final paint = Paint()..color = ink;
     for (var dot = 0; dot < dots; dot++) {
       final x = dots == 1 ? size.width / 2 : left + length * dot / (dots - 1);
-      canvas.drawCircle(Offset(x, 28), 3, paint);
+      canvas.drawCircle(Offset(x, 42), 3, paint);
     }
     final progress = pages <= 1 ? .5 : (page - 1) / (pages - 1);
     final centre = Offset(
       pages <= 1 ? size.width / 2 : left + length * progress,
-      28,
+      42,
     );
     canvas.drawCircle(centre, 5, Paint()..color = markerFill);
     canvas.drawCircle(

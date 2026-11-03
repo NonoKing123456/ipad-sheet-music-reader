@@ -24,12 +24,15 @@ VoidCallback beginReaderTextEditing({bool blockPaperGestures = false}) {
 /// so a pan, pinch, popup or handle can never confirm a draft accidentally.
 class ReaderTextEditorController extends ChangeNotifier {
   int argb = 0xffc12b32;
+  double fontSizeFraction = 20 / 1024;
   bool editing = false;
   Object? _owner;
   VoidCallback? _releaseSelection, onEdit, onCancel;
   Future<bool> Function()? onDelete;
   Future<bool> Function()? onDone;
   Future<bool> Function(int)? onColor;
+  void Function(double)? onFontSizePreview;
+  Future<bool> Function()? onFontSizeCommit;
   bool _disposed = false;
   Future<bool>? _finishing, _formatting;
   bool get saving => _finishing != null || _formatting != null;
@@ -43,7 +46,10 @@ class ReaderTextEditorController extends ChangeNotifier {
     Object owner, {
     required int argb,
     required bool editing,
+    required double fontSizeFraction,
     required VoidCallback release,
+    void Function(double)? onFontSizePreview,
+    Future<bool> Function()? onFontSizeCommit,
     Future<bool> Function(int)? onColor,
     VoidCallback? onEdit,
     Future<bool> Function()? onDelete,
@@ -61,6 +67,9 @@ class ReaderTextEditorController extends ChangeNotifier {
     _releaseSelection = release;
     this.argb = argb;
     this.editing = editing;
+    this.fontSizeFraction = fontSizeFraction;
+    this.onFontSizePreview = onFontSizePreview;
+    this.onFontSizeCommit = onFontSizeCommit;
     this.onColor = onColor;
     this.onEdit = onEdit;
     this.onDelete = onDelete;
@@ -76,6 +85,8 @@ class ReaderTextEditorController extends ChangeNotifier {
     _releaseSelection = null;
     editing = false;
     onColor = null;
+    onFontSizePreview = null;
+    onFontSizeCommit = null;
     onEdit = onCancel = null;
     onDelete = null;
     onDone = null;
@@ -115,6 +126,28 @@ class ReaderTextEditorController extends ChangeNotifier {
       });
     }
     _changed();
+  }
+
+  void changeFontSizeFraction(double value) {
+    if (saving || value == fontSizeFraction) return;
+    cancelPaperTap();
+    fontSizeFraction = value.clamp(8 / 1024, 96 / 1024);
+    onFontSizePreview?.call(fontSizeFraction);
+    _changed();
+  }
+
+  Future<bool> commitFontSize() {
+    if (_formatting != null) return _formatting!;
+    final action = onFontSizeCommit;
+    if (action == null) return Future.value(true);
+    cancelPaperTap();
+    final result = action();
+    _formatting = result.whenComplete(() {
+      _formatting = null;
+      _changed();
+    });
+    _changed();
+    return _formatting!;
   }
 
   Future<bool> delete() {
@@ -204,76 +237,84 @@ class ReaderAnnotationColors extends StatelessWidget {
   });
   final int argb;
   final ValueChanged<int>? onChanged;
+
+  static const _palette = [
+    ('黑色', 0xff222222),
+    ('松绿', 0xff236459),
+    ('赭红', 0xff9b5949),
+    ('蓝色', 0xff1c57ac),
+    ('黄色', 0xffffc107),
+    ('紫色', 0xffa26f91),
+  ];
+
+  Widget _swatch(BuildContext context, String name, int color) => Tooltip(
+    message: name,
+    child: Semantics(
+      button: true,
+      selected: argb == color,
+      label: name,
+      child: InkResponse(
+        onTap: onChanged == null ? null : () => onChanged!(color),
+        radius: 20,
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Center(
+            child: SizedBox(
+              width: 36,
+              height: 36,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (argb == color)
+                    Positioned.fill(
+                      child: DecoratedBox(
+                        key: ValueKey('annotation-color-selection-$color'),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Theme.of(context).colorScheme.onSurface,
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  SizedBox(
+                    key: ValueKey('annotation-color-dot-$color'),
+                    width: 28,
+                    height: 28,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Color(color),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.outline,
+                          width: .75,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => Row(
     mainAxisSize: MainAxisSize.min,
     children: [
-      for (final (name, color) in [
-        ('红色', 0xffc12b32),
-        ('黑色', 0xff222222),
-        ('蓝色', 0xff1c57ac),
-        ('黄色', 0xffffc107),
-        if (![0xffc12b32, 0xff222222, 0xff1c57ac, 0xffffc107].contains(argb))
-          ('当前文字颜色', argb),
-      ])
-        Tooltip(
-          message: name,
-          child: Semantics(
-            button: true,
-            selected: argb == color,
-            label: name,
-            child: InkResponse(
-              onTap: onChanged == null ? null : () => onChanged!(color),
-              radius: 20,
-              child: SizedBox(
-                width: 44,
-                height: 44,
-                child: Center(
-                  child: SizedBox(
-                    width: 36,
-                    height: 36,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        if (argb == color)
-                          Positioned.fill(
-                            child: DecoratedBox(
-                              key: ValueKey(
-                                'annotation-color-selection-$color',
-                              ),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurface,
-                                  width: 1.5,
-                                ),
-                              ),
-                            ),
-                          ),
-                        SizedBox(
-                          key: ValueKey('annotation-color-dot-$color'),
-                          width: 28,
-                          height: 28,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Color(color),
-                              border: Border.all(
-                                color: Theme.of(context).colorScheme.outline,
-                                width: .75,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
+      for (final (name, color) in _palette) _swatch(context, name, color),
+      if (_palette.every((entry) => entry.$2 != argb))
+        _swatch(context, '当前颜色', argb)
+      else
+        const SizedBox(
+          key: ValueKey('annotation-color-current-slot'),
+          width: 44,
+          height: 44,
         ),
     ],
   );

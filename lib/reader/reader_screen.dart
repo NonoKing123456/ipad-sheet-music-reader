@@ -12,6 +12,7 @@ import 'reader_preview_frame.dart';
 import 'reader_page_window.dart';
 import 'sharp_pdf_page.dart';
 import 'sharp_file_image.dart';
+import '../theme/device_layout.dart';
 
 class ReaderScreen extends StatefulWidget {
   const ReaderScreen({
@@ -327,7 +328,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Widget _tabletFrame(VoidCallback toggleTools) => ReaderPreviewFrame(
-    enabled: canPreviewReader && _tablet,
+    enabled:
+        canPreviewReader &&
+        _tablet &&
+        !DeviceLayoutScope.isSimulatedIpad(context),
     landscape: _landscape,
     child: _body(toggleTools),
   );
@@ -394,10 +398,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final document = _document!;
     final generation = _openGeneration;
     return ReaderPageWindow(
-      paperWidthTransition: !isMobileReader,
-      shortPageTransition: !isMobileReader,
+      paperWidthTransition: !DeviceLayoutScope.isCompact(context),
+      shortPageTransition: !DeviceLayoutScope.isCompact(context),
       onWillPresent: () => _transform.value = Matrix4.identity(),
-      onSelected: isMobileReader
+      onSelected: DeviceLayoutScope.isCompact(context)
           ? null
           : (_, number) => setState(() => _visiblePage = number),
       key: ValueKey(generation),
