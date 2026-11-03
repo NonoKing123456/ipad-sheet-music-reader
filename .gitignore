@@ -245,3 +245,5 @@
 !/tools/
 !/tools/flutter-patches/
 !/tools/flutter-patches/193372-semantics.patch
+!/tools/flutter-patches/FLUTTER-LICENSE
+!/tools/flutter-patches/README.md
