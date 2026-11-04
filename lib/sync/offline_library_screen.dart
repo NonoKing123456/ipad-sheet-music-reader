@@ -529,9 +529,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                   ),
                                 ),
                               Expanded(
-                                child: Listener(
-                                  behavior: HitTestBehavior.translucent,
-                                  onPointerUp: (_) => scheduleMicrotask(() {
+                                child: LibraryOutsideTapListener(
+                                  enabled: _searchOpen,
+                                  onTap: () => scheduleMicrotask(() {
                                     if (mounted &&
                                         _searchOpen &&
                                         (ModalRoute.of(context)?.isCurrent ??

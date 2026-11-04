@@ -777,9 +777,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                                     )
                                   : library.rootPath == null
                                   ? _welcome(library)
-                                  : Listener(
-                                      behavior: HitTestBehavior.translucent,
-                                      onPointerUp: (_) => scheduleMicrotask(() {
+                                  : LibraryOutsideTapListener(
+                                      enabled: _searchOpen,
+                                      onTap: () => scheduleMicrotask(() {
                                         if (mounted &&
                                             _searchOpen &&
                                             (ModalRoute.of(context)

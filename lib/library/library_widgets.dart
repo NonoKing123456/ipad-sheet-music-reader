@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
 import 'package:path/path.dart' as p;
 
@@ -507,20 +508,22 @@ class LibrarySearchContext extends StatelessWidget {
       ),
       child: Align(
         alignment: Alignment.centerLeft,
-        child: PopupMenuButton<bool>(
-          tooltip: '搜索范围',
-          onSelected: onScopeChanged,
-          itemBuilder: (_) => [
-            CheckedPopupMenuItem(
-              value: !withinFolder,
-              checked: withinFolder,
-              child: const Text('当前文件夹及子文件夹'),
-            ),
-          ],
-          child: Text(
-            '$count 个结果 · 显示所属目录',
-            style: ScoreText.caption.copyWith(
-              color: ScoreTokens.of(context).ink500,
+        child: LibraryOutsideTapExclusion(
+          child: PopupMenuButton<bool>(
+            tooltip: '搜索范围',
+            onSelected: onScopeChanged,
+            itemBuilder: (_) => [
+              CheckedPopupMenuItem(
+                value: !withinFolder,
+                checked: withinFolder,
+                child: const Text('当前文件夹及子文件夹'),
+              ),
+            ],
+            child: Text(
+              '$count 个结果 · 显示所属目录',
+              style: ScoreText.caption.copyWith(
+                color: ScoreTokens.of(context).ink500,
+              ),
             ),
           ),
         ),
@@ -598,4 +601,129 @@ class LibraryNavEntry {
   final LibraryNavKind kind;
   final Object? value;
   final String label;
+}
+
+/// Observes real taps without joining the gesture arena or consuming child taps.
+/// A scroll, cancelled pointer, or multi-pointer sequence can never dismiss search.
+class LibraryOutsideTapListener extends StatefulWidget {
+  const LibraryOutsideTapListener({
+    super.key,
+    required this.enabled,
+    required this.onTap,
+    required this.child,
+  });
+  final bool enabled;
+  final VoidCallback onTap;
+  final Widget child;
+  @override
+  State<LibraryOutsideTapListener> createState() =>
+      _LibraryOutsideTapListenerState();
+}
+
+class _LibraryOutsideTapListenerState extends State<LibraryOutsideTapListener> {
+  final Set<int> _pointers = {};
+  final Set<int> _excluded = {};
+  int? _candidate;
+  Offset _origin = Offset.zero;
+  double _maximumTravelSquared = 0, _slopSquared = 0;
+  bool _multiplePointers = false;
+
+  void _exclude(int pointer) {
+    _excluded.add(pointer);
+    if (_candidate == pointer) _candidate = null;
+  }
+
+  void _down(PointerDownEvent event) {
+    _pointers.add(event.pointer);
+    if (_pointers.length > 1) _multiplePointers = true;
+    if (!widget.enabled ||
+        _multiplePointers ||
+        _excluded.contains(event.pointer) ||
+        event.buttons != kPrimaryButton) {
+      _candidate = null;
+      return;
+    }
+    _candidate = event.pointer;
+    _origin = event.position;
+    _maximumTravelSquared = 0;
+    final slop = computeHitSlop(
+      event.kind,
+      MediaQuery.maybeGestureSettingsOf(context),
+    );
+    _slopSquared = slop * slop;
+  }
+
+  void _observe(PointerEvent event) {
+    if (_candidate != event.pointer) return;
+    final distance = (event.position - _origin).distanceSquared;
+    if (distance > _maximumTravelSquared) _maximumTravelSquared = distance;
+  }
+
+  void _finish(int pointer) {
+    _candidate = null;
+    _pointers.remove(pointer);
+    _excluded.remove(pointer);
+    if (_pointers.isEmpty) {
+      _multiplePointers = false;
+      _excluded.clear();
+    }
+  }
+
+  void _up(PointerUpEvent event) {
+    _observe(event);
+    final tap =
+        widget.enabled &&
+        _candidate == event.pointer &&
+        _pointers.length == 1 &&
+        !_multiplePointers &&
+        !_excluded.contains(event.pointer) &&
+        _maximumTravelSquared <= _slopSquared;
+    _finish(event.pointer);
+    if (tap) widget.onTap();
+  }
+
+  @override
+  void didUpdateWidget(LibraryOutsideTapListener oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enabled) _candidate = null;
+  }
+
+  @override
+  Widget build(BuildContext context) => _LibraryOutsideTapScope(
+    state: this,
+    child: Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _down,
+      onPointerMove: _observe,
+      onPointerUp: _up,
+      onPointerCancel: (event) => _finish(event.pointer),
+      onPointerSignal: (_) => _candidate = null,
+      onPointerPanZoomStart: (_) => _candidate = null,
+      child: widget.child,
+    ),
+  );
+}
+
+class _LibraryOutsideTapScope extends InheritedWidget {
+  const _LibraryOutsideTapScope({required this.state, required super.child});
+  final _LibraryOutsideTapListenerState state;
+  @override
+  bool updateShouldNotify(_LibraryOutsideTapScope oldWidget) =>
+      state != oldWidget.state;
+}
+
+/// Protect search controls located within the otherwise dismissible content.
+/// Down only marks the pointer; it never closes search or consumes the gesture.
+class LibraryOutsideTapExclusion extends StatelessWidget {
+  const LibraryOutsideTapExclusion({super.key, required this.child});
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    final scope = context
+        .dependOnInheritedWidgetOfExactType<_LibraryOutsideTapScope>();
+    return Listener(
+      onPointerDown: (event) => scope?.state._exclude(event.pointer),
+      child: child,
+    );
+  }
 }
