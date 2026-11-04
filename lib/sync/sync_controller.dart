@@ -107,6 +107,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     this.ioTimeout = const Duration(seconds: 30),
     this.bindAddress,
     this.signingDirectoryWatch,
+    this.backgroundTransferFactory,
   }) {
     library.addListener(_libraryChanged);
     workspace.addListener(_workspaceChanged);
@@ -118,6 +119,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   /// Tests may restrict the listener to loopback; production binds IPv4 LAN.
   final InternetAddress? bindAddress;
   final Stream<FileSystemEvent> Function(String)? signingDirectoryWatch;
+
+  /// Allows an embedded host/test to supply its persistent native queue.
+  final IosBackgroundTransfer Function()? backgroundTransferFactory;
   Directory? _canonicalDataDirectory;
   Directory get directory => Directory(
     p.join((_canonicalDataDirectory ?? library.dataDirectory).path, 'sync'),
@@ -166,9 +170,13 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _configureBackgroundClient() {
-    if (!Platform.isIOS || _client == null) return;
+    if ((!Platform.isIOS && backgroundTransferFactory == null) ||
+        _client == null) {
+      return;
+    }
     _backgroundTransfer?.dispose();
-    final transfer = IosBackgroundTransfer();
+    final transfer =
+        backgroundTransferFactory?.call() ?? IosBackgroundTransfer();
     _backgroundTransfer = transfer;
     _client!.backgroundTransfer = transfer;
     transfer.onChanged = () => unawaited(_backgroundChanged());
@@ -188,6 +196,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
     busy = true;
     backgroundImporting = true;
+    _changed();
     try {
       final count = await _client!.recoverBackgroundCollection(collection!);
       if (count > 0 && !_disposed) {
@@ -195,7 +204,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         _tick();
       }
     } catch (_) {
-      if (!_disposed) message = '后台曲谱尚未导入，请检查空间后重试同步。';
+      if (!_disposed) {
+        phase = SyncPhase.partial;
+        message = '后台曲谱尚未导入，请检查空间后重试同步。';
+      }
     } finally {
       busy = false;
       backgroundImporting = false;
@@ -1114,14 +1126,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         rootDirectory: p.join(directory.path, 'replica'),
       );
       collection = await ReplicaCollectionView.open(replica!);
-      if (Platform.isIOS && _client != null) {
-        try {
-          await _client!.recoverBackgroundCollection(collection!);
-        } catch (_) {
-          phase = SyncPhase.partial;
-          message = '后台曲谱尚未导入，请检查空间后重试同步；已有离线曲谱仍可阅读。';
-        }
-      }
+      // Native URLSession restoration and staged imports are independent of
+      // already verified offline objects. Drain them through the busy-guarded
+      // foreground recovery below after publishing this readable index.
       if (collection!.persistenceFailed) {
         phase = SyncPhase.partial;
         message = '有些离线记录尚未写入，已验证的曲谱仍可阅读。请检查空间后重试。';
@@ -1133,8 +1140,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _seenReaderGeneration = workspace.store.snapshot.generation;
     _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _tick());
     initialized = true;
-    if (Platform.isIOS) unawaited(_backgroundChanged());
     _changed();
+    if (_backgroundTransfer != null) unawaited(_backgroundChanged());
     _maybeAutoStart();
   }
 

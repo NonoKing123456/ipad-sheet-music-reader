@@ -107,7 +107,9 @@ class ReplicaCollectionView {
           throw const FormatException('Unsupported collection replica.');
         view.index = CollectionIndex.fromJson(asMap(stored['index']));
         view.selection = OfflineSelection.fromJson(stored['selection'] as List);
+        final verificationBefore = objects.verificationRevision;
         objects.restoreVerificationCache(asMap(stored['verified'] ?? {}));
+        view._dirty = objects.verificationRevision != verificationBefore;
         final owners = {
           for (final e in view.index!.entries) e.entryId: e.sourceId
         };
@@ -118,6 +120,7 @@ class ReplicaCollectionView {
           }
         }
       } else if (objects.manifest case final old?) {
+        view._dirty = true; // The legacy migration has not been persisted yet.
         view.index = CollectionIndex(
             id: old.libraryId,
             legacyLibraryId: old.libraryId,
@@ -144,7 +147,7 @@ class ReplicaCollectionView {
       }
       await view._replayJournal();
       await view.refreshReady();
-      if (view.index != null) {
+      if (view.index != null && view._dirty) {
         try {
           await view._persist();
         } on FileSystemException {
@@ -158,37 +161,70 @@ class ReplicaCollectionView {
   }
 
   Future<void> refreshReady() async {
+    final verificationBefore = objects.verificationRevision;
     _ready.clear();
     final prior = Map<String, CatalogItem>.from(_readable);
     _readable.clear();
-    for (final item in currentItems) {
+    final items = currentItems.toList(growable: false);
+    final candidates = [
+      for (final item in items)
+        if (!item.missing && item.hash != null) item
+    ];
+    final verified = await objects
+        .verifyObjects([for (final item in candidates) item.object]);
+    for (var i = 0; i < candidates.length; i++) {
+      if (verified[i]) _readable[candidates[i].entryId] = candidates[i];
+    }
+    final fallbacks = <CatalogItem>[];
+    for (final item in items) {
       if (item.missing) {
         if (prior[item.entryId] case final old?) _readable[item.entryId] = old;
         continue;
       }
-      CatalogItem? readable;
-      if (item.hash != null && await objects.hasVerifiedObject(item.object)) {
-        readable = item;
-      } else {
-        final old = prior[item.entryId];
-        if (old != null &&
-            old.sourceId == item.sourceId &&
-            old.hash != null &&
-            await objects.hasVerifiedObject(old.object)) {
-          readable = old;
-        }
-      }
-      if (readable != null) {
-        _readable[item.entryId] = readable;
-        _ready
-            .add('${readable.entryId}/${readable.revisionId}/${readable.hash}');
+      final old = prior[item.entryId];
+      if (!_readable.containsKey(item.entryId) &&
+          old != null &&
+          old.sourceId == item.sourceId &&
+          old.hash != null &&
+          (old.revisionId != item.revisionId ||
+              old.hash != item.hash ||
+              old.length != item.length ||
+              old.format != item.format)) {
+        fallbacks.add(old);
       }
     }
+    final fallbackVerified = await objects
+        .verifyObjects([for (final item in fallbacks) item.object]);
+    for (var i = 0; i < fallbacks.length; i++) {
+      if (fallbackVerified[i]) _readable[fallbacks[i].entryId] = fallbacks[i];
+    }
+    for (final item in items.where((item) => !item.missing)) {
+      final readable = _readable[item.entryId];
+      if (readable != null)
+        _ready
+            .add('${readable.entryId}/${readable.revisionId}/${readable.hash}');
+    }
+    if (objects.verificationRevision != verificationBefore ||
+        prior.length != _readable.length ||
+        _readable.entries
+            .any((entry) => !_sameItem(prior[entry.key], entry.value)))
+      _dirty = true;
     _snapshot = null;
     _displayEntries.clear();
     contentRevision++;
     await _prepareDirectory();
   }
+
+  bool _sameItem(CatalogItem? a, CatalogItem b) =>
+      a != null &&
+      a.entryId == b.entryId &&
+      a.sourceId == b.sourceId &&
+      a.revisionId == b.revisionId &&
+      a.hash == b.hash &&
+      a.length == b.length &&
+      a.relativePath == b.relativePath &&
+      a.format == b.format &&
+      a.missing == b.missing;
 
   Future<void> _replayJournal() async {
     final file = File(_journalPath);

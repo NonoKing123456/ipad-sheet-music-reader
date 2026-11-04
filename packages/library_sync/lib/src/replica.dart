@@ -155,6 +155,10 @@ class ReplicaLibraryView {
   final _presentationPaths = <String, String>{};
   final _verified = <String, _VerifiedObject>{};
   bool _verificationDirty = false;
+  int _verificationRevision = 0;
+
+  /// Changes to durable object fingerprints, excluding successful cache reads.
+  int get verificationRevision => _verificationRevision;
   int _localHashOperations = 0, _localHashBytesRead = 0;
   int _downloadObjectsVerified = 0, _downloadBytesReceived = 0;
   int _cachedObjectsReused = 0;
@@ -175,6 +179,7 @@ class ReplicaLibraryView {
           _verified[e.key] = _VerifiedObject.fromJson(asMap(e.value));
         }
       } catch (_) {
+        _verificationRevision++;
         /* Invalid metadata falls back to actual byte verification. */
       }
     }
@@ -229,9 +234,10 @@ class ReplicaLibraryView {
       } else {
         _verificationDirty = true;
       }
-      for (final e in _manifest!.entries.where((e) => !e.missing)) {
-        if (await hasVerifiedObject(e, verifyAll: verifyAll))
-          _ready.add(objectPath(e));
+      final entries = _manifest!.entries.where((e) => !e.missing).toList();
+      final verified = await verifyObjects(entries, verifyAll: verifyAll);
+      for (var i = 0; i < entries.length; i++) {
+        if (verified[i]) _ready.add(_objectPath(entries[i]));
       }
       if (_verificationDirty) {
         await writeJson(
@@ -258,11 +264,14 @@ class ReplicaLibraryView {
         }
       };
 
-  String _verificationKey(ManifestEntry e) => p.basename(objectPath(e));
+  // A metadata key must not repeat the filesystem guard at every cache lookup.
+  String _verificationKey(ManifestEntry e) => p.basename(_objectPath(e));
   void _forget(ManifestEntry e) {
     if (_ready.remove(_objectPath(e))) _presentation = null;
-    if (_verified.remove(_verificationKey(e)) != null)
+    if (_verified.remove(_verificationKey(e)) != null) {
       _verificationDirty = true;
+      _verificationRevision++;
+    }
   }
 
   void _remember(ManifestEntry e, FileStat stat) {
@@ -277,6 +286,7 @@ class ReplicaLibraryView {
     _verified[key] = _VerifiedObject(
         e.hash!, stat.size, stat.modified.microsecondsSinceEpoch, stat.mode);
     _verificationDirty = true;
+    _verificationRevision++;
     if (_manifest?.entries.any((existing) =>
                 existing.entryId == e.entryId &&
                 existing.revisionId == e.revisionId &&
@@ -325,11 +335,35 @@ class ReplicaLibraryView {
     }
   }
 
-  Future<bool> hasVerifiedObject(ManifestEntry e,
+  Future<bool> hasVerifiedObject(ManifestEntry e, {bool verifyAll = false}) =>
+      _hasVerifiedObject(e, verifyAll: verifyAll, checkParents: true);
+
+  /// A bounded recovery pass over this app-private object's directory. Callers
+  /// hold its directory lease while restoring or changing an index. Shared
+  /// ancestors are checked for this pass only; every leaf still rejects links,
+  /// checks its stat and hashes changed/uncached bytes. Reading one score uses
+  /// [hasVerifiedObject] and repeats the complete path guard independently.
+  Future<List<bool>> verifyObjects(List<ManifestEntry> entries,
       {bool verifyAll = false}) async {
-    final file = File(objectPath(e));
-    if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
-        FileSystemEntityType.file) {
+    if (entries.isEmpty) return const [];
+    assertSafePath(rootDirectory, p.join(rootDirectory, 'objects'));
+    final results = <bool>[];
+    for (final entry in entries) {
+      results.add(await _hasVerifiedObject(entry,
+          verifyAll: verifyAll, checkParents: false));
+    }
+    return results;
+  }
+
+  Future<bool> _hasVerifiedObject(ManifestEntry e,
+      {required bool verifyAll, required bool checkParents}) async {
+    final file = File(checkParents ? objectPath(e) : _objectPath(e));
+    final type = FileSystemEntity.typeSync(file.path, followLinks: false);
+    if (type == FileSystemEntityType.link) {
+      throw const FileSystemException(
+          'Linked sync/source paths are forbidden.');
+    }
+    if (type != FileSystemEntityType.file) {
       _forget(e);
       return false;
     }
