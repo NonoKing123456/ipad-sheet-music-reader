@@ -73,13 +73,14 @@ class ReaderStageController {
   void hideTools() => _hide?.call();
 }
 
-/// Controls float above the unchanged full viewport. They never resize paper.
+/// Visible chrome reserves its actual height; the remaining viewport fits paper.
 class ReaderStage extends StatefulWidget {
   const ReaderStage({
     super.key,
     required this.contentBuilder,
     required this.top,
     required this.bottom,
+    this.fitAspectFor,
     this.notices = const [],
     this.drawing = false,
     this.onViewportChanged,
@@ -98,6 +99,7 @@ class ReaderStage extends StatefulWidget {
   });
   final Widget Function(VoidCallback toggleTools) contentBuilder;
   final Widget top, bottom;
+  final double Function(Size viewport)? fitAspectFor;
   final List<Widget> notices;
   final bool drawing;
   final VoidCallback? onViewportChanged;
@@ -118,6 +120,7 @@ class ReaderStage extends StatefulWidget {
 class _ReaderStageState extends State<ReaderStage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late bool _tools = !isMobileReader;
+  late bool _reserveTools = _tools;
   bool? _lastCompact;
   Size? _viewport;
   final _topKey = GlobalKey();
@@ -179,7 +182,10 @@ class _ReaderStageState extends State<ReaderStage>
       return;
     }
     if (!mounted) return;
-    setState(() => _tools = show);
+    setState(() {
+      _tools = show;
+      if (show) _reserveTools = true;
+    });
     widget.onToolsVisibilityChanged?.call(show);
     if (_reduceMotion) {
       _animation.value = show ? 1 : 0;
@@ -196,6 +202,7 @@ class _ReaderStageState extends State<ReaderStage>
       final initialLayout = _lastCompact == null;
       _lastCompact = compact;
       _tools = !compact;
+      _reserveTools = _tools;
       _animation.value = _tools ? 1 : 0;
       if (!initialLayout) widget.onToolsVisibilityChanged?.call(_tools);
     }
@@ -231,6 +238,9 @@ class _ReaderStageState extends State<ReaderStage>
     if (status != AnimationStatus.completed &&
         status != AnimationStatus.dismissed) {
       return;
+    }
+    if (status == AnimationStatus.dismissed && _reserveTools) {
+      setState(() => _reserveTools = false);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) widget.onToolsLayoutSettled?.call();
@@ -342,12 +352,9 @@ class _ReaderStageState extends State<ReaderStage>
       final topHeight = top == null || !top.hasSize ? 0.0 : top.size.height;
       final obstruction = EdgeInsets.only(top: topHeight * _curve.value);
       _reportedObstruction = obstruction;
-      // ReaderInput consumes screen coordinates and subtracts its viewport's
-      // actual origin, including native safe areas and the paper gutter.
-      final origin = top == null || !top.hasSize
-          ? 0.0
-          : top.localToGlobal(Offset.zero).dy;
-      final panInsets = EdgeInsets.only(top: _tools ? origin + topHeight : 0);
+      // The content viewport already starts below chrome. Passing its global
+      // bottom as an obstruction would compensate the same header twice.
+      const panInsets = EdgeInsets.zero;
       if (panInsets != _reportedPanInsets) {
         _reportedPanInsets = panInsets;
         widget.onObstructionChanged?.call(panInsets);
@@ -383,24 +390,37 @@ class _ReaderStageState extends State<ReaderStage>
               key: const ValueKey('reading-viewport'),
               fit: StackFit.expand,
               children: [
-                content,
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 0,
-                  child: SafeArea(
-                    bottom: false,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _animatedTools(
-                          KeyedSubtree(key: _topKey, child: widget.top),
-                          const Offset(0, -1),
+                Column(
+                  children: [
+                    ClipRect(
+                      child: Align(
+                        heightFactor: _reserveTools ? 1 : 0,
+                        child: SafeArea(
+                          bottom: false,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _animatedTools(
+                                KeyedSubtree(key: _topKey, child: widget.top),
+                                const Offset(0, -1),
+                              ),
+                              if (!widget.hasReadablePage) ...widget.notices,
+                            ],
+                          ),
                         ),
-                        if (!widget.hasReadablePage) ...widget.notices,
-                      ],
+                      ),
                     ),
-                  ),
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, available) => ReaderChromeViewport(
+                          key: const ValueKey('reader-content-inset'),
+                          topInset: constraints.maxHeight - available.maxHeight,
+                          fitAspectFor: widget.fitAspectFor,
+                          child: content,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 if (widget.hasReadablePage && widget.notices.isNotEmpty)
                   Positioned(
@@ -472,6 +492,118 @@ class _ReaderStageState extends State<ReaderStage>
         ),
       ),
     ),
+  );
+}
+
+/// Lay the real reader out once at its destination size, then paint the same
+/// paper, annotations and handles through one compositor-only transition.
+/// The clip is the destination content viewport, never the toolbar's area.
+class ReaderChromeViewport extends StatefulWidget {
+  const ReaderChromeViewport({
+    super.key,
+    required this.topInset,
+    required this.child,
+    this.fitAspectFor,
+  });
+  final double topInset;
+  final Widget child;
+  final double Function(Size viewport)? fitAspectFor;
+  @override
+  State<ReaderChromeViewport> createState() => _ReaderChromeViewportState();
+}
+
+class _ReaderChromeViewportState extends State<ReaderChromeViewport>
+    with SingleTickerProviderStateMixin {
+  late double _fromInset = widget.topInset;
+  late final AnimationController _animation = AnimationController(
+    vsync: this,
+    value: 1,
+    duration: ScoreMotion.panel,
+  );
+  @override
+  void didUpdateWidget(covariant ReaderChromeViewport oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.topInset == widget.topInset) return;
+    final progress = Curves.easeOutCubic.transform(_animation.value);
+    _fromInset = _fromInset + (oldWidget.topInset - _fromInset) * progress;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _fromInset = widget.topInset;
+      _animation.value = 1;
+    } else {
+      _animation.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _animation.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final before = Size(
+        constraints.maxWidth,
+        (constraints.maxHeight + widget.topInset - _fromInset).clamp(
+          1.0,
+          double.infinity,
+        ),
+      );
+      final after = constraints.biggest;
+      var fromScale = 1.0;
+      var fromOffset = Offset(0, _fromInset - widget.topInset);
+      final aspectFor = widget.fitAspectFor;
+      if (aspectFor != null) {
+        Size inner(Size size) => Size(
+          (size.width - 2 * ScoreLayout.pageGutter).clamp(1.0, double.infinity),
+          (size.height - 2 * ScoreLayout.pageGutter).clamp(
+            1.0,
+            double.infinity,
+          ),
+        );
+        final a = inner(before), b = inner(after);
+        final oldPaper = applyBoxFit(
+          BoxFit.contain,
+          Size(aspectFor(a), 1),
+          a,
+        ).destination;
+        final newPaper = applyBoxFit(
+          BoxFit.contain,
+          Size(aspectFor(b), 1),
+          b,
+        ).destination;
+        fromScale = oldPaper.height / newPaper.height;
+        fromOffset =
+            before.center(Offset.zero) +
+            Offset(0, _fromInset - widget.topInset) -
+            after.center(Offset.zero) * fromScale;
+      }
+      return ClipRect(
+        child: AnimatedBuilder(
+          animation: _animation,
+          child: widget.child,
+          builder: (context, child) {
+            final remainder =
+                1 - Curves.easeOutCubic.transform(_animation.value);
+            return Transform(
+              key: const ValueKey('reader-chrome-compositor'),
+              transform:
+                  Matrix4.diagonal3Values(
+                    1 + (fromScale - 1) * remainder,
+                    1 + (fromScale - 1) * remainder,
+                    1,
+                  )..setTranslationRaw(
+                    fromOffset.dx * remainder,
+                    fromOffset.dy * remainder,
+                    0,
+                  ),
+              child: child,
+            );
+          },
+        ),
+      );
+    },
   );
 }
 

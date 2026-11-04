@@ -80,8 +80,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   bool _dotsSuppressed = false;
   final _penPointers = <int>{};
   Timer? _dotRestore;
-  Matrix4? _readingTransform;
-  PageKey? _readingTransformPage;
+  Size? _paperViewportSize;
+  PageKey? _paperViewportPage;
+  Offset? _preferredViewportAnchor;
+  PageKey? _preferredAnchorPage;
+  double? _preferredAnchorScale;
+  bool _projectingViewport = false;
   late final PaperColorSampler _colorSampler =
       widget.colorSampler ?? PaperColorSampler();
   bool _picking = false, _sampling = false;
@@ -291,6 +295,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _transformChanged() {
+    if (!_projectingViewport) {
+      _preferredViewportAnchor = null;
+      _preferredAnchorPage = null;
+      _preferredAnchorScale = null;
+    }
     final scale = _transform.value.getMaxScaleOnAxis();
     if (mounted && (_scale - scale).abs() > .01) setState(() => _scale = scale);
   }
@@ -501,10 +510,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Future<bool> _setEditing(bool editing) async {
     if (!editing && !_editing) return true;
-    if (editing && !_editing) {
-      _readingTransform = Matrix4.copy(_transform.value);
-      _readingTransformPage = _visiblePage;
-    }
     if (!editing && (!await _textControls.finish() || !mounted)) return false;
     editing = editing && widget.allowAnnotations;
     setState(() {
@@ -516,12 +521,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _inputGeneration++;
         _cancelPick();
         _touchTransforming = false;
-        _transform.value =
-            _readingTransformPage == _visiblePage && _readingTransform != null
-            ? Matrix4.copy(_readingTransform!)
-            : Matrix4.identity();
-        _readingTransform = null;
-        _readingTransformPage = null;
+        // Chrome changes preserve the current zoom/view. The viewport adapter
+        // below maps that same content anchor into the new available area.
+        if (_transform.value.getMaxScaleOnAxis() <= 1.000001) {
+          _transform.value = Matrix4.identity();
+        }
       }
     });
     return true;
@@ -532,7 +536,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _inputGeneration++;
       _cancelPick();
       _touchTransforming = false;
-      _transform.value = Matrix4.identity();
+      if (_transform.value.getMaxScaleOnAxis() <= 1.000001) {
+        _transform.value = Matrix4.identity();
+      }
     });
   }
 
@@ -604,6 +610,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       body: _trackPen(
         ReaderStage(
           controller: _stageControls,
+          fitAspectFor: _readerFitAspect,
           hasReadablePage: _visiblePage != null,
           statusLabel: workspace.unsavedCount > 0
               ? '${workspace.unsavedCount} 项未保存'
@@ -617,6 +624,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onNext: () => _navigate(NavigationDirection.forward),
           onViewportChanged: _resetViewport,
           top: Column(
+            key: const ValueKey('reader-top-chrome'),
             mainAxisSize: MainAxisSize.min,
             children: [
               _compactHeader(current, title),
@@ -958,6 +966,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onNext: () => _navigate(NavigationDirection.forward),
           blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
           contentBuilder: (_) => DesktopReaderShell(
+            fitAspectFor: _effectiveDesktopMode == ReaderViewMode.continuous
+                ? null
+                : _readerFitAspect,
             documentMenu: [
               if (document != null && Platform.isWindows)
                 MenuItemButton(
@@ -1667,9 +1678,94 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
+  double _readerFitAspect(Size viewport) {
+    final document = _visibleDocument ?? _session.current;
+    if (document == null) return 1;
+    final number = _visiblePage?.pageNumber ?? _session.page;
+    if (!_isCompact && _effectiveDesktopMode == ReaderViewMode.spread) {
+      final spread = ReaderSpreads(
+        pageCount: document.pageCount,
+        doublePage: true,
+        arrangement: _arrangementFor(document.target.entryId),
+      ).forPage(number);
+      return readerSpreadAspect(viewport, spread, document.aspectFor);
+    }
+    return document.aspectFor(number);
+  }
+
   Widget _paperViewport(Widget child) => Padding(
     padding: const EdgeInsets.all(ScoreLayout.pageGutter),
-    child: child,
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final next = constraints.biggest, before = _paperViewportSize;
+        final samePage = _paperViewportPage == _visiblePage;
+        _paperViewportSize = next;
+        _paperViewportPage = _visiblePage;
+        final matrix = Matrix4.copy(_transform.value);
+        final scale = matrix.getMaxScaleOnAxis();
+        if (before != null &&
+            before != next &&
+            samePage &&
+            scale > 1.000001 &&
+            !readerTextEditorActive) {
+          Rect fitted(Size size) => Alignment.center.inscribe(
+            applyBoxFit(
+              BoxFit.contain,
+              Size(_readerFitAspect(size), 1),
+              size,
+            ).destination,
+            Offset.zero & size,
+          );
+          final oldPaper = fitted(before), newPaper = fitted(next);
+          final scene =
+              (before.center(Offset.zero) -
+                  Offset(matrix.storage[12], matrix.storage[13])) /
+              scale;
+          // Preserve the user's preferred content anchor through temporary
+          // chrome clamping. Opening a bar can make an edge view unreachable;
+          // closing it restores that original view instead of accumulating drift.
+          final fraction =
+              _preferredAnchorPage == _visiblePage &&
+                  _preferredAnchorScale == scale &&
+                  _preferredViewportAnchor != null
+              ? _preferredViewportAnchor!
+              : Offset(
+                  (scene.dx - oldPaper.left) / oldPaper.width,
+                  (scene.dy - oldPaper.top) / oldPaper.height,
+                );
+          _preferredViewportAnchor = fraction;
+          _preferredAnchorPage = _visiblePage;
+          _preferredAnchorScale = scale;
+          final anchor =
+              newPaper.topLeft +
+              Offset(
+                fraction.dx * newPaper.width,
+                fraction.dy * newPaper.height,
+              );
+          final translation = clampReaderPan(
+            viewport: next,
+            scale: scale,
+            translation: next.center(Offset.zero) - anchor * scale,
+            pageAspect: _readerFitAspect(next),
+          );
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted &&
+                _paperViewportSize == next &&
+                _paperViewportPage == _visiblePage &&
+                _transform.value == matrix) {
+              _projectingViewport = true;
+              try {
+                _transform.value = Matrix4.diagonal3Values(scale, scale, 1)
+                  ..setTranslationRaw(translation.dx, translation.dy, 0);
+              } finally {
+                _projectingViewport = false;
+              }
+            }
+          });
+        }
+        return child;
+      },
+    ),
   );
 
   Widget _trackPen(Widget child) => Listener(

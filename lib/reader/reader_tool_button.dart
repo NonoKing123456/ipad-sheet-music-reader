@@ -560,67 +560,6 @@ class _ReaderPaletteButtonState extends State<ReaderPaletteButton> {
                       ),
                   ],
                 ),
-              SizedBox(
-                height: ScoreLayout.desktopTarget,
-                width: double.infinity,
-                child: TextButton(
-                  onPressed: onChanged == null
-                      ? null
-                      : () async {
-                          _menu.close();
-                          final input = TextEditingController(
-                            text: (argb & 0xffffff)
-                                .toRadixString(16)
-                                .padLeft(6, '0')
-                                .toUpperCase(),
-                          );
-                          final value = await showDialog<int>(
-                            context: context,
-                            builder: (dialogContext) => AlertDialog(
-                              title: const Text('自定义颜色'),
-                              content: TextField(
-                                controller: input,
-                                autofocus: true,
-                                maxLength: 6,
-                                decoration: const InputDecoration(
-                                  prefixText: '#',
-                                  labelText: '六位颜色值',
-                                ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(dialogContext),
-                                  child: const Text('取消'),
-                                ),
-                                TextButton(
-                                  onPressed: () {
-                                    final value = int.tryParse(
-                                      input.text.trim(),
-                                      radix: 16,
-                                    );
-                                    if (input.text.trim().length == 6 &&
-                                        value != null) {
-                                      Navigator.pop(
-                                        dialogContext,
-                                        value | 0xff000000,
-                                      );
-                                    }
-                                  },
-                                  child: const Text('使用'),
-                                ),
-                              ],
-                            ),
-                          );
-                          // The route transition may still reference its input controller.
-                          Future<void>.delayed(
-                            ScoreMotion.panel,
-                            input.dispose,
-                          );
-                          if (value != null) onChanged?.call(value);
-                        },
-                  child: const Text('自定义颜色'),
-                ),
-              ),
             ],
           ),
         ),
