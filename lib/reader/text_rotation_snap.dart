@@ -17,16 +17,17 @@ class TextRotationSnap {
 
   double update(double angle) {
     angle = normalize(angle);
-    if (_locked != null && distance(angle, _locked!) <= release) {
+    if (_locked != null && distance(angle, _locked!) < release) {
       guideAngle = _locked;
       return _locked!;
     }
     _locked = null;
     final nearest = normalize((angle / (math.pi / 2)).round() * (math.pi / 2));
     final delta = distance(angle, nearest);
-    guideAngle = delta <= release ? nearest : null;
+    guideAngle = null;
     if (delta <= enter) {
       _locked = nearest;
+      guideAngle = nearest;
       return nearest;
     }
     return angle;

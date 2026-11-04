@@ -3,10 +3,10 @@ import 'dart:math' as math;
 
 import '../theme/tokens.dart';
 import '../theme/reader_icons.dart';
-import '../theme/device_layout.dart';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/cupertino.dart' show CupertinoThemeData;
 import 'package:flutter/services.dart';
 import 'package:reader_state/reader_state.dart';
@@ -92,7 +92,9 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   TextAnnotation? _handleBase;
   Offset? _handleOrigin;
   VoidCallback? _endEditing, _endHandle;
-  Matrix4? _beforeReveal, _revealedTransform;
+  double _keyboardCompensationY = 0;
+  Map<TextHandleKind, Offset> _handleCentres = const {};
+  double _handleHitRadius = ScoreLayout.textHandleHit / 2;
   bool _revealWaitingForPaint = false;
   bool _automaticNewWidth = false;
   bool get _editorOpen => _draft != null;
@@ -179,7 +181,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       oldWidget.textControls?.release(this);
     }
     if (oldWidget.page != widget.page || !widget.enabled || !widget.textTool) {
-      _closeEditor();
+      _closeEditor(deferCompensation: true);
       _selected = null;
       _controls.release(this);
       _touches.clear();
@@ -196,7 +198,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   @override
   void dispose() {
-    _closeEditor();
+    _closeEditor(deferCompensation: true);
     _controls.release(this);
     WidgetsBinding.instance.removeObserver(this);
     widget.transform?.removeListener(_transformChanged);
@@ -221,21 +223,15 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   void _revealEditor() {
     if (!mounted || !_editorOpen || widget.transform == null) return;
     if (_revealWaitingForPaint) return;
-    final box = _inputKey.currentContext?.findRenderObject();
-    if (box is! RenderBox || !box.hasSize) return;
     final media = MediaQuery.of(context), view = View.of(context);
-    final corners = [
-      Offset.zero,
-      Offset(box.size.width, 0),
-      Offset(0, box.size.height),
-      box.size.bottomRight(Offset.zero),
-    ].map(box.localToGlobal).toList();
-    final rect = Rect.fromLTRB(
-      corners.map((p) => p.dx).reduce(math.min),
-      corners.map((p) => p.dy).reduce(math.min),
-      corners.map((p) => p.dx).reduce(math.max),
-      corners.map((p) => p.dy).reduce(math.max),
-    );
+    final keyboardInset = view.viewInsets.bottom / view.devicePixelRatio;
+    if (keyboardInset <= 0) {
+      _clearKeyboardCompensation();
+      return;
+    }
+    final paper = context.findRenderObject();
+    final value = _editingValue(_lastSize);
+    if (paper is! RenderBox || !paper.hasSize || value == null) return;
     final tools = widget.topControlsKey?.currentContext?.findRenderObject();
     final viewport = widget.viewportKey?.currentContext?.findRenderObject();
     final viewportTop = viewport is RenderBox && viewport.hasSize
@@ -247,24 +243,89 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     final toolsBottom = tools is RenderBox && tools.hasSize
         ? tools.localToGlobal(Offset(0, tools.size.height)).dy
         : viewportTop;
-    final top = math.max(viewportTop, toolsBottom) + 12;
+    final parentScale = viewport is RenderBox
+        ? viewport.getTransformTo(null).getMaxScaleOnAxis().clamp(.1, 20.0)
+        : 1.0;
+    final top =
+        math.max(viewportTop, toolsBottom) + ScoreSpace.md * parentScale;
     final bottom =
         math.min(
           viewportBottom,
-          media.size.height - view.viewInsets.bottom / view.devicePixelRatio,
+          view.physicalSize.height / view.devicePixelRatio - keyboardInset,
         ) -
-        12;
-    final dy = rect.bottom > bottom
-        ? bottom - rect.bottom
-        : rect.top < top
-        ? top - rect.top
-        : 0.0;
+        ScoreSpace.lg * parentScale;
+    if (bottom <= top) return;
+    final frame = _frame(value, _lastSize);
+    final controlFrame = _controlFrame(frame, value, _lastSize);
+    Rect screenRect(Rect rect) {
+      final points =
+          [rect.topLeft, rect.topRight, rect.bottomLeft, rect.bottomRight].map(
+            (point) => paper.localToGlobal(
+              rotateTextPoint(point, frame.center, value.rotation),
+            ),
+          );
+      return _enclosingRect(points);
+    }
+
+    final screenFrame = screenRect(controlFrame);
+    var rect = screenFrame;
+    final placements = layoutTextHandles(
+      frame: controlFrame,
+      viewport: Offset.zero & paper.size,
+      rotation: value.rotation,
+      scale: _screenScale,
+    );
+    for (final placement in placements.values) {
+      final centre = paper.localToGlobal(
+        rotateTextPoint(placement.hitRect.center, frame.center, value.rotation),
+      );
+      rect = rect.expandToInclude(
+        Rect.fromCircle(
+          center: centre,
+          radius: ScoreLayout.textHandleHit / 2 * parentScale,
+        ),
+      );
+    }
+    final actionSize = Size(
+      _actionBarWidth * parentScale,
+      _actionBarHeight * parentScale,
+    );
+    final above =
+        screenFrame.top -
+        ScoreLayout.textActionGap * parentScale -
+        actionSize.height;
+    rect = rect.expandToInclude(
+      Rect.fromLTWH(
+        screenFrame.left,
+        above >= top
+            ? above
+            : screenFrame.bottom + ScoreLayout.textActionGap * parentScale,
+        actionSize.width,
+        actionSize.height,
+      ),
+    );
+    // A long draft may be taller than the available keyboard gap. Keep the
+    // native caret's current line visible without changing paper or font scale.
+    if (rect.height > bottom - top) {
+      final editable = _renderEditable();
+      if (editable == null) return;
+      final position = _controller.selection.isValid
+          ? _controller.selection.extent
+          : TextPosition(offset: _controller.text.length);
+      final caret = editable.getLocalRectForCaret(position);
+      rect = _enclosingRect([
+        editable.localToGlobal(caret.topLeft),
+        editable.localToGlobal(caret.bottomRight),
+      ]).inflate(ScoreSpace.xs * parentScale);
+    }
+    var dy = rect.bottom > bottom ? bottom - rect.bottom : 0.0;
+    if (rect.top + dy < top) dy = top - rect.top;
     if (dy.abs() < .5) return;
     final transform = widget.transform!;
-    _beforeReveal ??= transform.value.clone();
     final next = transform.value.clone();
-    next.storage[13] += dy;
-    _revealedTransform = next;
+    final translation = dy / parentScale;
+    next.storage[13] += translation;
+    _keyboardCompensationY += translation;
     _revealWaitingForPaint = true;
     transform.value = next;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -272,6 +333,55 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       _revealEditor();
     });
   }
+
+  RenderEditable? _renderEditable() {
+    RenderEditable? result;
+    void visit(RenderObject object) {
+      if (object is RenderEditable) {
+        result = object;
+      } else if (result == null) {
+        object.visitChildren(visit);
+      }
+    }
+
+    final root = _inputKey.currentContext?.findRenderObject();
+    if (root != null) visit(root);
+    return result;
+  }
+
+  void _clearKeyboardCompensation({bool defer = false}) {
+    final amount = _keyboardCompensationY, transform = widget.transform;
+    _keyboardCompensationY = 0;
+    if (amount.abs() < .001 || transform == null) return;
+    final expected = transform.value.clone();
+    void clear() {
+      if (!mounted || widget.transform != transform) return;
+      // Tool exit may already have restored the reader's previous view.
+      if (defer && transform.value != expected) return;
+      transform.value = transform.value.clone()..storage[13] -= amount;
+    }
+
+    if (defer) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => clear());
+    } else {
+      clear();
+    }
+  }
+
+  Rect _enclosingRect(Iterable<Offset> points) => Rect.fromLTRB(
+    points.map((p) => p.dx).reduce(math.min),
+    points.map((p) => p.dy).reduce(math.min),
+    points.map((p) => p.dx).reduce(math.max),
+    points.map((p) => p.dy).reduce(math.max),
+  );
+
+  bool _insideHandles(Offset global) =>
+      hitTestTextHandle(
+        point: global,
+        centres: _handleCentres,
+        radius: _handleHitRadius,
+      ) !=
+      null;
 
   void _writingEnd({bool defer = false}) {
     final notify = widget.onWritingChanged;
@@ -335,7 +445,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       final blank =
           !_inside(_inputKey, event.position) &&
           !_inside(_actionBarKey, event.position) &&
-          !_handleKeys.values.any((key) => _inside(key, event.position));
+          !_insideHandles(event.position);
       _paperSessionPointers.add(event.pointer);
       if (widget.transferTextOnTap && !_controls.availableTo(this)) {
         _transferDown = _paperSessionPointers.length == 1 ? event : null;
@@ -350,7 +460,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         _committing ||
         !_controls.availableTo(this) ||
         widget.workspace.savingAnnotations ||
-        _handleKeys.values.any((key) => _inside(key, event.position)) ||
+        _insideHandles(event.position) ||
         _inside(_actionBarKey, event.position) ||
         _inside(widget.mouseControlKey, event.position) ||
         !_primary(event)) {
@@ -737,7 +847,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     return saved;
   }
 
-  void _closeEditor() {
+  void _closeEditor({bool deferCompensation = false}) {
+    _clearKeyboardCompensation(defer: deferCompensation);
     // A tap before editing belongs to the previous interaction. Completing or
     // cancelling must leave the next tap as a selection, even after a quick edit.
     _lastTapId = null;
@@ -751,19 +862,6 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _endEditing?.call();
     _endEditing = null;
     _controls.release(this);
-    final transform = widget.transform;
-    if (_beforeReveal != null && transform?.value == _revealedTransform) {
-      final previous = _beforeReveal!, revealed = _revealedTransform;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted &&
-            !_editorOpen &&
-            widget.transform == transform &&
-            transform!.value == revealed) {
-          transform.value = previous;
-        }
-      });
-    }
-    _beforeReveal = _revealedTransform = null;
     _revealWaitingForPaint = false;
   }
 
@@ -789,12 +887,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   TextAnnotation _sizeNewDraft(TextAnnotation value, Size size) {
     final visible = _visiblePaper(size), scale = _screenScale;
     final margin = 4 / scale;
-    final limit = math.max(
-      1.0,
-      math.min(size.width * .30, visible.width * .33),
-    );
-    final fontHeight = value.fontSizeFraction * size.shortestSide;
-    final initial = (fontHeight * 7 + 12 / scale).clamp(90.0, 120.0);
+    final initial = (size.width * scale * .18).clamp(96.0, 240.0) / scale;
     final painter = TextPainter(
       text: TextSpan(
         text: _controller.text,
@@ -802,9 +895,11 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    final measured = painter.width + 12 / scale;
+    final measured = painter.width + 8 / scale;
     painter.dispose();
-    final width = math.min(limit, math.max(initial, measured));
+    final width = _controller.text.isEmpty
+        ? initial
+        : measured.clamp(math.min(96 / scale, initial), initial).toDouble();
     var result = _fit(_revise(value, width: width / size.width), size);
     final left = visible.left + margin;
     final right = math.max(left, visible.right - margin - width);
@@ -947,6 +1042,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
     _controls.cancelPaperTap();
     _endHandle = beginReaderTextEditing(blockPaperGestures: true);
     widget.onWritingChanged?.call(true);
+    setState(() {});
   }
 
   void _handleMove(PointerMoveEvent event, Size size) {
@@ -1153,9 +1249,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                       isDense: true,
                       filled: true,
                       fillColor: tokens.paper0,
-                      contentPadding: const EdgeInsets.only(
-                        bottom: ScoreSpace.xs,
-                      ),
+                      isCollapsed: true,
+                      contentPadding: EdgeInsets.zero,
                       errorText: _error,
                       errorStyle: TextStyle(color: tokens.dangerInk),
                       border: InputBorder.none,
@@ -1182,7 +1277,11 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
 
   // Selection chrome adds breathing room without changing saved text geometry.
   Rect _controlFrame(Rect textFrame, TextAnnotation value, Size size) =>
-      textFrame.inflate(value.fontSizeFraction * size.shortestSide * .8);
+      textFrame.inflate(ScoreSpace.xs / _screenScale);
+
+  static const _actionBarWidth =
+      3 * ScoreLayout.textHandleHit + 4 * ScoreSpace.xs;
+  static const _actionBarHeight = ScoreLayout.textHandleHit + 2 * ScoreSpace.xs;
 
   Widget _handleOverlay(
     BuildContext overlayContext,
@@ -1257,6 +1356,17 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       rotation: value.rotation,
       scale: scale,
     );
+    _handleCentres = {
+      for (final entry in placements.entries)
+        entry.key: paper.localToGlobal(
+          rotateTextPoint(
+            entry.value.hitRect.center,
+            frame.center,
+            value.rotation,
+          ),
+        ),
+    };
+    _handleHitRadius = ScoreLayout.textHandleHit / 2 * overlayScale;
     final clipRect = visible;
     final screenCorners =
         [
@@ -1279,42 +1389,15 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       screenCorners.map((point) => point.dx).reduce(math.max),
       screenCorners.map((point) => point.dy).reduce(math.max),
     );
-    final actionBarHeight = math.min(44.0, clipRect.height);
-    final compact = DeviceLayoutScope.isCompact(context);
-    final actionBarWidth = math.min(
-      _editorOpen ? (compact ? 168.0 : 144.0) : (compact ? 216.0 : 168.0),
-      clipRect.width,
-    );
+    final actionBarHeight = _actionBarHeight;
+    final actionBarWidth = _actionBarWidth;
     Rect? actionBarRect;
     if ((_editorOpen || _selected != null) &&
-        actionBarWidth >= (_editorOpen ? 88 : 132) &&
-        actionBarHeight >= 44) {
-      final screenHandleRects = placements.values.map((placement) {
-        final corners =
-            [
-              placement.visualRect.topLeft,
-              placement.visualRect.topRight,
-              placement.visualRect.bottomLeft,
-              placement.visualRect.bottomRight,
-            ].map((point) {
-              final rotated = rotateTextPoint(
-                point,
-                frame.center,
-                value.rotation,
-              );
-              return overlay.globalToLocal(paper.localToGlobal(rotated));
-            }).toList();
-        return Rect.fromLTRB(
-          corners.map((point) => point.dx).reduce(math.min),
-          corners.map((point) => point.dy).reduce(math.min),
-          corners.map((point) => point.dx).reduce(math.max),
-          corners.map((point) => point.dy).reduce(math.max),
-        );
-      });
+        clipRect.width >= actionBarWidth &&
+        clipRect.height >= actionBarHeight) {
       actionBarRect = _findActionBarRect(
         viewport: clipRect,
         textFrame: screenFrame,
-        handleRects: screenHandleRects,
         size: Size(actionBarWidth, actionBarHeight),
       );
     }
@@ -1349,7 +1432,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
             top: actionBarRect.top,
             width: actionBarRect.width,
             height: actionBarRect.height,
-            child: _textActionBar(actionBarHeight),
+            child: _textActionBar(),
           ),
       ],
     );
@@ -1358,164 +1441,85 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   Rect? _findActionBarRect({
     required Rect viewport,
     required Rect textFrame,
-    required Iterable<Rect> handleRects,
     required Size size,
   }) {
     if (size.width > viewport.width || size.height > viewport.height) {
       return null;
     }
-    final preferredLeft = (textFrame.center.dx - size.width / 2)
+    final preferredLeft = textFrame.left
         .clamp(viewport.left, viewport.right - size.width)
         .toDouble();
-    final preferredTop = textFrame.top - size.height - 14 >= viewport.top
-        ? textFrame.top - size.height - 14
-        : textFrame.bottom + 14;
-    final preferred = Offset(
-      preferredLeft,
-      preferredTop
-          .clamp(viewport.top, viewport.bottom - size.height)
-          .toDouble(),
-    );
-    final textObstacle = textFrame.inflate(2);
-    final handles = handleRects.map((r) => r.inflate(2)).toList();
-    final xs = <double>{
-      viewport.left,
-      viewport.right - size.width,
-      preferredLeft,
-    };
-    final ys = <double>{
-      viewport.top,
-      viewport.bottom - size.height,
-      preferred.dy,
-    };
-    for (final obstacle in [textObstacle, ...handles]) {
-      xs.add(obstacle.left - size.width - 5);
-      xs.add(obstacle.right + 5);
-      ys.add(obstacle.top - size.height - 5);
-      ys.add(obstacle.bottom + 5);
-    }
-    final candidates = <(Rect, double, double, double)>[];
-    for (final x in xs) {
-      for (final y in ys) {
-        final left = x
-            .clamp(viewport.left, viewport.right - size.width)
-            .toDouble();
-        final top = y
-            .clamp(viewport.top, viewport.bottom - size.height)
-            .toDouble();
-        final candidate = Offset(left, top) & size;
-        double overlapArea(Rect obstacle) {
-          final intersection = candidate.intersect(obstacle);
-          return intersection.isEmpty
-              ? 0
-              : intersection.width * intersection.height;
-        }
-
-        final handleOverlap = handles.fold<double>(
-          0,
-          (total, handle) => total + overlapArea(handle),
-        );
-        final textOverlap = overlapArea(textObstacle);
-        final distance = (candidate.topLeft - preferred).distanceSquared;
-        candidates.add((candidate, handleOverlap, textOverlap, distance));
-      }
-    }
-    if (candidates.isEmpty) return null;
-    candidates.sort((a, b) {
-      final handles = a.$2.compareTo(b.$2);
-      if (handles != 0) return handles;
-      final text = a.$3.compareTo(b.$3);
-      if (text != 0) return text;
-      return a.$4.compareTo(b.$4);
-    });
-    return candidates.first.$1;
+    final gap = ScoreLayout.textActionGap;
+    final preferredTop = textFrame.top - size.height - gap >= viewport.top
+        ? textFrame.top - size.height - gap
+        : textFrame.bottom + gap;
+    return Offset(
+          preferredLeft,
+          preferredTop
+              .clamp(viewport.top, viewport.bottom - size.height)
+              .toDouble(),
+        ) &
+        size;
   }
 
-  Widget _textActionBar(double height) {
+  Widget _textActionBar() {
     final busy = _committing || _controls.saving;
     const tokens = ScoreTokens.light;
-    final labelStyle = DeviceLayoutScope.isCompact(context)
-        ? ScoreText.body.copyWith(fontWeight: FontWeight.w600)
-        : ScoreText.caption;
     Widget action(
       String name,
       String label,
+      ReaderGlyph glyph,
       VoidCallback? onPressed, {
       bool destructive = false,
-      bool primary = false,
-    }) => Expanded(
-      child: TextButton(
+    }) => SizedBox.square(
+      dimension: ScoreLayout.textHandleHit,
+      child: IconButton(
         key: ValueKey('text-action-$name'),
         onPressed: busy ? null : onPressed,
-        style: TextButton.styleFrom(
+        tooltip: label,
+        style: IconButton.styleFrom(
           foregroundColor: destructive ? tokens.dangerInk : tokens.ink900,
-          textStyle: Theme.of(context).textTheme.labelLarge?.merge(labelStyle),
-          minimumSize: Size(44, height),
+          minimumSize: const Size.square(ScoreLayout.textHandleHit),
           visualDensity: VisualDensity.standard,
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: EdgeInsets.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          splashFactory: NoSplash.splashFactory,
+          shape: const RoundedRectangleBorder(
+            borderRadius: ScoreRadius.controlAll,
+          ),
         ),
-        child: primary
-            ? Container(
-                height: 34,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: busy ? tokens.ink300 : tokens.pine,
-                  borderRadius: ScoreRadius.cardAll,
-                ),
-                child: Text(label, style: const TextStyle(color: Colors.white)),
-              )
-            : Text(label),
+        icon: ReaderIcon(glyph, size: ScoreLayout.iconVisual),
       ),
     );
     return Listener(
       key: _actionBarKey,
       onPointerDown: (_) => _controls.cancelPaperTap(),
       child: Material(
+        key: const ValueKey('text-context-actions'),
         color: tokens.paper0,
-        elevation: 1,
-        shadowColor: Colors.black12,
-        shape: RoundedRectangleBorder(
-          borderRadius: ScoreRadius.overlayAll,
-          side: BorderSide(color: tokens.paper2),
-        ),
-        child: Row(
-          children: _editorOpen
-              ? [
-                  action('cancel', '取消', _controls.onCancel),
-                  action(
-                    'done',
-                    '完成',
-                    () => unawaited(_controls.finish()),
-                    primary: true,
-                  ),
-                ]
-              : [
-                  action('edit', '编辑', _controls.onEdit),
-                  SizedBox(
-                    height: 18,
-                    child: VerticalDivider(
-                      width: 1,
-                      thickness: 1,
-                      color: tokens.paper2,
-                    ),
-                  ),
-                  action('copy', '复制', () => unawaited(_copySelection())),
-                  SizedBox(
-                    height: 18,
-                    child: VerticalDivider(
-                      width: 1,
-                      thickness: 1,
-                      color: tokens.paper2,
-                    ),
-                  ),
-                  action(
-                    'delete',
-                    '删除',
-                    () => unawaited(_controls.delete()),
-                    destructive: true,
-                  ),
-                ],
+        shape: RoundedRectangleBorder(borderRadius: ScoreRadius.cardAll),
+        child: Padding(
+          padding: const EdgeInsets.all(ScoreSpace.xs),
+          child: Row(
+            children: [
+              action('edit', '编辑', ReaderGlyph.pen, _controls.onEdit),
+              const SizedBox(width: ScoreSpace.xs),
+              action(
+                'copy',
+                '复制',
+                ReaderGlyph.copy,
+                () => unawaited(_copySelection()),
+              ),
+              const SizedBox(width: ScoreSpace.xs),
+              action(
+                'delete',
+                '删除',
+                ReaderGlyph.trash,
+                () => unawaited(_controls.delete()),
+                destructive: true,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1541,6 +1545,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
         overlay.globalToLocal(paper.localToGlobal(point)) - clipOrigin;
     final visualOffset =
         (placement.visualRect.topLeft - placement.hitRect.topLeft) * scale;
+    final active = _handle == handle;
     final label = switch (handle) {
       TextHandleKind.move => '移动文字',
       TextHandleKind.transform => '缩放并旋转文字',
@@ -1552,49 +1557,58 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
       TextHandleKind.width => ReaderGlyph.width,
     };
     return Positioned(
-      left: centre.dx - 22,
-      top: centre.dy - 22,
-      width: 44,
-      height: 44,
+      left: centre.dx - ScoreLayout.textHandleHit / 2,
+      top: centre.dy - ScoreLayout.textHandleHit / 2,
+      width: ScoreLayout.textHandleHit,
+      height: ScoreLayout.textHandleHit,
       child: Transform.rotate(
         angle: value.rotation,
-        child: Listener(
-          key: _handleKeys[handle],
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (e) => _handleDown(handle, e, size),
-          onPointerMove: (e) => _handleMove(e, size),
-          onPointerUp: (e) => _handleUp(e, size),
-          onPointerCancel: (_) => setState(_cancelHandle),
-          child: Tooltip(
-            message: label,
-            child: Semantics(
-              label: label,
-              button: true,
-              child: Stack(
-                children: [
-                  Positioned(
-                    left: visualOffset.dx,
-                    top: visualOffset.dy,
-                    width: 24,
-                    height: 24,
-                    child: DecoratedBox(
-                      key: ValueKey('text-handle-visual-${handle.name}'),
-                      decoration: BoxDecoration(
-                        color: ScoreTokens.light.paper0,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: ScoreTokens.light.pine,
-                          width: 1.4,
+        child: _NearestTextHandleTarget(
+          handle: handle,
+          centres: _handleCentres,
+          radius: _handleHitRadius,
+          child: Listener(
+            key: _handleKeys[handle],
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (e) => _handleDown(handle, e, size),
+            onPointerMove: (e) => _handleMove(e, size),
+            onPointerUp: (e) => _handleUp(e, size),
+            onPointerCancel: (_) => setState(_cancelHandle),
+            child: Tooltip(
+              message: label,
+              child: Semantics(
+                label: label,
+                button: true,
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: visualOffset.dx,
+                      top: visualOffset.dy,
+                      width: ScoreLayout.textHandleVisual,
+                      height: ScoreLayout.textHandleVisual,
+                      child: DecoratedBox(
+                        key: ValueKey('text-handle-visual-${handle.name}'),
+                        decoration: BoxDecoration(
+                          color: active
+                              ? ScoreTokens.light.pine
+                              : ScoreTokens.light.paper0,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: ScoreTokens.light.pine,
+                            width: 1,
+                          ),
+                        ),
+                        child: ReaderIcon(
+                          icon,
+                          size: 14,
+                          color: active
+                              ? ScoreTokens.light.paper0
+                              : ScoreTokens.light.pine,
                         ),
                       ),
-                      child: ReaderIcon(
-                        icon,
-                        size: 16,
-                        color: ScoreTokens.light.pine,
-                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -1615,6 +1629,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
             : null;
         final frame = value == null ? null : _frame(value, size);
         final bounds = value == null ? null : _bounds(value, size);
+        if (value == null) _handleCentres = const {};
         if (value != null) {
           _controls.reflectFontSize(this, value.fontSizeFraction);
         }
@@ -1705,8 +1720,8 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                         key: const ValueKey('text-control-frame'),
                         decoration: BoxDecoration(
                           border: Border.all(
-                            color: const Color(0xff236459),
-                            width: 1.2 / _screenScale,
+                            color: ScoreTokens.light.pine,
+                            width: 1 / _screenScale,
                           ),
                         ),
                       ),
@@ -1726,6 +1741,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
                               36 / _screenScale,
                           _rotationSnap.guideAngle!,
                           _screenScale,
+                          ScoreTokens.light.pine.withValues(alpha: .45),
                         ),
                       ),
                     ),
@@ -1752,16 +1768,70 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
   );
 }
 
+class _NearestTextHandleTarget extends SingleChildRenderObjectWidget {
+  const _NearestTextHandleTarget({
+    required this.handle,
+    required this.centres,
+    required this.radius,
+    required super.child,
+  });
+  final TextHandleKind handle;
+  final Map<TextHandleKind, Offset> centres;
+  final double radius;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderNearestTextHandleTarget(handle, centres, radius);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderNearestTextHandleTarget renderObject,
+  ) {
+    renderObject
+      ..handle = handle
+      ..centres = centres
+      ..radius = radius;
+  }
+}
+
+class _RenderNearestTextHandleTarget extends RenderProxyBox {
+  _RenderNearestTextHandleTarget(this.handle, this.centres, this.radius);
+  TextHandleKind handle;
+  Map<TextHandleKind, Offset> centres;
+  double radius;
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    if (hitTestTextHandle(
+          point: localToGlobal(position),
+          centres: centres,
+          radius: radius,
+        ) !=
+        handle) {
+      return false;
+    }
+    return super.hitTest(result, position: position);
+  }
+}
+
 class _RotationGuide extends CustomPainter {
-  const _RotationGuide(this.centre, this.length, this.angle, this.scale);
+  const _RotationGuide(
+    this.centre,
+    this.length,
+    this.angle,
+    this.scale,
+    this.color,
+  );
   final Offset centre;
   final double length, angle, scale;
+  final Color color;
   @override
   void paint(Canvas canvas, Size size) {
     final vertical = math.sin(angle).abs() > .5;
     final direction = vertical ? const Offset(0, 1) : const Offset(1, 0);
     final paint = Paint()
-      ..color = const Color(0xaa39796d)
+      ..color = color
       ..strokeWidth = 1 / scale;
     for (var distance = -length; distance < length; distance += 8 / scale) {
       canvas.drawLine(
@@ -1777,5 +1847,6 @@ class _RotationGuide extends CustomPainter {
       old.centre != centre ||
       old.length != length ||
       old.angle != angle ||
+      old.color != color ||
       old.scale != scale;
 }

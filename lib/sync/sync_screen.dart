@@ -2,12 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 
 import '../theme/tokens.dart';
+import '../theme/device_layout.dart';
+import '../theme/reader_icons.dart';
+import '../signing/signing_expiry_chip.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:reader_state/reader_state.dart';
+import 'package:library_sync/library_sync.dart' show OfflineRule;
 
 import '../reader/annotation_canvas.dart';
 import 'sync_controller.dart';
@@ -21,6 +25,58 @@ String _contentSize(int bytes) => bytes >= 1024 * 1024 * 1024
     ? '${(bytes / 1024).toStringAsFixed(1)} KB'
     : '$bytes B';
 
+Future<void> showDeviceSyncPanel(
+  BuildContext context, {
+  required SyncController controller,
+  required VoidCallback openOffline,
+  bool scanOnOpen = false,
+  bool syncOnOpen = false,
+}) {
+  final compact = DeviceLayoutScope.isCompact(context);
+  Widget content() => SyncScreen(
+    controller: controller,
+    openOffline: openOffline,
+    scanOnOpen: scanOnOpen,
+    syncOnOpen: syncOnOpen,
+    panel: true,
+  );
+  if (compact) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      constraints: const BoxConstraints(
+        maxWidth: double.infinity,
+        maxHeight: ScoreLayout.sheetMaxHeight,
+      ),
+      backgroundColor: ScoreTokens.of(context).paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(ScoreRadius.overlay),
+        ),
+      ),
+      builder: (_) => content(),
+    );
+  }
+  return showDialog<void>(
+    context: context,
+    builder: (_) => Dialog(
+      backgroundColor: ScoreTokens.of(context).paper0,
+      insetPadding: const EdgeInsets.all(ScoreSpace.lg),
+      shape: const RoundedRectangleBorder(borderRadius: ScoreRadius.overlayAll),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: ScoreLayout.sheetWidth,
+          maxHeight: ScoreLayout.sheetMaxHeight,
+        ),
+        child: content(),
+      ),
+    ),
+  );
+}
+
 class SyncScreen extends StatefulWidget {
   const SyncScreen({
     super.key,
@@ -28,11 +84,13 @@ class SyncScreen extends StatefulWidget {
     required this.openOffline,
     this.scanOnOpen = false,
     this.syncOnOpen = false,
+    this.panel = false,
   });
   final SyncController controller;
   final VoidCallback openOffline;
   final bool scanOnOpen;
   final bool syncOnOpen;
+  final bool panel;
   @override
   State<SyncScreen> createState() => _SyncScreenState();
 }
@@ -42,7 +100,12 @@ class _SyncScreenState extends State<SyncScreen> {
     text: widget.controller.computerAddress?.toString() ?? '',
   );
   final TextEditingController _code = TextEditingController();
+  final ScrollController _scroll = ScrollController();
   bool _scanning = false;
+  bool _catalogUpdating = false;
+  bool _diagnosticsOpen = false;
+  Object? _rangeSelection;
+  List<OfflineRule> _rangeRules = const [];
   String? _scanMessage;
   bool get _desktop =>
       defaultTargetPlatform != TargetPlatform.iOS &&
@@ -82,10 +145,21 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
+  Future<void> _refreshCatalog() async {
+    if (_catalogUpdating) return;
+    setState(() => _catalogUpdating = true);
+    try {
+      await widget.controller.refreshCatalog();
+    } finally {
+      if (mounted) setState(() => _catalogUpdating = false);
+    }
+  }
+
   @override
   void dispose() {
     _address.dispose();
     _code.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -93,311 +167,518 @@ class _SyncScreenState extends State<SyncScreen> {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.controller,
     builder: (context, _) {
-      final sync = widget.controller;
-      return Scaffold(
-        appBar: AppBar(title: const Text('无线同步')),
-        body: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            if (sync.initializationError != null)
-              _status(sync.initializationError!, error: true),
-            if (_desktop)
-              _card('连接我的 iPad', [
-                Text(
-                  sync.library.sources.isEmpty
-                      ? '请先添加谱库文件夹。'
-                      : '${sync.library.sources.length} 个谱库 · ${sync.library.sources.map((s) => s.name).join('、')}',
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  '电脑和iPad连接同一Wi-Fi。在iPad扫描下方二维码，以后保持电脑阅读器打开，点击“更新目录与所选内容”。',
-                ),
-                if (sync.serving && sync.pairingQr != null)
-                  Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 20),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 360),
-                        child: AspectRatio(
-                          aspectRatio: 1,
-                          child: QrImageView(
-                            data: sync.pairingQr!,
-                            backgroundColor: Colors.white,
-                            padding: const EdgeInsets.all(20),
+      final sync = widget.controller, tokens = ScoreTokens.of(context);
+      final compact = DeviceLayoutScope.isCompact(context);
+      final rangeRules = _downloadRangeRules(sync);
+      final content = Column(
+        children: [
+          SizedBox(
+            height: ScoreLayout.headerHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.xl),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '设备与同步',
+                      style: ScoreText.title.copyWith(color: tokens.ink900),
+                    ),
+                  ),
+                  SizedBox.square(
+                    dimension: compact
+                        ? ScoreLayout.touchTarget
+                        : ScoreLayout.desktopTarget,
+                    child: IconButton(
+                      tooltip: '关闭设备与同步',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const ReaderIcon(ReaderGlyph.close),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Divider(height: 0, thickness: 1, color: tokens.hair2),
+          Expanded(
+            child: CustomScrollView(
+              key: const PageStorageKey('device-sync-scroll'),
+              controller: _scroll,
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(
+                    ScoreSpace.xl,
+                    ScoreSpace.lg,
+                    ScoreSpace.xl,
+                    ScoreSpace.xl,
+                  ),
+                  sliver: SliverMainAxisGroup(
+                    slivers: [
+                      if (sync.initializationError != null)
+                        SliverToBoxAdapter(
+                          child: _status(
+                            sync.initializationError!,
+                            error: true,
+                          ),
+                        ),
+                      SliverToBoxAdapter(child: _connection(sync)),
+                      SliverToBoxAdapter(
+                        child: _section(
+                          SigningExpiryChip(
+                            section: true,
+                            pairedDevice: _desktop,
+                            pairedStatus: _desktop ? sync.signingStatus : null,
+                            unavailable: _desktop
+                                ? sync.signingUnavailable
+                                : null,
+                            onRefresh: _desktop
+                                ? sync.refreshSigningStatus
+                                : null,
+                            onRead: _desktop
+                                ? null
+                                : (expiry) => sync.reportLocalSigningExpiry(
+                                    expiry.expiration,
+                                  ),
                           ),
                         ),
                       ),
-                    ),
-                  ),
-                if (sync.serving && sync.pairingQr == null)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 20),
-                    child: Text(
-                      '暂未找到可用的Wi-Fi或有线网络。请将电脑连接到与iPad相同的网络，再点击“更新二维码”。',
-                    ),
-                  ),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton.icon(
-                      onPressed:
-                          sync.serverBusy || sync.initializationError != null
-                          ? null
-                          : () => unawaited(sync.connectMyIpad()),
-                      icon: Icon(
-                        sync.serverBusy ? Icons.hourglass_top : Icons.qr_code,
+                      SliverToBoxAdapter(
+                        child: _section(
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(child: _title('曲库目录')),
+                                  TextButton.icon(
+                                    onPressed: sync.busy || !sync.paired
+                                        ? null
+                                        : () => unawaited(_refreshCatalog()),
+                                    icon: _activityIcon(_catalogUpdating),
+                                    label: const Text('更新目录'),
+                                  ),
+                                ],
+                              ),
+                              _caption(
+                                sync.hasOfflineLibrary
+                                    ? '${sync.offlineCount} 份曲谱可离线阅读'
+                                    : '更新目录后选择需要下载的曲谱',
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                      label: Text(
-                        sync.serverBusy
-                            ? '正在准备连接…'
-                            : sync.serving
-                            ? '更新二维码'
-                            : '显示连接二维码',
+                      SliverToBoxAdapter(child: _section(_downloads(sync))),
+                      SliverList.builder(
+                        itemCount: rangeRules.length,
+                        itemBuilder: (_, index) =>
+                            _downloadRange(sync, rangeRules[index]),
                       ),
-                    ),
-                  ],
-                ),
-                if (sync.serverMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(sync.serverMessage!),
-                  ),
-                const SizedBox(height: 8),
-                const Text('用 iPad 扫码连接。'),
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('下次打开阅读器，自动连接我的 iPad'),
-                  value: sync.autoStartServer,
-                  onChanged: sync.serverBusy
-                      ? null
-                      : (value) => unawaited(sync.setAutoStartServer(value)),
-                ),
-                if (sync.serving)
-                  TextButton(
-                    onPressed: sync.serverBusy
-                        ? null
-                        : () => unawaited(sync.stopServer()),
-                    child: const Text('暂时停止连接'),
-                  ),
-              ]),
-            if (!_desktop)
-              _card(sync.paired ? '我的电脑已连接' : '扫描电脑二维码', [
-                Text(
-                  sync.paired ? '已记住电脑。' : '先在电脑阅读器首页点击“连接我的 iPad”，再扫描电脑上出现的二维码。只需操作一次，资料通过同一Wi-Fi传输。',
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed:
-                      sync.busy || _scanning || sync.initializationError != null
-                      ? null
-                      : () => unawaited(_scan()),
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: Text(
-                    _scanning
-                        ? '正在连接…'
-                        : sync.paired
-                        ? '重新扫描电脑二维码'
-                        : '扫描电脑二维码',
+                      if (sync.message != null)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: ScoreSpace.sm),
+                            child: _status(
+                              sync.message!,
+                              error:
+                                  sync.phase == SyncPhase.failed ||
+                                  sync.phase == SyncPhase.partial,
+                            ),
+                          ),
+                        ),
+                      if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
+                        SliverToBoxAdapter(
+                          child: _section(
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _title('有待处理的批注或曲单版本'),
+                                _caption(
+                                  '共 ${sync.workspace.store.snapshot.conflicts.length} 项待查看',
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute<void>(
+                                      builder: (_) =>
+                                          SyncConflictsScreen(controller: sync),
+                                    ),
+                                  ),
+                                  child: const Text('查看保留的版本'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      SliverToBoxAdapter(child: _section(_diagnostics(sync))),
+                    ],
                   ),
                 ),
-                if (_scanMessage != null) _status(_scanMessage!, error: true),
-              ]),
-            ExpansionTile(
-              title: const Text('高级诊断（通常不需要）'),
-              childrenPadding: const EdgeInsets.all(16),
-              children: [
-                if (_desktop) ...[
-                  for (final address in sync.addresses)
-                    SelectableText(address.toString()),
-                  if (sync.serving)
-                    SelectableText('临时配对码：${sync.pairingCode ?? ''}'),
-                ],
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _address,
-                  enabled: !sync.busy,
-                  keyboardType: TextInputType.url,
-                  autocorrect: false,
-                  decoration: const InputDecoration(
-                    labelText: '电脑地址与端口',
-                    hintText: 'http://192.168.1.8:50000',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _code,
-                  enabled: !sync.busy,
-                  keyboardType: TextInputType.number,
-                  maxLength: 8,
-                  decoration: const InputDecoration(
-                    labelText: '8位临时配对码',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                FilledButton(
-                  onPressed: sync.busy || sync.initializationError != null
-                      ? null
-                      : () => unawaited(sync.pair(_address.text, _code.text)),
-                  child: Text(sync.paired ? '重新配对' : '配对电脑'),
-                ),
-                if (sync.paired)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text('已保存连接：${sync.computerAddress}；重开后可直接同步。'),
-                  ),
               ],
             ),
-            _card('目录与离线内容', [
-              Text(
-                sync.hasOfflineLibrary
-                    ? '${sync.offlineCount} 份曲谱可用'
-                    : '更新目录后选择要下载的曲谱。',
+          ),
+        ],
+      );
+      final target = compact
+          ? ScoreLayout.touchTarget
+          : ScoreLayout.desktopTarget;
+      return Theme(
+        data: Theme.of(context).copyWith(
+          textButtonTheme: TextButtonThemeData(
+            style: TextButton.styleFrom(
+              minimumSize: Size(0, target),
+              foregroundColor: tokens.ink900,
+              textStyle: Theme.of(context).textTheme.labelLarge
+                  ?.merge(ScoreText.caption),
+              shape: const RoundedRectangleBorder(
+                borderRadius: ScoreRadius.controlAll,
               ),
-              Text(
-                '已选择 ${sync.selectedDownloadTotals.$1} 份曲谱 · ${_contentSize(sync.selectedDownloadTotals.$2)}',
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                children: [
-                  FilledButton.icon(
-                    onPressed: sync.hasSyncActivity || !sync.paired
-                        ? null
-                        : () => unawaited(sync.synchronize()),
-                    icon: const Icon(Icons.sync),
-                    label: const Text('更新目录与所选内容'),
-                  ),
-                  OutlinedButton(
-                    onPressed: sync.hasOfflineLibrary
-                        ? widget.openOffline
-                        : null,
-                    child: const Text('打开离线谱库'),
-                  ),
-                  if (sync.busy &&
-                      sync.backgroundPendingObjects == 0 &&
-                      (sync.phase == SyncPhase.transferring ||
-                          sync.phase == SyncPhase.merging))
-                    OutlinedButton(
-                      onPressed: sync.cancel,
-                      child: const Text('取消同步'),
-                    ),
-                  if (sync.backgroundPendingObjects > 0)
-                    OutlinedButton(
-                      onPressed: () =>
-                          unawaited(sync.pauseBackgroundDownloads()),
-                      child: const Text('暂停下载'),
-                    ),
-                  if (sync.backgroundPausedObjects > 0)
-                    OutlinedButton(
-                      onPressed: sync.busy
-                          ? null
-                          : () => unawaited(sync.resumeBackgroundDownloads()),
-                      child: const Text('继续下载'),
-                    ),
-                ],
-              ),
-              if (sync.hasSyncActivity)
-                const Padding(
-                  padding: EdgeInsets.only(top: 16),
-                  child: LinearProgressIndicator(),
-                ),
-              if (sync.phase == SyncPhase.transferring)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    sync.totalObjects == null
-                        ? '正在取得电脑谱库清单…'
-                        : '正在更新所选内容 · ${sync.processedObjects} / ${sync.totalObjects} 份',
-                  ),
-                ),
-              if (sync.backgroundPendingObjects > 0)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    '后台下载中 · 余 ${sync.backgroundPendingObjects} 份；切换应用或锁屏后由系统继续调度。',
-                  ),
-                ),
-              if (sync.backgroundPausedObjects > 0)
-                Text('已暂停 ${sync.backgroundPausedObjects} 份下载。'),
-              if (sync.backgroundFailedObjects > 0)
-                Text(
-                  sync.backgroundStorageBlocked
-                      ? '后台下载因存储空间或写入问题暂停，请释放空间后点击“继续下载”。'
-                      : '${sync.backgroundFailedObjects} 份后台下载未完成，请检查电脑与网络后重试同步。',
-                ),
-              if (sync.message != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: _status(sync.message!),
-                ),
-              const SizedBox(height: 10),
-              const SizedBox.shrink(),
-              TextButton(
-                onPressed: sync.busy || !sync.hasOfflineLibrary
-                    ? null
-                    : () => unawaited(sync.verifyOfflineLibrary()),
-                child: const Text('完整校验已下载文件'),
-              ),
-            ]),
-            if (sync.workspace.store.snapshot.conflicts.isNotEmpty)
-              _card('有待处理的批注或曲单版本', [
-                Text(
-                  '共 ${sync.workspace.store.snapshot.conflicts.length} 项待查看。',
-                ),
-                TextButton(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute<void>(
-                      builder: (_) => SyncConflictsScreen(controller: sync),
-                    ),
-                  ),
-                  child: const Text('查看保留的版本'),
-                ),
-              ]),
-            if (defaultTargetPlatform == TargetPlatform.iOS)
-              const Padding(
-                padding: EdgeInsets.all(12),
-                child: Text(
-                  '首次连接请允许本地网络访问。锁屏或切换应用后可继续下载，完成时间由系统调度；从多任务界面强制关闭应用会中断，重新打开后可继续。',
-                ),
-              ),
-          ],
+            ),
+          ),
+        ),
+        child: Material(
+          color: tokens.paper0,
+          child: widget.panel
+              ? content
+              : Scaffold(body: SafeArea(child: content)),
         ),
       );
     },
   );
 
-  Widget _card(String title, List<Widget> children) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 12),
-          ...children,
-        ],
-      ),
+  Widget _title(String text) => Text(
+    text,
+    style: ScoreText.body.copyWith(
+      color: ScoreTokens.of(context).ink900,
+      fontWeight: FontWeight.w500,
     ),
   );
+  Widget _caption(String text) => Text(
+    text,
+    style: ScoreText.caption.copyWith(color: ScoreTokens.of(context).ink500),
+  );
+  Widget _section(Widget child) => Container(
+    padding: const EdgeInsets.symmetric(vertical: ScoreSpace.lg),
+    decoration: BoxDecoration(
+      border: Border(top: BorderSide(color: ScoreTokens.of(context).hair2)),
+    ),
+    child: child,
+  );
+  Widget _activityIcon(bool active) => active
+      ? SizedBox.square(
+          dimension: ScoreLayout.iconVisual,
+          child: CircularProgressIndicator(
+            strokeWidth: ScoreLayout.iconStroke,
+            color: ScoreTokens.of(context).pine,
+          ),
+        )
+      : const ReaderIcon(ReaderGlyph.sync);
+
+  Widget _connection(SyncController sync) => Padding(
+    padding: const EdgeInsets.only(bottom: ScoreSpace.md),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            ReaderIcon(
+              ReaderGlyph.ipad,
+              size: ScoreSpace.xxl,
+              color: ScoreTokens.of(context).pine,
+            ),
+            const SizedBox(width: ScoreSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _desktop
+                        ? 'iPad · ${sync.signingStatus.value == null ? '等待连接' : '已配对'}'
+                        : 'Windows 电脑 · ${sync.paired ? '已配对' : '尚未配对'}',
+                    style: ScoreText.headline.copyWith(
+                      color: ScoreTokens.of(context).ink900,
+                    ),
+                  ),
+                  _caption(
+                    _desktop
+                        ? (sync.serving ? '同一局域网内可连接' : '显示二维码后由 iPad 扫码连接')
+                        : (sync.computerAddress?.toString() ?? '扫描电脑上的连接二维码'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: ScoreSpace.sm),
+        if (_desktop) ...[
+          if (sync.serving && sync.pairingQr != null)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: ScoreSpace.md),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: QrImageView(
+                      data: sync.pairingQr!,
+                      backgroundColor: Colors.white,
+                      padding: const EdgeInsets.all(ScoreSpace.md),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (sync.serving && sync.pairingQr == null)
+            _caption('暂未找到可用的局域网连接。连接同一网络后更新二维码。'),
+          TextButton.icon(
+            onPressed: sync.serverBusy || sync.initializationError != null
+                ? null
+                : () => unawaited(sync.connectMyIpad()),
+            icon: _activityIcon(sync.serverBusy),
+            label: Text(
+              sync.serverBusy
+                  ? '正在准备连接…'
+                  : sync.serving
+                  ? '更新二维码'
+                  : '显示连接二维码',
+            ),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: Text('下次自动连接我的 iPad', style: ScoreText.caption),
+            value: sync.autoStartServer,
+            onChanged: sync.serverBusy
+                ? null
+                : (value) => unawaited(sync.setAutoStartServer(value)),
+          ),
+          if (sync.serving)
+            TextButton(
+              onPressed: sync.serverBusy
+                  ? null
+                  : () => unawaited(sync.stopServer()),
+              child: const Text('暂时停止连接'),
+            ),
+          if (sync.serverMessage != null) _caption(sync.serverMessage!),
+        ] else ...[
+          TextButton.icon(
+            onPressed:
+                sync.busy || _scanning || sync.initializationError != null
+                ? null
+                : () => unawaited(_scan()),
+            icon: _activityIcon(_scanning),
+            label: Text(
+              _scanning
+                  ? '正在连接…'
+                  : sync.paired
+                  ? '重新扫描电脑二维码'
+                  : '扫描电脑二维码',
+            ),
+          ),
+          if (_scanMessage != null) _status(_scanMessage!, error: true),
+        ],
+      ],
+    ),
+  );
+
+  Widget _downloads(SyncController sync) {
+    final total = sync.totalObjects;
+    final label = sync.backgroundImporting
+        ? '正在保存下载内容'
+        : sync.backgroundPendingObjects > 0
+        ? '下载中 · 余 ${sync.backgroundPendingObjects} 份'
+        : sync.backgroundPausedObjects > 0
+        ? '已暂停 · ${sync.backgroundPausedObjects} 份'
+        : sync.phase == SyncPhase.transferring && !_catalogUpdating
+        ? (total == null ? '准备下载' : '下载中 · ${sync.processedObjects} / $total 份')
+        : '下载内容';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: _title(label)),
+            if (sync.backgroundPendingObjects > 0)
+              TextButton.icon(
+                onPressed: () => unawaited(sync.pauseBackgroundDownloads()),
+                icon: const ReaderIcon(ReaderGlyph.pause),
+                label: const Text('暂停'),
+              )
+            else if (sync.backgroundPausedObjects > 0)
+              TextButton.icon(
+                onPressed: sync.busy
+                    ? null
+                    : () => unawaited(sync.resumeBackgroundDownloads()),
+                icon: const ReaderIcon(ReaderGlyph.play),
+                label: const Text('继续'),
+              )
+            else if (sync.busy &&
+                !sync.committingLibrary &&
+                (sync.phase == SyncPhase.transferring ||
+                    sync.phase == SyncPhase.merging))
+              TextButton(onPressed: sync.cancel, child: const Text('取消'))
+            else if (sync.paired)
+              TextButton.icon(
+                onPressed: sync.hasSyncActivity
+                    ? null
+                    : () => unawaited(sync.synchronize()),
+                icon: const ReaderIcon(ReaderGlyph.downloadList),
+                label: const Text('下载所选'),
+              ),
+          ],
+        ),
+        _caption(
+          '已选择 ${sync.selectedDownloadTotals.$1} 份 · ${_contentSize(sync.selectedDownloadTotals.$2)}',
+        ),
+        if (sync.backgroundPendingObjects > 0 ||
+            (sync.busy && !_catalogUpdating)) ...[
+          const SizedBox(height: ScoreSpace.sm),
+          LinearProgressIndicator(
+            value: total != null && total > 0
+                ? (sync.processedObjects / total).clamp(0.0, 1.0)
+                : null,
+            minHeight: ScoreSpace.xs,
+          ),
+          const SizedBox(height: ScoreSpace.sm),
+        ],
+        _caption('已完成内容可离线阅读'),
+        if (sync.backgroundFailedObjects > 0)
+          _status(
+            sync.backgroundStorageBlocked
+                ? '存储空间或写入问题暂停了下载，请释放空间后继续。'
+                : '${sync.backgroundFailedObjects} 份下载未完成，请检查连接后重试。',
+            error: true,
+          ),
+        Wrap(
+          spacing: ScoreSpace.sm,
+          children: [
+            TextButton(
+              onPressed: sync.hasOfflineLibrary ? widget.openOffline : null,
+              child: const Text('打开离线曲库'),
+            ),
+            TextButton(
+              onPressed: sync.busy || !sync.hasOfflineLibrary
+                  ? null
+                  : () => unawaited(sync.verifyOfflineLibrary()),
+              child: const Text('完整校验'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  List<OfflineRule> _downloadRangeRules(SyncController sync) {
+    final selection = sync.collection?.selection;
+    if (!identical(selection, _rangeSelection)) {
+      _rangeSelection = selection;
+      _rangeRules =
+          selection?.rules
+              .where((rule) => rule.selected && rule.folder != null)
+              .toList(growable: false) ??
+          const [];
+    }
+    return _rangeRules;
+  }
+
+  Widget _downloadRange(SyncController sync, OfflineRule rule) => _section(
+    Builder(
+      builder: (context) {
+        final status = sync.folderOfflineStatus(
+          sourceId: rule.sourceId,
+          folder: rule.folder!,
+        );
+        final source = sync.offlineSources
+            .where((source) => source.id == rule.sourceId)
+            .firstOrNull;
+        final folder = rule.folder!.isEmpty
+            ? source?.name ?? '来源目录'
+            : rule.folder!.split('/').last;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const ReaderIcon(ReaderGlyph.folder),
+                const SizedBox(width: ScoreSpace.sm),
+                Expanded(child: _title(folder)),
+                _caption('${status.readable} / ${status.total}'),
+              ],
+            ),
+            const SizedBox(height: ScoreSpace.sm),
+            if (status.total > 0)
+              LinearProgressIndicator(
+                value: status.readable / status.total,
+                minHeight: ScoreSpace.xs,
+              ),
+            const SizedBox(height: ScoreSpace.sm),
+            _caption(
+              status.total > 0 && status.readable == status.total
+                  ? '已完成'
+                  : '已选择的下载范围',
+            ),
+          ],
+        );
+      },
+    ),
+  );
+
+  Widget _diagnostics(SyncController sync) => ExpansionTile(
+    onExpansionChanged: (value) => setState(() => _diagnosticsOpen = value),
+    trailing: ReaderIcon(
+      _diagnosticsOpen ? ReaderGlyph.chevronUp : ReaderGlyph.chevronDown,
+    ),
+    tilePadding: EdgeInsets.zero,
+    title: Text('连接与诊断', style: ScoreText.caption),
+    children: [
+      if (_desktop) ...[
+        for (final address in sync.addresses)
+          SelectableText(address.toString(), style: ScoreText.caption),
+        if (sync.serving)
+          SelectableText(
+            '临时配对码：${sync.pairingCode ?? ''}',
+            style: ScoreText.caption,
+          ),
+      ],
+      TextField(
+        controller: _address,
+        enabled: !sync.busy,
+        keyboardType: TextInputType.url,
+        autocorrect: false,
+        decoration: const InputDecoration(
+          labelText: '电脑地址与端口',
+          hintText: 'http://192.168.1.8:50000',
+        ),
+      ),
+      const SizedBox(height: ScoreSpace.sm),
+      TextField(
+        controller: _code,
+        enabled: !sync.busy,
+        keyboardType: TextInputType.number,
+        maxLength: 8,
+        decoration: const InputDecoration(labelText: '8位临时配对码'),
+      ),
+      TextButton(
+        onPressed: sync.busy || sync.initializationError != null
+            ? null
+            : () => unawaited(sync.pair(_address.text, _code.text)),
+        child: Text(sync.paired ? '重新配对' : '配对电脑'),
+      ),
+      if (defaultTargetPlatform == TargetPlatform.iOS)
+        _caption('首次连接请允许本地网络访问。后台下载由系统调度；强制关闭后需重新打开继续。'),
+    ],
+  );
+
   Widget _status(String message, {bool error = false}) => Container(
     width: double.infinity,
-    padding: const EdgeInsets.all(12),
+    padding: const EdgeInsets.all(ScoreSpace.sm),
     color: error
         ? ScoreTokens.of(context).dangerBg
-        : ScoreTokens.of(context).warnBg,
+        : ScoreTokens.of(context).paper1,
     child: Text(
       message,
-      style: TextStyle(
+      style: ScoreText.caption.copyWith(
         color: error
             ? ScoreTokens.of(context).dangerInk
-            : ScoreTokens.of(context).warnInk,
+            : ScoreTokens.of(context).ink700,
       ),
     ),
   );

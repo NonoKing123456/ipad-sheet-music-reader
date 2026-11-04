@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/device_layout.dart';
+import '../theme/tokens.dart';
 import 'reader_spreads.dart';
 
 bool get isMobileReader =>
@@ -19,7 +20,7 @@ bool get canPreviewReader => defaultTargetPlatform == TargetPlatform.windows;
 Color readerSurroundColor(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
     ? Colors.black
-    : Theme.of(context).colorScheme.surfaceContainerLowest;
+    : ScoreTokens.of(context).paper2;
 
 /// Root navigation visibility distinguishes opaque pages from local popups.
 class ReaderRouteVisibilityObserver extends NavigatorObserver
@@ -119,7 +120,6 @@ class _ReaderStageState extends State<ReaderStage>
   late bool _tools = !isMobileReader;
   bool? _lastCompact;
   Size? _viewport;
-  double _paperTopInset = 0;
   final _topKey = GlobalKey();
   EdgeInsets? _reportedObstruction;
   EdgeInsets? _reportedPanInsets;
@@ -211,7 +211,7 @@ class _ReaderStageState extends State<ReaderStage>
     widget.controller?._hide = _hideFromButton;
     _animation = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 200),
+      duration: ScoreMotion.panel,
       value: _tools ? 1 : 0,
     );
     _curve = CurvedAnimation(
@@ -339,19 +339,15 @@ class _ReaderStageState extends State<ReaderStage>
       _measurementScheduled = false;
       if (!mounted) return;
       final top = _topKey.currentContext?.findRenderObject() as RenderBox?;
-      final compact = DeviceLayoutScope.isCompact(context);
       final topHeight = top == null || !top.hasSize ? 0.0 : top.size.height;
-      final paperTop = compact ? topHeight : 0.0;
-      if ((_paperTopInset - paperTop).abs() > .5) {
-        setState(() => _paperTopInset = paperTop);
-      }
-      final obstruction = EdgeInsets.only(
-        top: compact ? topHeight * _curve.value : (_tools ? topHeight : 0),
-      );
-      if (obstruction != _reportedObstruction) {
-        _reportedObstruction = obstruction;
-      }
-      final panInsets = EdgeInsets.only(top: compact ? 0 : obstruction.top);
+      final obstruction = EdgeInsets.only(top: topHeight * _curve.value);
+      _reportedObstruction = obstruction;
+      // ReaderInput consumes screen coordinates and subtracts its viewport's
+      // actual origin, including native safe areas and the paper gutter.
+      final origin = top == null || !top.hasSize
+          ? 0.0
+          : top.localToGlobal(Offset.zero).dy;
+      final panInsets = EdgeInsets.only(top: _tools ? origin + topHeight : 0);
       if (panInsets != _reportedPanInsets) {
         _reportedPanInsets = panInsets;
         widget.onObstructionChanged?.call(panInsets);
@@ -371,11 +367,10 @@ class _ReaderStageState extends State<ReaderStage>
       key: const ValueKey('reader-surround'),
       color: readerSurroundColor(context),
       child: SafeArea(
-        bottom: false,
+        maintainBottomViewPadding: true,
         child: LayoutBuilder(
           builder: (context, constraints) {
             final size = constraints.biggest;
-            final compact = DeviceLayoutScope.isCompact(context);
             _measureObstruction();
             if (_viewport != null && _viewport != size) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -388,17 +383,7 @@ class _ReaderStageState extends State<ReaderStage>
               key: const ValueKey('reading-viewport'),
               fit: StackFit.expand,
               children: [
-                AnimatedBuilder(
-                  animation: _animation,
-                  builder: (context, child) => Padding(
-                    key: const ValueKey('reader-paper-top-spacer'),
-                    padding: EdgeInsets.only(
-                      top: compact ? _paperTopInset * _curve.value : 0,
-                    ),
-                    child: child,
-                  ),
-                  child: content,
-                ),
+                content,
                 Positioned(
                   left: 0,
                   right: 0,
@@ -419,8 +404,13 @@ class _ReaderStageState extends State<ReaderStage>
                 ),
                 if (widget.hasReadablePage && widget.notices.isNotEmpty)
                   Positioned(
-                    top: _tools ? (_reportedObstruction?.top ?? 120) + 8 : 8,
-                    right: 8,
+                    top: _tools
+                        ? (_reportedObstruction?.top ??
+                                  ScoreLayout.readerHeaderHeight +
+                                      ScoreLayout.annotationBarHeight) +
+                              ScoreSpace.sm
+                        : ScoreSpace.sm,
+                    right: ScoreSpace.sm,
                     child: SafeArea(
                       child: ReaderStatusButton(
                         label: widget.statusLabel,
@@ -430,11 +420,11 @@ class _ReaderStageState extends State<ReaderStage>
                   ),
                 if (widget.loading)
                   const Positioned(
-                    right: 18,
-                    bottom: 18,
+                    right: ScoreLayout.readerStatusInset,
+                    bottom: ScoreLayout.readerStatusInset,
                     child: IgnorePointer(
                       child: SizedBox.square(
-                        dimension: 18,
+                        dimension: ScoreLayout.readerStatusIndicatorSize,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
                     ),
@@ -447,7 +437,9 @@ class _ReaderStageState extends State<ReaderStage>
                     top: false,
                     child: _animatedTools(
                       Padding(
-                        padding: const EdgeInsets.only(bottom: 18),
+                        padding: const EdgeInsets.only(
+                          bottom: ScoreLayout.dotsBottom,
+                        ),
                         child: widget.bottom,
                       ),
                       const Offset(0, 1),
@@ -465,14 +457,18 @@ class _ReaderStageState extends State<ReaderStage>
     ignoring: !_tools,
     child: ExcludeFocus(
       excluding: !_tools,
-      child: FadeTransition(
-        opacity: _curve,
-        child: SlideTransition(
-          position: Tween<Offset>(
-            begin: from,
-            end: Offset.zero,
-          ).animate(_curve),
-          child: child,
+      child: ExcludeSemantics(
+        excluding: !_tools,
+        child: FadeTransition(
+          opacity: _curve,
+          child: AnimatedBuilder(
+            animation: _curve,
+            child: child,
+            builder: (context, child) => Transform.translate(
+              offset: from * (ScoreSpace.sm * (1 - _curve.value)),
+              child: child,
+            ),
+          ),
         ),
       ),
     ),

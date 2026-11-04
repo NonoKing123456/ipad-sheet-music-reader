@@ -1,10 +1,12 @@
 import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
-import 'page_count_service.dart';
+import 'library_widgets.dart';
+import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
-import 'package:library_sync/library_sync.dart' show PageMetadataKey;
+import 'package:library_sync/library_sync.dart'
+    show PageMetadataKey, CatalogSourceBinding;
 
 import 'dart:async';
 import 'dart:convert';
@@ -36,7 +38,7 @@ import '../theme/device_layout.dart';
 import '../theme/tokens.dart';
 import '../sharing/score_share.dart';
 
-const sidebarWidth = 260.0;
+const sidebarWidth = ScoreLayout.sidebarWidth;
 const dividerWidth = 1.0;
 
 Future<String> _hashExternalFile(String path) async =>
@@ -48,44 +50,16 @@ class _ExternalHashRequest {
   Future<String> call() => _hashExternalFile(path);
 }
 
-/// The host library shows local file types without offline download status.
+/// Host files never show replica availability badges.
 class _HostLibraryIcon extends StatelessWidget {
   const _HostLibraryIcon({required this.path}) : isFolder = false;
   const _HostLibraryIcon.folder() : path = '', isFolder = true;
-
   final String path;
   final bool isFolder;
-
   @override
-  Widget build(BuildContext context) {
-    final image = const {
-      '.jpg',
-      '.jpeg',
-      '.png',
-      '.webp',
-    }.contains(p.extension(path).toLowerCase());
-    return SizedBox(
-      width: 44,
-      height: 44,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          ScoreSpace.xs,
-          ScoreSpace.xs,
-          ScoreSpace.sm,
-          ScoreSpace.sm,
-        ),
-        child: Icon(
-          isFolder
-              ? Icons.folder_outlined
-              : image
-              ? Icons.image_outlined
-              : Icons.description_outlined,
-          size: 32,
-          color: ScoreTokens.of(context).ink500,
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => isFolder
+      ? const ScoreFileIcon.folder(showBadge: false)
+      : ScoreFileIcon(path: path, showBadge: false);
 }
 
 class LibraryScreen extends StatefulWidget {
@@ -111,12 +85,23 @@ class _LibraryScreenState extends State<LibraryScreen>
   final TextEditingController _search = TextEditingController();
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
+  bool _setListsOpen = false;
+  String? _setListId;
+  bool _setListCreate = false;
+  int _setListEntry = 0;
   bool _directoryMutation = false;
   DesktopNavigationHistory? _history;
   final Set<String> _collapsedFolders = {};
+  final Set<String> _knownTreeFolders = {};
+  LibrarySnapshot? _countSnapshot;
+  List<String>? _countFolders;
+  String? _countSource;
+  final Map<String, int> _folderCounts = {};
   List<String>? _treeFolders;
   FolderHierarchy? _hierarchy;
   List<FolderTreeRow>? _treeRows;
+  Object? _navEntriesKey;
+  List<LibraryNavEntry> _navEntries = const [];
   String? _initializationError;
   ReaderWorkspace? _workspace;
   bool _openingSetList = false;
@@ -127,6 +112,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   List<ScoreCatalogEntry> _setListCatalog = const [];
   SyncController? _sync;
   Future<SyncController>? _syncFuture;
+  SyncController? _setListSync;
   bool get _canProvideLibrary =>
       defaultTargetPlatform != TargetPlatform.iOS &&
       defaultTargetPlatform != TargetPlatform.android;
@@ -203,6 +189,8 @@ class _LibraryScreenState extends State<LibraryScreen>
       library.query,
       library.searchCurrentFolder,
       _searchOpen,
+      _setListsOpen,
+      _setListId,
     );
     _history?.directory(route, state, () {
       if (!mounted) return;
@@ -214,6 +202,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       setState(() {
         _searchOpen = state.$5;
         _search.text = state.$3;
+        _setListsOpen = state.$6;
+        _setListId = state.$7;
+        _setListCreate = false;
+        _setListEntry++;
       });
       _searchFocus.unfocus();
       _directoryMutation = false;
@@ -247,7 +239,11 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _openSearch() {
-    setState(() => _searchOpen = true);
+    setState(() {
+      _searchOpen = true;
+      _setListsOpen = false;
+      _setListId = null;
+    });
     _recordDirectory();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _searchFocus.requestFocus();
@@ -264,6 +260,16 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   KeyEventResult _searchKey(KeyEvent event) {
+    if (mounted &&
+        _searchOpen &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        (!_search.value.composing.isValid ||
+            _search.value.composing.isCollapsed)) {
+      _closeSearch();
+      return KeyEventResult.handled;
+    }
     if (mounted &&
         (ModalRoute.of(context)?.isCurrent ?? true) &&
         event is KeyDownEvent &&
@@ -370,6 +376,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   void _folder(String folder) {
+    _setListsOpen = false;
+    _setListId = null;
+    _collapsedFolders.removeWhere(
+      (path) => folder == path || folder.startsWith('$path/'),
+    );
+    _treeRows = null;
     _directoryMutation = true;
     _searchOpen = false;
     _searchFocus.unfocus();
@@ -383,6 +395,8 @@ class _LibraryScreenState extends State<LibraryScreen>
   Future<void> _openEntry(LibraryEntry entry) async {
     if (_openingReader) return;
     _openingReader = true;
+    final savedQuery = _searchOpen ? _search.text : null;
+    var opened = false;
     try {
       final library = _library!;
       final workspace = await _prepareReader();
@@ -392,6 +406,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         _message('曲谱暂不可读，请刷新谱库。');
         return;
       }
+      opened = true;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => LibraryReaderScreen(
@@ -408,6 +423,14 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (mounted) _message('无法打开批注数据，请检查应用存储。');
     } finally {
       _openingReader = false;
+      if (mounted && opened && savedQuery != null) {
+        setState(() {
+          _searchOpen = true;
+          _search.text = savedQuery;
+        });
+        _library?.setQuery(savedQuery);
+        _recordDirectory(replaceSearch: true);
+      }
     }
   }
 
@@ -527,40 +550,70 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   })();
 
-  Future<void> _openSetLists() async {
+  Future<void> _openSetLists({
+    String? initialListId,
+    bool initialCreate = false,
+  }) async {
     if (_openingReader) return;
     _openingReader = true;
     try {
-      final workspace = await _prepareReader();
+      await _prepareReader();
       final offline = !_canProvideLibrary || _library?.rootPath == null;
       final sync = offline ? await _prepareSync() : null;
       if (!mounted) return;
-      await Navigator.push(
-        context,
-        MaterialPageRoute<void>(
-          builder: (_) => SetListsScreen(
-            workspace: workspace,
-            locate: sync?.locateOffline ?? _locate,
-            targets: sync == null ? _targets : () => sync.offlineTargets,
-            catalog: sync == null
-                ? _catalogEntries
-                : () => sync.offlineScoreCatalog,
-            prepare: sync == null ? _prepareScores : sync.prepareOfflineScores,
-            preparationLabel: sync == null ? '准备本曲单' : '下载本曲单缺少内容',
-            preparationNotice: sync == null
-                ? '只准备本曲单所需的本机文件。'
-                : '需要电脑在线。离线时会记住所选曲目，连接后再准备。',
-            loader: sync == null ? _loadLocalTarget : null,
-            sourceChanges: sync ?? _library,
-          ),
-        ),
-      );
+      setState(() {
+        _setListSync = sync;
+        _setListsOpen = true;
+        _setListId = initialListId;
+        _setListCreate = initialCreate;
+        _setListEntry++;
+      });
+      _searchFocus.unfocus();
+      _recordDirectory();
     } catch (failure, stack) {
       debugPrint('READER workspace_failed: $failure\n$stack');
       if (mounted) _message('批注和曲单数据暂时无法打开。请检查应用数据目录后重试。');
     } finally {
       _openingReader = false;
     }
+  }
+
+  void _leaveSetLists() {
+    setState(() {
+      _setListsOpen = false;
+      _setListId = null;
+      _setListCreate = false;
+    });
+    _recordDirectory();
+  }
+
+  Widget _embeddedSetLists() {
+    final sync = _setListSync;
+    return SetListsScreen(
+      key: ValueKey(('library-setlists', _setListEntry)),
+      workspace: _workspace!,
+      embedded: true,
+      initialListId: _setListId,
+      initialCreate: _setListCreate,
+      pageCounts: (sync ?? _sync)?.pageCounts,
+      onBack: _leaveSetLists,
+      onSelectionChanged: (id) {
+        _setListId = id;
+        _setListCreate = false;
+        _recordDirectory();
+        setState(() {});
+      },
+      locate: sync?.locateOffline ?? _locate,
+      targets: sync == null ? _targets : () => sync.offlineTargets,
+      catalog: sync == null ? _catalogEntries : () => sync.offlineScoreCatalog,
+      prepare: sync == null ? _prepareScores : sync.prepareOfflineScores,
+      preparationLabel: sync == null ? '准备本曲单' : '下载本曲单缺少内容',
+      preparationNotice: sync == null
+          ? '只准备本曲单所需的本机文件。'
+          : '需要电脑在线。离线时会记住所选曲目，连接后再准备。',
+      loader: sync == null ? _loadLocalTarget : null,
+      sourceChanges: sync ?? _library,
+    );
   }
 
   Future<SyncController> _prepareSync() => _syncFuture ??= (() async {
@@ -587,16 +640,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       final sync = await _prepareSync();
       if (!mounted) return;
       if (_canProvideLibrary) unawaited(sync.connectMyIpad());
-      await Navigator.push(
+      await showDeviceSyncPanel(
         context,
-        MaterialPageRoute<void>(
-          builder: (_) => SyncScreen(
-            controller: sync,
-            openOffline: () => unawaited(_openOffline()),
-            scanOnOpen: scan,
-            syncOnOpen: syncNow,
-          ),
-        ),
+        controller: sync,
+        openOffline: () => unawaited(_openOffline()),
+        scanOnOpen: scan,
+        syncOnOpen: syncNow,
       );
     } catch (_) {
       if (mounted) _message('同步资料暂时无法打开，请检查应用数据目录。');
@@ -626,7 +675,6 @@ class _LibraryScreenState extends State<LibraryScreen>
         return OfflineLibraryScreen(controller: sync, isHome: true);
       }
       return Scaffold(
-        appBar: AppBar(title: const Text('曲谱库')),
         body: Center(
           child: _initializationError == null
               ? const CircularProgressIndicator()
@@ -635,162 +683,261 @@ class _LibraryScreenState extends State<LibraryScreen>
       );
     }
     final library = _library;
+    final ipad = DeviceLayoutScope.isCompact(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide =
-            !DeviceLayoutScope.isCompact(context) &&
-            constraints.maxWidth >= 850;
+            library?.rootPath != null &&
+            constraints.maxWidth >=
+                (ipad
+                    ? ScoreLayout.ipadSidebarMin
+                    : ScoreLayout.windowsSidebarMin);
         return Scaffold(
-          appBar: AppBar(
-            title: wide
-                ? Row(
-                    children: [
-                      const SizedBox(
-                        width: sidebarWidth + dividerWidth,
-                        child: Text(
-                          '曲谱库',
-                          style: TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                      if (_searchOpen)
-                        Expanded(
-                          child: DirectorySearchField(
-                            controller: _search,
-                            focusNode: _searchFocus,
-                            onChanged: (text) => library?.setQuery(text),
-                          ),
-                        ),
-                    ],
-                  )
-                : Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: _searchOpen
-                            ? DirectorySearchField(
-                                controller: _search,
-                                focusNode: _searchFocus,
-                                onChanged: (text) => library?.setQuery(text),
-                              )
-                            : const Text(
-                                '曲谱库',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(fontWeight: FontWeight.w600),
+          drawer: !wide && library?.rootPath != null
+              ? Drawer(
+                  width: ScoreLayout.drawerWidth,
+                  child: SafeArea(child: _sidebar(library!)),
+                )
+              : null,
+          body: SafeArea(
+            child: Row(
+              children: [
+                if (wide && library?.rootPath != null)
+                  SizedBox(width: sidebarWidth, child: _sidebar(library!)),
+                Expanded(
+                  child: _setListsOpen && _workspace != null
+                      ? _embeddedSetLists()
+                      : Column(
+                          children: [
+                            Builder(
+                              builder: (headerContext) =>
+                                  _header(headerContext, library, wide),
+                            ),
+                            if (!wide &&
+                                ipad &&
+                                library != null &&
+                                library.sources.isNotEmpty)
+                              SizedBox(
+                                height: ScoreLayout.sourceStripHeight,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: ScoreLayout.listMargin,
+                                  ),
+                                  itemCount: library.sources.length,
+                                  separatorBuilder: (_, _) =>
+                                      const SizedBox(width: 8),
+                                  itemBuilder: (_, index) {
+                                    final source = library.sources[index];
+                                    return Center(
+                                      child: TextButton(
+                                        onPressed: () =>
+                                            _selectSource(library, source.id),
+                                        style: TextButton.styleFrom(
+                                          backgroundColor:
+                                              source.id ==
+                                                  library.selectedSourceId
+                                              ? ScoreTokens.of(context).pineWash
+                                              : ScoreTokens.of(context).paper0,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 16,
+                                          ),
+                                          minimumSize: const Size(0, 40),
+                                          shape: const RoundedRectangleBorder(
+                                            borderRadius:
+                                                ScoreRadius.controlAll,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          source.name,
+                                          style: ScoreText.caption.copyWith(
+                                            color:
+                                                source.id ==
+                                                    library.selectedSourceId
+                                                ? ScoreTokens.of(context).pine
+                                                : ScoreTokens.of(context)
+                                                      .ink700,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
                               ),
-                      ),
-                    ],
-                  ),
-            actions: [
-              if (defaultTargetPlatform == TargetPlatform.windows)
-                IconButton(
-                  key: const ValueKey('ipad-layout-toggle'),
-                  tooltip: DeviceLayoutScope.isSimulatedIpad(context)
-                      ? '返回桌面布局'
-                      : '模拟 iPad 界面',
-                  icon: Icon(
-                    DeviceLayoutScope.isSimulatedIpad(context)
-                        ? Icons.desktop_windows_outlined
-                        : Icons.tablet_mac_outlined,
-                  ),
-                  onPressed: DeviceLayoutScope.maybeOf(context)?.toggle,
-                ),
-              IconButton(
-                tooltip: _searchOpen ? '关闭搜索' : '搜索',
-                icon: Icon(_searchOpen ? Icons.close : Icons.search),
-                onPressed: _searchOpen ? _closeSearch : _openSearch,
-              ),
-              const ThemeAction(),
-              IconButton(
-                tooltip: '刷新谱库',
-                icon: const Icon(Icons.refresh),
-                onPressed: library?.rootPath == null || library!.scanning
-                    ? null
-                    : () => unawaited(library.rescan()),
-              ),
-              if (wide && !_searchOpen) ...[
-                IconButton(
-                  tooltip: '无线同步 / 连接电脑',
-                  icon: const Icon(Icons.wifi),
-                  onPressed: library?.initialized == true
-                      ? () => unawaited(_openSync())
-                      : null,
-                ),
-                IconButton(
-                  tooltip: '曲单',
-                  icon: const Icon(Icons.queue_music),
-                  onPressed: library?.initialized == true
-                      ? _openSetLists
-                      : null,
-                ),
-                IconButton(
-                  tooltip: '打开单份曲谱',
-                  onPressed: _openSingle,
-                  icon: const Icon(Icons.description_outlined),
+                            Expanded(
+                              child: library == null
+                                  ? Center(
+                                      child: _initializationError == null
+                                          ? const CircularProgressIndicator()
+                                          : Text(_initializationError!),
+                                    )
+                                  : !library.initialized
+                                  ? const Center(
+                                      child: CircularProgressIndicator(),
+                                    )
+                                  : library.rootPath == null
+                                  ? _welcome(library)
+                                  : Listener(
+                                      behavior: HitTestBehavior.translucent,
+                                      onPointerUp: (_) => scheduleMicrotask(() {
+                                        if (mounted &&
+                                            _searchOpen &&
+                                            (ModalRoute.of(context)
+                                                    ?.isCurrent ??
+                                                true)) {
+                                          _closeSearch();
+                                        }
+                                      }),
+                                      child: _content(library, wide: wide),
+                                    ),
+                            ),
+                          ],
+                        ),
                 ),
               ],
-              PopupMenuButton<String>(
-                tooltip: '更多',
-                onSelected: (value) {
-                  switch (value) {
-                    case 'add':
-                      unawaited(_selectRoot());
-                    case 'single':
-                      unawaited(_openSingle());
-                    case 'sync':
-                      unawaited(_openSync());
-                    case 'offline':
-                      unawaited(_openOffline());
-                    case 'lists':
-                      _openSetLists();
-                    case 'verify':
-                      unawaited(library?.rescan(verifyAll: true));
-                  }
-                },
-                itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'add', child: Text('添加谱库文件夹')),
-                  const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
-                  const PopupMenuItem(value: 'sync', child: Text('连接我的 iPad')),
-                  const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
-                  const PopupMenuItem(value: 'lists', child: Text('曲单')),
-                  PopupMenuItem(
-                    value: 'verify',
-                    enabled: library?.rootPath != null && !library!.scanning,
-                    child: const Text('完整校验此谱库内容'),
-                  ),
-                ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _selectSource(LibraryController library, String id) {
+    _setListsOpen = false;
+    _setListId = null;
+    _directoryMutation = true;
+    _search.clear();
+    _searchOpen = false;
+    _searchFocus.unfocus();
+    library.setSource(id);
+    _directoryMutation = false;
+    _recordDirectory();
+  }
+
+  Widget _header(
+    BuildContext headerContext,
+    LibraryController? library,
+    bool wide,
+  ) {
+    return SizedBox(
+      height: ScoreLayout.headerHeight,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: ScoreLayout.listMargin),
+        child: Row(
+          children: [
+            if (!wide) ...[
+              LibraryIconButton(
+                glyph: ReaderGlyph.list,
+                label: '打开来源',
+                onPressed: library?.rootPath == null
+                    ? null
+                    : () => Scaffold.of(headerContext).openDrawer(),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: _searchOpen
+                  ? DirectorySearchField(
+                      controller: _search,
+                      focusNode: _searchFocus,
+                      onChanged: (text) => library?.setQuery(text),
+                    )
+                  : wide && library?.rootPath != null
+                  ? DirectoryBreadcrumbs(
+                      rootLabel: library!.selectedSource?.name ?? '谱库',
+                      currentPath: library.currentFolder,
+                      onNavigate: _folder,
+                    )
+                  : Text(
+                      '曲谱库',
+                      style: ScoreText.title.copyWith(
+                        color: ScoreTokens.of(context).ink900,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: 8),
+            LibraryIconButton(
+              glyph: _searchOpen ? ReaderGlyph.close : ReaderGlyph.search,
+              label: _searchOpen ? '关闭搜索' : '搜索',
+              onPressed: _searchOpen ? _closeSearch : _openSearch,
+            ),
+            const SizedBox(width: 8),
+            const ThemeAction(),
+            if (!wide) ...[
+              const SizedBox(width: 8),
+              LibraryIconButton(
+                glyph: ReaderGlyph.downloadList,
+                label: '曲单',
+                onPressed: _openSetLists,
+              ),
+              const SizedBox(width: 8),
+              _deviceSummary(compact: true),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _deviceSummary({bool compact = false}) {
+    final t = ScoreTokens.of(context);
+    final sync = _sync;
+    final signing = SigningExpiryChip(
+      summaryOnly: true,
+      pairedDevice: true,
+      pairedStatus: sync?.signingStatus,
+      unavailable: sync?.signingUnavailable,
+      onRefresh: sync?.refreshSigningStatus,
+      compact: compact,
+    );
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: compact ? 160 : double.infinity,
+        minHeight: compact ? ScoreLayout.touchTarget : 0,
+      ),
+      child: InkWell(
+        onTap: () => unawaited(_openSync()),
+        borderRadius: ScoreRadius.controlAll,
+        child: Padding(
+          padding: compact
+              ? const EdgeInsets.symmetric(horizontal: ScoreSpace.md)
+              : const EdgeInsets.all(ScoreSpace.md),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              sync?.hasSyncActivity == true
+                  ? const LibrarySyncActivityIcon()
+                  : ReaderIcon(ReaderGlyph.sync, color: t.pine),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!compact)
+                      Text(
+                        sync?.signingStatus.value != null
+                            ? 'iPad · 已配对'
+                            : sync?.serving == true
+                            ? 'iPad · 等待连接'
+                            : '连接我的 iPad',
+                        style: ScoreText.body.copyWith(color: t.ink900),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    IgnorePointer(child: signing),
+                    if (!compact && sync?.hasSyncActivity == true)
+                      Text(
+                        '同步中',
+                        style: ScoreText.caption.copyWith(color: t.ink500),
+                      ),
+                  ],
+                ),
               ),
             ],
           ),
-          drawer: !wide && library?.rootPath != null
-              ? Drawer(child: SafeArea(child: _sidebar(library!)))
-              : null,
-          body: library == null
-              ? Center(
-                  child: _initializationError == null
-                      ? const CircularProgressIndicator()
-                      : Text(_initializationError!),
-                )
-              : !library.initialized
-              ? const Center(child: CircularProgressIndicator())
-              : library.rootPath == null
-              ? _welcome(library)
-              : Row(
-                  children: [
-                    if (wide)
-                      SizedBox(width: sidebarWidth, child: _sidebar(library)),
-                    if (wide) const VerticalDivider(width: dividerWidth),
-                    Expanded(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.translucent,
-                        onTap: _searchOpen ? _closeSearch : null,
-                        child: _content(library),
-                      ),
-                    ),
-                  ],
-                ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -803,9 +950,9 @@ class _LibraryScreenState extends State<LibraryScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                Icons.library_music_outlined,
-                size: 64,
+              ReaderIcon(
+                ReaderGlyph.book,
+                size: ScoreSpace.huge,
                 color: ScoreTokens.of(context).pine,
               ),
               const SizedBox(height: ScoreSpace.xl),
@@ -826,7 +973,7 @@ class _LibraryScreenState extends State<LibraryScreen>
               const SizedBox(height: ScoreSpace.xl),
               FilledButton.icon(
                 onPressed: _selectRoot,
-                icon: const Icon(Icons.folder_open_outlined),
+                icon: const ReaderIcon(ReaderGlyph.folder),
                 label: const Text('添加谱库文件夹'),
               ),
               if (library.error != null)
@@ -848,226 +995,207 @@ class _LibraryScreenState extends State<LibraryScreen>
     final folders = library.folders;
     if (!identical(folders, _treeFolders)) {
       _treeFolders = folders;
+      for (final path in folders) {
+        if (_knownTreeFolders.add(path) &&
+            path.isNotEmpty &&
+            library.currentFolder != path &&
+            !library.currentFolder.startsWith('$path/')) {
+          _collapsedFolders.add(path);
+        }
+      }
       _hierarchy = FolderHierarchy(folders);
       _treeRows = null;
     }
     final visible = _treeRows ??= _hierarchy!.visibleRows(_collapsedFolders);
-    final rows = [
-      for (final source in library.sources) ...[
-        (source, null as FolderTreeRow?),
-        if (source.id == library.selectedSourceId)
-          for (final row in visible) (source, row),
-      ],
-    ];
-    return Material(
-      color: ScoreTokens.of(context).paper2,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              ScoreSpace.lg,
-              ScoreSpace.xl,
-              ScoreSpace.lg,
-              ScoreSpace.lg,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '文件夹',
-                  style: ScoreText.body.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: ScoreSpace.sm),
-                Text(
-                  '${library.selectedSourceCount} 份曲谱 · ${library.folders.length - 1} 个文件夹',
-                  style: ScoreText.caption.copyWith(
-                    color: ScoreTokens.of(context).ink500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              key: const PageStorageKey('library-folder-tree'),
-              itemCount: rows.length,
-              itemBuilder: (context, index) {
-                final (source, row) = rows[index];
-                if (row != null) {
-                  return _folderNode(library, row.path, row.depth);
-                }
-                return ListTile(
-                  key: ValueKey('source-${source.id}'),
-                  leading: const _HostLibraryIcon.folder(),
-                  selected:
-                      source.id == library.selectedSourceId &&
-                      library.currentFolder.isEmpty,
-                  title: Text(
-                    source.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: source.online ? null : const Text('文件夹暂未连接'),
-                  onTap: () {
-                    _directoryMutation = true;
-                    _search.clear();
-                    _searchOpen = false;
-                    library.setSource(source.id);
-                    _directoryMutation = false;
-                    _recordDirectory();
-                  },
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(ScoreSpace.lg),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Tooltip(
-                  message:
-                      library.selectedSource?.catalog.rootPath ??
-                      library.rootPath!,
-                  child: Text(
-                    library.selectedSource?.name ??
-                        p.basename(library.rootPath!),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: ScoreText.micro.copyWith(
-                      color: ScoreTokens.of(context).ink700,
-                    ),
-                  ),
-                ),
-                if (defaultTargetPlatform == TargetPlatform.windows) ...[
-                  const SizedBox(height: ScoreSpace.md),
-                  SigningExpiryChip(
-                    pairedDevice: true,
-                    pairedStatus: _sync?.signingStatus,
-                    unavailable: _sync?.signingUnavailable,
-                    onRefresh: _sync?.refreshSigningStatus,
-                  ),
-                ],
-              ],
-            ),
-          ),
+    final key = (
+      library.snapshot,
+      library.selectedSourceId,
+      visible,
+      _workspace?.store.snapshot,
+    );
+    if (_navEntriesKey != key) {
+      _navEntriesKey = key;
+      _navEntries = [
+        const LibraryNavEntry(LibraryNavKind.group, label: '谱库来源'),
+        for (final source in library.sources) ...[
+          LibraryNavEntry(LibraryNavKind.source, value: source),
+          if (source.id == library.selectedSourceId)
+            for (final row in visible)
+              if (row.path.isNotEmpty)
+                LibraryNavEntry(LibraryNavKind.folder, value: row),
         ],
-      ),
+        const LibraryNavEntry(LibraryNavKind.addSource),
+        const LibraryNavEntry(LibraryNavKind.group, label: '曲单'),
+        for (final list
+            in _workspace?.store.snapshot.activeSetLists ?? <ScoreSetList>[])
+          LibraryNavEntry(LibraryNavKind.setList, value: list),
+        const LibraryNavEntry(LibraryNavKind.newSetList),
+        const LibraryNavEntry(LibraryNavKind.operations),
+      ];
+    }
+    return LibrarySidebar(
+      entries: _navEntries,
+      device: _deviceSummary(),
+      itemBuilder: (context, entry) {
+        switch (entry.kind) {
+          case LibraryNavKind.group:
+            return Padding(
+              padding: EdgeInsets.only(
+                top: entry.label == '曲单' ? ScoreSpace.lg : 0,
+              ),
+              child: LibraryGroupLabel(entry.label),
+            );
+          case LibraryNavKind.source:
+            final source = entry.value! as CatalogSourceBinding;
+            return LibraryNavigationItem(
+              key: ValueKey('source-${source.id}'),
+              label: source.name,
+              selected: !_setListsOpen && source.id == library.selectedSourceId,
+              count: '${source.catalog.snapshot.availableEntries.length}',
+              onTap: () => _selectSource(library, source.id),
+            );
+          case LibraryNavKind.folder:
+            final row = entry.value! as FolderTreeRow;
+            return _folderNode(library, row.path, row.depth);
+          case LibraryNavKind.addSource:
+            return LibraryNavigationItem(
+              label: '添加来源',
+              glyph: ReaderGlyph.plus,
+              onTap: () => unawaited(_selectRoot()),
+            );
+          case LibraryNavKind.setList:
+            final list = entry.value! as ScoreSetList;
+            return LibraryNavigationItem(
+              label: list.name,
+              glyph: ReaderGlyph.list,
+              selected: _setListsOpen && list.id == _setListId,
+              count: '${list.activeItems.length}',
+              onTap: () => unawaited(_openSetLists(initialListId: list.id)),
+            );
+          case LibraryNavKind.newSetList:
+            return LibraryNavigationItem(
+              label: '新建曲单',
+              glyph: ReaderGlyph.plus,
+              onTap: () => unawaited(_openSetLists(initialCreate: true)),
+            );
+          case LibraryNavKind.operations:
+            return PopupMenuButton<String>(
+              tooltip: '曲库操作',
+              icon: const ReaderIcon(ReaderGlyph.more),
+              style: libraryIconButtonStyle(context),
+              constraints: const BoxConstraints.tightFor(
+                width: ScoreLayout.menuWidth,
+              ),
+              onSelected: (value) {
+                switch (value) {
+                  case 'single':
+                    unawaited(_openSingle());
+                  case 'refresh':
+                    unawaited(library.rescan());
+                  case 'verify':
+                    unawaited(library.rescan(verifyAll: true));
+                  case 'offline':
+                    unawaited(_openOffline());
+                  case 'layout':
+                    DeviceLayoutScope.maybeOf(context)?.toggle();
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
+                PopupMenuItem(
+                  value: 'refresh',
+                  enabled: !library.scanning,
+                  child: const Text('刷新谱库'),
+                ),
+                PopupMenuItem(
+                  value: 'verify',
+                  enabled: !library.scanning,
+                  child: const Text('完整校验此谱库内容'),
+                ),
+                const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
+                if (defaultTargetPlatform == TargetPlatform.windows)
+                  const PopupMenuItem(
+                    value: 'layout',
+                    child: Text('切换 iPad 预览'),
+                  ),
+              ],
+            );
+          default:
+            return const SizedBox.shrink();
+        }
+      },
     );
   }
 
   Widget _folderNode(LibraryController library, String folder, int depth) {
     final children = _hierarchy!.childrenOf(folder);
     final expanded = !_collapsedFolders.contains(folder);
-    final selected = library.currentFolder == folder;
-    return Padding(
+    return LibraryNavigationItem(
       key: ValueKey('folder-$folder'),
-      padding: EdgeInsets.only(left: mathIndent(depth)),
-      child: ListTile(
-        dense: true,
-        selected: selected,
-        selectedTileColor: ScoreTokens.of(context).pineWash,
-        leading: const _HostLibraryIcon.folder(),
-        title: Tooltip(
-          message: folder.isEmpty ? library.rootPath! : folder,
-          child: Text(
-            folder.isEmpty
-                ? p.basename(library.rootPath!)
-                : p.posix.basename(folder),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        trailing: children.isEmpty
-            ? null
-            : IconButton(
-                tooltip: expanded ? '收起文件夹' : '展开文件夹',
-                icon: Icon(
-                  expanded ? Icons.expand_less : Icons.expand_more,
-                  size: 18,
-                ),
-                onPressed: () => setState(() {
-                  expanded
-                      ? _collapsedFolders.add(folder)
-                      : _collapsedFolders.remove(folder);
-                  _treeRows = null;
-                }),
-              ),
-        onTap: () => _folder(folder),
-      ),
+      label: p.posix.basename(folder),
+      selected: !_setListsOpen && library.currentFolder == folder,
+      indent: mathIndent(depth),
+      onTap: () => _folder(folder),
+      trailing: children.isEmpty
+          ? null
+          : LibraryIconButton(
+              touch: true,
+              glyph: expanded ? ReaderGlyph.chevronUp : ReaderGlyph.chevronDown,
+              label: expanded ? '收起文件夹' : '展开文件夹',
+              onPressed: () => setState(() {
+                expanded
+                    ? _collapsedFolders.add(folder)
+                    : _collapsedFolders.remove(folder);
+                _treeRows = null;
+              }),
+            ),
     );
   }
 
-  double mathIndent(int depth) => (depth * ScoreSpace.md).clamp(0, 132);
+  double mathIndent(int depth) =>
+      (depth * ScoreLayout.treeIndent).clamp(0, 132);
 
-  Widget _content(LibraryController library) => Column(
+  Widget _content(LibraryController library, {required bool wide}) => Column(
     children: [
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.md),
-        child: Row(
-          children: [
-            Expanded(
-              child: DirectoryBreadcrumbs(
-                rootLabel: library.selectedSource?.name ?? '谱库',
-                currentPath: library.currentFolder,
-                onNavigate: _folder,
-              ),
-            ),
-            if (library.searching)
-              InkWell(
-                borderRadius: ScoreRadius.controlAll,
-                onTap: () =>
-                    library.setSearchScope(!library.searchCurrentFolder),
-                child: Semantics(
-                  checked: library.searchCurrentFolder,
-                  label: '当前文件夹及子文件夹',
-                  child: ExcludeSemantics(
-                    child: Row(
-                      children: [
-                        const Text('当前文件夹及子文件夹', style: ScoreText.caption),
-                        IgnorePointer(
-                          child: Checkbox(
-                            value: library.searchCurrentFolder,
-                            onChanged: (value) {},
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-          ],
+      if (!wide)
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: ScoreLayout.listMargin,
+          ),
+          child: DirectoryBreadcrumbs(
+            rootLabel: library.selectedSource?.name ?? '谱库',
+            currentPath: library.currentFolder,
+            onNavigate: _folder,
+          ),
         ),
-      ),
+      if (library.searching)
+        LibrarySearchContext(
+          count: library.visibleEntries.length,
+          withinFolder: library.searchCurrentFolder,
+          onScopeChanged: library.setSearchScope,
+        ),
       if (library.scanning) const LinearProgressIndicator(minHeight: 2),
       if ((_workspace?.unsavedCount ?? 0) > 0)
         _notice(
           '${_workspace!.unsavedCount} 项批注未保存',
-          Icons.edit_outlined,
           () => unawaited(_workspace!.retryStrokes()),
         ),
       if (library.error != null)
-        _notice(library.error!, Icons.error_outline, () => _details(library)),
+        _notice(library.error!, () => _details(library)),
       if (library.watchWarning != null)
-        _notice(
-          library.watchWarning!,
-          Icons.info_outline,
-          () => _details(library),
-        ),
+        _notice(library.watchWarning!, () => _details(library)),
       if (library.storageWarnings.isNotEmpty ||
           (library.lastScan?.issues.isNotEmpty ?? false) ||
           (library.lastScan?.ambiguities.isNotEmpty ?? false))
         _notice(
           '${library.lastScan?.issues.length ?? 0} 项读取提示 · ${library.lastScan?.ambiguities.length ?? 0} 项关联待确认${library.storageWarnings.isEmpty ? '' : ' · 索引恢复提示'}',
-          Icons.info_outline,
           () => _details(library),
         ),
       Expanded(child: _entries(library)),
     ],
   );
 
-  Widget _notice(String text, IconData icon, VoidCallback action) => Material(
+  Widget _notice(String text, VoidCallback action) => Material(
     color: Theme.of(context).colorScheme.tertiaryContainer,
     child: InkWell(
       onTap: action,
@@ -1078,8 +1206,6 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
         child: Row(
           children: [
-            Icon(icon, size: 18),
-            const SizedBox(width: ScoreSpace.sm),
             Expanded(
               child: Text(
                 text,
@@ -1088,7 +1214,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 style: ScoreText.note,
               ),
             ),
-            const Icon(Icons.chevron_right, size: 18),
+            const ReaderIcon(ReaderGlyph.chevronRight),
           ],
         ),
       ),
@@ -1098,108 +1224,130 @@ class _LibraryScreenState extends State<LibraryScreen>
   Widget _entries(LibraryController library) {
     final entries = library.visibleEntries;
     final subfolders = library.searching ? <String>[] : library.listing.folders;
-    if (entries.isEmpty && subfolders.isEmpty) {
-      return Center(
-        child: Text(
-          library.scanning
-              ? '正在扫描文件夹…'
-              : library.searching
-              ? '没有找到匹配的曲谱'
-              : '这个文件夹里还没有曲谱',
-          style: TextStyle(color: ScoreTokens.of(context).ink500),
-        ),
-      );
+    final snapshot = library.selectedSource?.catalog.snapshot;
+    final folders = library.folders;
+    if (!identical(snapshot, _countSnapshot) ||
+        !identical(folders, _countFolders) ||
+        library.selectedSourceId != _countSource) {
+      _countSnapshot = snapshot;
+      _countFolders = folders;
+      _countSource = library.selectedSourceId;
+      _folderCounts.clear();
+      for (final folder in folders) {
+        final parent = p.posix.dirname(folder);
+        _folderCounts[parent] = (_folderCounts[parent] ?? 0) + 1;
+      }
+      for (final entry in snapshot?.availableEntries ?? <LibraryEntry>[]) {
+        final parent = p.posix.dirname(entry.relativePath);
+        _folderCounts[parent] = (_folderCounts[parent] ?? 0) + 1;
+      }
     }
-    return ListView.separated(
-      key: PageStorageKey((
-        library.selectedSourceId,
-        library.currentFolder,
-        library.query,
-      )),
-      padding: const EdgeInsets.fromLTRB(
-        ScoreSpace.lg,
-        ScoreSpace.sm,
-        ScoreSpace.lg,
-        ScoreSpace.xl,
-      ),
-      itemCount: subfolders.length + entries.length,
-      separatorBuilder: (_, _) =>
-          const Divider(height: 1, indent: ScoreSpace.huge + ScoreSpace.sm),
-      itemBuilder: (context, index) {
-        if (index < subfolders.length) {
-          final folder = subfolders[index];
-          return ListTile(
-            leading: const _HostLibraryIcon.folder(),
-            title: Text(p.posix.basename(folder)),
-            subtitle: Text(folder, style: ScoreText.caption),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _folder(folder),
-          );
-        }
-        final entry = entries[index - subfolders.length];
-        return ListTile(
-          minTileHeight: 72,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: ScoreSpace.md,
-            vertical: 0,
-          ),
-          leading: _HostLibraryIcon(path: entry.relativePath),
-          title: Text(
-            p.posix.basenameWithoutExtension(entry.relativePath),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          subtitle: Tooltip(
-            message:
-                '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
-            child: Text(
-              '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: ScoreText.caption.copyWith(
-                color: ScoreTokens.of(context).ink500,
-              ),
-            ),
-          ),
-          trailing: ScoreFileTrailing(
-            addToSetListAction: IconButton(
-              tooltip: '加入曲单',
-              icon: const ReaderIcon(ReaderGlyph.playlistAdd),
-              onPressed: () => unawaited(_addEntryToSetList(entry)),
-            ),
-            metadata: ScoreFileMetadata(
-              key: ValueKey((entry.id, entry.currentRevisionId)),
-              entryId: entry.id,
-              revisionId: entry.currentRevisionId,
-              path: entry.relativePath,
-              service: _sync?.pageCounts,
-            ),
-            menuAction: Builder(
-              builder: (shareContext) => PopupMenuButton<String>(
-                tooltip: '曲谱选项',
-                enabled: !_sharingEntries.contains(entry.id),
-                onSelected: (value) {
-                  if (value == 'share') {
-                    unawaited(_shareEntry(shareContext, library, entry));
-                  } else if (Platform.isWindows) {
-                    unawaited(_revealFile(library, entry));
-                  } else {
-                    _pathDetails(entry);
-                  }
-                },
-                itemBuilder: (_) => [
-                  const PopupMenuItem(value: 'share', child: Text('分享')),
-                  PopupMenuItem(
-                    value: 'location',
-                    child: Text(Platform.isWindows ? '打开文件所在目录' : '查看完整路径'),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: ScoreLayout.listMargin),
+      child: Column(
+        children: [
+          const LibraryColumnHeader(),
+          Expanded(
+            child: entries.isEmpty && subfolders.isEmpty
+                ? Center(
+                    child: Text(
+                      library.scanning
+                          ? '正在扫描文件夹…'
+                          : library.searching
+                          ? '未找到曲谱'
+                          : '这个文件夹里还没有曲谱',
+                      style: ScoreText.body.copyWith(
+                        color: ScoreTokens.of(context).ink500,
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    key: PageStorageKey((
+                      library.selectedSourceId,
+                      library.currentFolder,
+                      library.query,
+                    )),
+                    padding: EdgeInsets.zero,
+                    itemCount: subfolders.length + entries.length,
+                    itemBuilder: (context, index) {
+                      if (index < subfolders.length) {
+                        final folder = subfolders[index];
+                        return LibraryFileRow(
+                          key: ValueKey('library-folder-$folder'),
+                          leading: const _HostLibraryIcon.folder(),
+                          name: p.posix.basename(folder),
+                          subtitle: '${_folderCounts[folder] ?? 0} 项',
+                          action: LibraryIconButton(
+                            glyph: ReaderGlyph.more,
+                            label: '文件夹选项',
+                            onPressed: () => _folder(folder),
+                          ),
+                          onTap: () => _folder(folder),
+                        );
+                      }
+                      final entry = entries[index - subfolders.length];
+                      return LibraryFileRow(
+                        key: ValueKey('library-file-${entry.id}'),
+                        leading: _HostLibraryIcon(path: entry.relativePath),
+                        name: p.posix.basename(entry.relativePath),
+                        query: library.searching ? library.query : '',
+                        subtitle: library.searching
+                            ? '${library.sourceNameFor(entry)} / ${scoreParentFolder(entry.relativePath)}'
+                            : null,
+                        metadata: LibraryFileMetadata(
+                          entryId: entry.id,
+                          revisionId: entry.currentRevisionId,
+                          path: entry.relativePath,
+                          service: _sync?.pageCounts,
+                        ),
+                        action: Builder(
+                          builder: (shareContext) => PopupMenuButton<String>(
+                            style: libraryIconButtonStyle(context),
+                            constraints: const BoxConstraints.tightFor(
+                              width: ScoreLayout.menuWidth,
+                            ),
+                            tooltip: '曲谱选项',
+                            icon: const ReaderIcon(ReaderGlyph.more),
+                            padding: EdgeInsets.zero,
+                            enabled: !_sharingEntries.contains(entry.id),
+                            onSelected: (value) {
+                              if (value == 'add') {
+                                unawaited(_addEntryToSetList(entry));
+                              } else if (value == 'share') {
+                                unawaited(
+                                  _shareEntry(shareContext, library, entry),
+                                );
+                              } else if (Platform.isWindows) {
+                                unawaited(_revealFile(library, entry));
+                              } else {
+                                _pathDetails(entry);
+                              }
+                            },
+                            itemBuilder: (_) => [
+                              const PopupMenuItem(
+                                value: 'add',
+                                child: Text('加入曲单'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'share',
+                                child: Text('分享'),
+                              ),
+                              PopupMenuItem(
+                                value: 'location',
+                                child: Text(
+                                  Platform.isWindows ? '打开文件所在目录' : '查看完整路径',
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        onTap: () => unawaited(_openEntry(entry)),
+                      );
+                    },
                   ),
-                ],
-              ),
-            ),
           ),
-          onTap: () => unawaited(_openEntry(entry)),
-        );
-      },
+        ],
+      ),
     );
   }
 

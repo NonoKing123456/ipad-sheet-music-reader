@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
 import '../theme/reader_icons.dart';
@@ -26,6 +27,102 @@ extension ReaderToolAppearance on ReaderTool {
   double get maxSize => this == ReaderTool.highlighter ? 64 : 48;
 }
 
+/// The same press feedback and target geometry are shared by reader controls.
+class ReaderActionButton extends StatefulWidget {
+  const ReaderActionButton({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.onPressed,
+    this.selected = false,
+    this.tool = false,
+    this.caption,
+    this.width,
+    this.target = ScoreLayout.touchTarget,
+  });
+  final String label;
+  final Widget icon;
+  final VoidCallback? onPressed;
+  final bool selected, tool;
+  final String? caption;
+  final double? width;
+  final double target;
+  @override
+  State<ReaderActionButton> createState() => _ReaderActionButtonState();
+}
+
+class _ReaderActionButtonState extends State<ReaderActionButton> {
+  bool _pressed = false;
+  @override
+  Widget build(BuildContext context) {
+    final t = ScoreTokens.of(context);
+    final foreground = widget.selected
+        ? widget.tool
+              ? t.onBrand
+              : t.pineDeep
+        : t.ink700;
+    return Semantics(
+      button: true,
+      selected: widget.selected,
+      label: widget.label,
+      enabled: widget.onPressed != null,
+      child: Tooltip(
+        message: widget.label,
+        child: Listener(
+          onPointerDown: widget.onPressed == null
+              ? null
+              : (_) => setState(() => _pressed = true),
+          onPointerUp: (_) => setState(() => _pressed = false),
+          onPointerCancel: (_) => setState(() => _pressed = false),
+          child: AnimatedScale(
+            scale: _pressed ? ScoreMotion.pressScale : 1,
+            duration: MediaQuery.disableAnimationsOf(context)
+                ? Duration.zero
+                : ScoreMotion.micro,
+            child: SizedBox(
+              width: widget.width ?? widget.target,
+              height: widget.target,
+              child: TextButton(
+                onPressed: widget.onPressed,
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  foregroundColor: foreground,
+                  disabledForegroundColor: t.ink300,
+                  backgroundColor: widget.selected
+                      ? widget.tool
+                            ? t.pine
+                            : t.pineWash
+                      : Colors.transparent,
+                  overlayColor: t.pineWash,
+                  splashFactory: NoSplash.splashFactory,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: ScoreRadius.controlAll,
+                  ),
+                  textStyle: Theme.of(context).textTheme.labelLarge,
+                ),
+                child: ExcludeSemantics(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      widget.icon,
+                      if (widget.caption != null) ...[
+                        const SizedBox(width: ScoreSpace.sm),
+                        Text(widget.caption!),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ReaderToolButton extends StatelessWidget {
   const ReaderToolButton({
     super.key,
@@ -33,85 +130,30 @@ class ReaderToolButton extends StatelessWidget {
     required this.selected,
     required this.value,
     required this.onSelect,
-    this.buttonWidth = 92,
-    this.buttonHeight = 44,
-    this.iconOnly = false,
+    this.buttonWidth = ScoreLayout.touchTarget,
+    this.buttonHeight = ScoreLayout.touchTarget,
+    this.iconOnly = true,
   });
   final ReaderTool tool;
   final bool selected;
   final double value;
   final VoidCallback onSelect;
-  final double buttonWidth;
-  final double buttonHeight;
+  final double buttonWidth, buttonHeight;
   final bool iconOnly;
   @override
-  Widget build(BuildContext context) {
-    final compactButton = Size(buttonWidth, buttonHeight);
-    final tokens = ScoreTokens.of(context);
-    final foreground = selected
-        ? tokens.pine
-        : Theme.of(context).colorScheme.onSurface;
-    final background = selected
-        ? tokens.pineWash
-        : iconOnly
-        ? tokens.paper2.withValues(alpha: .4)
-        : Colors.transparent;
-    final shape = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(10),
-    );
-    return SizedBox(
-      width: buttonWidth,
-      height: buttonHeight,
-      child: Semantics(
-        button: true,
-        label: tool.label,
-        selected: selected,
-        value: value.toStringAsFixed(1),
-        onTap: onSelect,
-        child: Tooltip(
-          message: tool.label,
-          child: iconOnly
-              ? IconButton(
-                  onPressed: onSelect,
-                  icon: ReaderIcon(tool.glyph, size: 22),
-                  style: IconButton.styleFrom(
-                    fixedSize: compactButton,
-                    minimumSize: compactButton,
-                    maximumSize: compactButton,
-                    padding: EdgeInsets.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    backgroundColor: background,
-                    foregroundColor: foreground,
-                    shape: shape,
-                  ),
-                )
-              : TextButton.icon(
-                  onPressed: onSelect,
-                  icon: ReaderIcon(tool.glyph, size: 22),
-                  label: Text(
-                    tool.label,
-                    maxLines: 1,
-                    softWrap: false,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  style: TextButton.styleFrom(
-                    fixedSize: compactButton,
-                    minimumSize: compactButton,
-                    maximumSize: compactButton,
-                    padding: const EdgeInsets.symmetric(horizontal: 5),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    backgroundColor: background,
-                    foregroundColor: foreground,
-                    shape: shape,
-                  ),
-                ),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => ReaderActionButton(
+    label: tool.label,
+    icon: ReaderIcon(tool.glyph, size: ScoreLayout.iconVisual),
+    onPressed: onSelect,
+    selected: selected,
+    tool: true,
+    target: buttonHeight,
+    width: buttonWidth,
+    caption: iconOnly ? null : tool.label,
+  );
 }
 
-/// A direct horizontal adjustment confined to its own 56 × 44 touch target.
+/// Direct horizontal adjustment: 20dp changes one displayed size unit.
 /// Updates preview immediately; one release creates one committed change.
 class ReaderSizeButton extends StatefulWidget {
   const ReaderSizeButton({
@@ -145,7 +187,7 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
   bool _focused = false;
   bool get _enabled => widget.onChanged != null;
   double get _value => (_preview ?? widget.value).clamp(widget.min, widget.max);
-  double get _step => widget.textMode ? 1 / 1024 : .5;
+  double get _step => widget.textMode ? 1 / 1024 : .1;
   String _format(double value) => widget.textMode
       ? (value * 1024).toStringAsFixed(0)
       : value.toStringAsFixed(1);
@@ -186,7 +228,7 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final tokens = ScoreTokens.of(context);
-    final foreground = widget.color ?? scheme.onSurface;
+    final foreground = tokens.ink900;
     return Semantics(
       label: widget.label,
       value: _formatted,
@@ -220,6 +262,7 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
           message: '${widget.label}：按住左右拖动调整',
           child: ExcludeSemantics(
             child: GestureDetector(
+              dragStartBehavior: DragStartBehavior.down,
               behavior: HitTestBehavior.opaque,
               onTap: _enabled ? _focus.requestFocus : null,
               onHorizontalDragStart: !_enabled
@@ -235,9 +278,9 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
                   : (details) {
                       _dragValue =
                           (_dragValue +
-                                  details.delta.dx *
-                                      (widget.max - widget.min) /
-                                      160)
+                                  details.delta.dx /
+                                      ScoreLayout.readerSizePixelsPerUnit *
+                                      (widget.textMode ? 1 / 1024 : 1))
                               .clamp(widget.min, widget.max);
                       _update(_dragValue);
                     },
@@ -251,14 +294,12 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
                       setState(() => _preview = null);
                     },
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 100),
-                width: 56,
-                height: 44,
+                duration: ScoreMotion.micro,
+                width: ScoreLayout.readerSizeWidth,
+                height: ScoreLayout.touchTarget,
                 decoration: BoxDecoration(
-                  color: _start != null
-                      ? tokens.pineWash
-                      : tokens.paper2.withValues(alpha: .4),
-                  borderRadius: BorderRadius.circular(10),
+                  color: _start != null ? tokens.pineWash : Colors.transparent,
+                  borderRadius: ScoreRadius.controlAll,
                   border: _focused
                       ? Border.all(color: scheme.primary, width: 1)
                       : null,
@@ -266,36 +307,31 @@ class _ReaderSizeButtonState extends State<ReaderSizeButton> {
                 child: Opacity(
                   opacity: _enabled ? 1 : .38,
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: ScoreLayout.readerSizePadding,
+                    ),
                     child: Row(
                       children: [
                         SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: widget.textMode
-                              ? Center(
-                                  child: Text(
-                                    'A',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .labelMedium,
-                                  ),
-                                )
-                              : CustomPaint(
-                                  painter: ReaderToolSizePreview(
-                                    widget.tool,
-                                    _value,
-                                    foreground,
-                                  ),
-                                ),
+                          width: ScoreSpace.lg,
+                          height: ScoreSpace.lg,
+                          child: CustomPaint(
+                            painter: ReaderToolSizePreview(
+                              widget.tool,
+                              widget.textMode ? 3 : _value,
+                              foreground,
+                            ),
+                          ),
                         ),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: ScoreSpace.xs),
                         Expanded(
                           child: FittedBox(
                             fit: BoxFit.scaleDown,
                             child: Text(
                               _formatted,
-                              style: Theme.of(context).textTheme.labelMedium,
+                              style: ScoreText.caption.copyWith(
+                                color: tokens.ink500,
+                              ),
                             ),
                           ),
                         ),
@@ -351,8 +387,7 @@ class ReaderToolSizePreview extends CustomPainter {
       old.tool != tool || old.value != value || old.color != color;
 }
 
-/// The last successful sample belongs to the eyedropper, independently of the
-/// active palette color. Its fine underline shows the last sampled color.
+/// The only sampled-color slot sits directly on the eyedropper icon.
 class ReaderSampleColorButton extends StatelessWidget {
   const ReaderSampleColorButton({
     super.key,
@@ -362,84 +397,56 @@ class ReaderSampleColorButton extends StatelessWidget {
     required this.usingSample,
     required this.onPressed,
   });
-  final bool picking, busy;
+  final bool picking, busy, usingSample;
   final Color? sample;
-  final bool usingSample;
   final VoidCallback? onPressed;
-
   @override
-  Widget build(BuildContext context) {
-    final label = picking ? '取消吸色' : '吸取谱面底色';
-    return Semantics(
-      button: true,
-      selected: picking,
-      label: label,
-      value: sample == null
-          ? '尚未吸色'
-          : usingSample
-          ? '正在使用最近吸取的颜色'
-          : '最近吸取的颜色可复用',
-      onTap: onPressed,
-      child: ExcludeSemantics(
-        child: IconButton(
-          tooltip: label,
-          onPressed: onPressed,
-          isSelected: picking,
-          style: IconButton.styleFrom(
-            fixedSize: const Size(44, 44),
-            minimumSize: const Size(44, 44),
-            maximumSize: const Size(44, 44),
-            padding: EdgeInsets.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            backgroundColor: picking
-                ? Theme.of(context).colorScheme.secondaryContainer
-                : Colors.transparent,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
+  Widget build(BuildContext context) => ReaderActionButton(
+    label: picking ? '取消吸色' : '吸取谱面底色',
+    selected: picking,
+    tool: true,
+    onPressed: onPressed,
+    icon: SizedBox.square(
+      dimension: ScoreLayout.readerSampleStack,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          const Positioned(
+            top: 2,
+            left: 0,
+            child: ReaderIcon(
+              ReaderGlyph.eyedropper,
+              size: ScoreLayout.iconVisual,
             ),
           ),
-          icon: SizedBox.square(
-            dimension: 28,
-            child: Stack(
-              children: [
-                const Positioned(
-                  top: 0,
-                  left: 2,
-                  child: ReaderIcon(ReaderGlyph.eyedropper, size: 24),
+          Positioned(
+            right: 0,
+            bottom: 0,
+            child: Container(
+              key: const ValueKey('reader-sample-swatch'),
+              width: ScoreLayout.readerSampleVisual,
+              height: ScoreLayout.readerSampleVisual,
+              decoration: BoxDecoration(
+                color: sample ?? Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: ScoreTokens.of(context).ink500,
+                  width: .75,
                 ),
-                Positioned(
-                  left: 5,
-                  right: 5,
-                  bottom: 0,
-                  child: Container(
-                    key: const ValueKey('reader-sample-underline'),
-                    height: 3,
-                    decoration: BoxDecoration(
-                      color:
-                          sample ??
-                          Theme.of(context).colorScheme.outlineVariant,
-                      borderRadius: BorderRadius.circular(2),
-                      border: Border.all(
-                        color: Theme.of(context).colorScheme.outline
-                            .withValues(alpha: .45),
-                        width: .5,
-                      ),
-                    ),
-                  ),
-                ),
-                if (busy)
-                  const Positioned.fill(
-                    child: CircularProgressIndicator(strokeWidth: 1.5),
-                  ),
-              ],
+              ),
             ),
           ),
-        ),
+          if (busy)
+            const Positioned.fill(
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+        ],
       ),
-    );
-  }
+    ),
+  );
 }
 
+/// Kept for callers outside the reader; the v2 bar exposes no second sample slot.
 class ReaderSampleReuseButton extends StatelessWidget {
   const ReaderSampleReuseButton({
     super.key,
@@ -450,59 +457,181 @@ class ReaderSampleReuseButton extends StatelessWidget {
   final Color? sample;
   final bool selected;
   final VoidCallback? onPressed;
-
   @override
-  Widget build(BuildContext context) {
-    final label = sample == null ? '等待吸取底色' : '使用最近吸取的底色';
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: label,
-      onTap: onPressed,
-      child: ExcludeSemantics(
-        child: Tooltip(
-          message: label,
-          child: IconButton(
-            key: const ValueKey('reader-sampled-color'),
-            onPressed: onPressed,
-            isSelected: selected,
-            style: IconButton.styleFrom(
-              fixedSize: const Size(44, 44),
-              minimumSize: const Size(44, 44),
-              maximumSize: const Size(44, 44),
-              padding: EdgeInsets.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              backgroundColor: selected
-                  ? Theme.of(context).colorScheme.secondaryContainer
-                  : Colors.transparent,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            icon: SizedBox.square(
-              dimension: 28,
-              child: Container(
-                key: const ValueKey('sample-color-swatch'),
-                decoration: BoxDecoration(
-                  color: sample ?? ScoreTokens.of(context).paper2,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: Theme.of(context).colorScheme.outline,
-                    width: 1,
-                  ),
+  Widget build(BuildContext context) => ReaderActionButton(
+    label: '使用最近吸取的底色',
+    selected: selected,
+    onPressed: onPressed,
+    icon: Container(
+      width: ScoreSpace.xl,
+      height: ScoreSpace.xl,
+      decoration: BoxDecoration(color: sample, shape: BoxShape.circle),
+    ),
+  );
+}
+
+class ReaderPaletteButton extends StatefulWidget {
+  const ReaderPaletteButton({
+    super.key,
+    required this.argb,
+    required this.onChanged,
+    this.onMenuChanged,
+  });
+  final int argb;
+  final ValueChanged<int>? onChanged;
+  final ValueChanged<bool>? onMenuChanged;
+  @override
+  State<ReaderPaletteButton> createState() => _ReaderPaletteButtonState();
+}
+
+class _ReaderPaletteButtonState extends State<ReaderPaletteButton> {
+  final _menu = MenuController();
+  int get argb => widget.argb;
+  ValueChanged<int>? get onChanged => widget.onChanged;
+  // Content colors stay independent from the app's light/dark shell.
+  static const colors = [
+    0xff17201c,
+    0xffc9432d,
+    0xff236459,
+    0xff1c57ac,
+    0xffe5b33c,
+    0xffa26f91,
+    0xfffbfaf6,
+    0xff805c3b,
+  ];
+  Widget _dot(BuildContext context, int color, {bool selected = false}) =>
+      Container(
+        width: ScoreLayout.readerColorVisual,
+        height: ScoreLayout.readerColorVisual,
+        padding: const EdgeInsets.all(ScoreLayout.readerColorInset),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected
+                ? ScoreTokens.of(context).pine
+                : ScoreTokens.of(context).hair,
+            width: 1,
+          ),
+        ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Color(color),
+            shape: BoxShape.circle,
+          ),
+        ),
+      );
+  @override
+  Widget build(BuildContext context) => MenuAnchor(
+    controller: _menu,
+    onOpen: () => widget.onMenuChanged?.call(true),
+    onClose: () => widget.onMenuChanged?.call(false),
+    style: const MenuStyle(padding: WidgetStatePropertyAll(EdgeInsets.zero)),
+    menuChildren: [
+      SizedBox(
+        width: ScoreLayout.paletteWidth,
+        child: Padding(
+          padding: const EdgeInsets.all(ScoreSpace.lg),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var row = 0; row < 2; row++)
+                Row(
+                  children: [
+                    for (var col = 0; col < ScoreLayout.paletteColumns; col++)
+                      ReaderActionButton(
+                        label:
+                            '颜色 ${row * ScoreLayout.paletteColumns + col + 1}',
+                        icon: _dot(
+                          context,
+                          colors[row * ScoreLayout.paletteColumns + col],
+                          selected:
+                              argb ==
+                              colors[row * ScoreLayout.paletteColumns + col],
+                        ),
+                        onPressed: onChanged == null
+                            ? null
+                            : () {
+                                _menu.close();
+                                onChanged!(
+                                  colors[row * ScoreLayout.paletteColumns +
+                                      col],
+                                );
+                              },
+                      ),
+                  ],
                 ),
-                child: sample == null
-                    ? const Icon(
-                        Icons.remove,
-                        key: ValueKey('sample-color-empty'),
-                        size: 14,
-                      )
-                    : null,
+              SizedBox(
+                height: ScoreLayout.desktopTarget,
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: onChanged == null
+                      ? null
+                      : () async {
+                          _menu.close();
+                          final input = TextEditingController(
+                            text: (argb & 0xffffff)
+                                .toRadixString(16)
+                                .padLeft(6, '0')
+                                .toUpperCase(),
+                          );
+                          final value = await showDialog<int>(
+                            context: context,
+                            builder: (dialogContext) => AlertDialog(
+                              title: const Text('自定义颜色'),
+                              content: TextField(
+                                controller: input,
+                                autofocus: true,
+                                maxLength: 6,
+                                decoration: const InputDecoration(
+                                  prefixText: '#',
+                                  labelText: '六位颜色值',
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(dialogContext),
+                                  child: const Text('取消'),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    final value = int.tryParse(
+                                      input.text.trim(),
+                                      radix: 16,
+                                    );
+                                    if (input.text.trim().length == 6 &&
+                                        value != null) {
+                                      Navigator.pop(
+                                        dialogContext,
+                                        value | 0xff000000,
+                                      );
+                                    }
+                                  },
+                                  child: const Text('使用'),
+                                ),
+                              ],
+                            ),
+                          );
+                          // The route transition may still reference its input controller.
+                          Future<void>.delayed(
+                            ScoreMotion.panel,
+                            input.dispose,
+                          );
+                          if (value != null) onChanged?.call(value);
+                        },
+                  child: const Text('自定义颜色'),
+                ),
               ),
-            ),
+            ],
           ),
         ),
       ),
-    );
-  }
+    ],
+    builder: (context, controller, _) => ReaderActionButton(
+      label: '颜色',
+      icon: _dot(context, argb),
+      onPressed: onChanged == null
+          ? null
+          : () => controller.isOpen ? controller.close() : controller.open(),
+    ),
+  );
 }

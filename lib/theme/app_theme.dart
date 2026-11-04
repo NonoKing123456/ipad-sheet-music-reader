@@ -7,6 +7,8 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'tokens.dart';
+import 'reader_icons.dart';
+import 'device_layout.dart';
 
 /// App chrome only. Score pixels and annotation colours retain their originals.
 ///
@@ -14,8 +16,8 @@ import 'tokens.dart';
 ThemeData scoreReaderTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   final tokens = dark ? ScoreTokens.dark : ScoreTokens.light;
-  final primary = dark ? tokens.pineDeep : tokens.pine;
-  final onEmphasis = dark ? tokens.paper0 : Colors.white;
+  final primary = tokens.pineDeep;
+  final onEmphasis = tokens.onBrand;
   final scheme =
       ColorScheme.fromSeed(
         seedColor: tokens.pine,
@@ -51,11 +53,14 @@ ThemeData scoreReaderTheme(Brightness brightness) {
         surfaceTint: tokens.pine,
       );
   final uiFont = defaultTargetPlatform == TargetPlatform.windows
-      ? 'Microsoft YaHei UI'
+      ? 'Segoe UI'
       : null;
   return ThemeData(
     useMaterial3: true,
     fontFamily: uiFont,
+    fontFamilyFallback: defaultTargetPlatform == TargetPlatform.windows
+        ? const ['Microsoft YaHei']
+        : null,
     splashFactory: NoSplash.splashFactory,
     highlightColor: Colors.transparent,
     colorScheme: scheme,
@@ -116,7 +121,7 @@ ThemeData scoreReaderTheme(Brightness brightness) {
       elevation: 0,
       scrolledUnderElevation: 0,
     ),
-    dividerTheme: DividerThemeData(color: scheme.outlineVariant),
+    dividerTheme: DividerThemeData(color: tokens.hair),
     listTileTheme: ListTileThemeData(
       tileColor: Colors.transparent,
       iconColor: scheme.onSurfaceVariant,
@@ -130,7 +135,8 @@ ThemeData scoreReaderTheme(Brightness brightness) {
     popupMenuTheme: PopupMenuThemeData(
       color: tokens.paper0,
       surfaceTintColor: Colors.transparent,
-      textStyle: ScoreText.body.copyWith(color: tokens.ink900),
+      textStyle: ScoreText.caption.copyWith(color: tokens.ink900),
+      menuPadding: const EdgeInsets.all(ScoreSpace.sm),
       shape: const RoundedRectangleBorder(borderRadius: ScoreRadius.overlayAll),
     ),
   );
@@ -224,7 +230,20 @@ class ThemeAction extends StatelessWidget {
     return IconButton(
       key: const ValueKey('theme-action'),
       tooltip: dark ? '切换到浅色' : '切换到深色',
-      icon: Icon(dark ? Icons.dark_mode_outlined : Icons.light_mode_outlined),
+      style: IconButton.styleFrom(
+        fixedSize: Size.square(
+          DeviceLayoutScope.isCompact(context)
+              ? ScoreLayout.touchTarget
+              : ScoreLayout.desktopTarget,
+        ),
+        minimumSize: Size.zero,
+        padding: EdgeInsets.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: const RoundedRectangleBorder(
+          borderRadius: ScoreRadius.controlAll,
+        ),
+      ),
+      icon: ReaderIcon(dark ? ReaderGlyph.sun : ReaderGlyph.moon),
       onPressed: () async {
         try {
           await controller.setMode(

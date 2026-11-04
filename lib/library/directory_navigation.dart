@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../theme/tokens.dart';
+import '../theme/reader_icons.dart';
 
-class DirectorySearchField extends StatelessWidget {
+class DirectorySearchField extends StatefulWidget {
   const DirectorySearchField({
     super.key,
     required this.controller,
@@ -16,17 +17,87 @@ class DirectorySearchField extends StatelessWidget {
   final FocusNode focusNode;
   final ValueChanged<String> onChanged;
   @override
-  Widget build(BuildContext context) => TextField(
-    key: const ValueKey('directory-search-input'),
-    controller: controller,
-    focusNode: focusNode,
-    onChanged: onChanged,
-    decoration: const InputDecoration(
-      hintText: '搜索曲名、谱库或文件夹',
-      border: InputBorder.none,
-      isDense: true,
-    ),
-  );
+  State<DirectorySearchField> createState() => _DirectorySearchFieldState();
+}
+
+class _DirectorySearchFieldState extends State<DirectorySearchField> {
+  late String _publishedText;
+  @override
+  void initState() {
+    super.initState();
+    _publishedText = widget.controller.text;
+    widget.controller.addListener(_editingChanged);
+  }
+
+  void _editingChanged() {
+    final value = widget.controller.value;
+    if (value.composing.isValid && !value.composing.isCollapsed) return;
+    if (_publishedText == value.text) return;
+    _publishedText = value.text;
+    widget.onChanged(value.text);
+  }
+
+  @override
+  void didUpdateWidget(DirectorySearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_editingChanged);
+      _publishedText = widget.controller.text;
+      widget.controller.addListener(_editingChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_editingChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = ScoreTokens.of(context);
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.md),
+      decoration: BoxDecoration(
+        color: tokens.paper0,
+        borderRadius: ScoreRadius.controlAll,
+        border: Border.all(color: tokens.pine),
+      ),
+      child: Row(
+        children: [
+          ReaderIcon(ReaderGlyph.search, color: tokens.ink500),
+          const SizedBox(width: ScoreSpace.md),
+          Expanded(
+            child: TextField(
+              key: const ValueKey('directory-search-input'),
+              controller: widget.controller,
+              focusNode: widget.focusNode,
+              onTapOutside: (_) {},
+              style: ScoreText.body.copyWith(color: tokens.ink900),
+              decoration: const InputDecoration(
+                hintText: '搜索曲名、谱库或文件夹',
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              border: Border.all(color: tokens.hair),
+              borderRadius: ScoreRadius.controlAll,
+            ),
+            child: Text(
+              'Esc',
+              style: ScoreText.micro.copyWith(color: tokens.ink500),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// 当前目录的唯一权威显示位置。
@@ -89,11 +160,15 @@ class DirectoryBreadcrumbs extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = ScoreTokens.of(context);
     final crumbs = _crumbs();
-    final separator = Icon(Icons.chevron_right, size: 14, color: tokens.ink300);
-    final rootIcon = Icon(
-      Icons.folder_outlined,
-      size: ScoreText.body.fontSize,
-      color: onNavigate == null ? tokens.ink300 : tokens.ink500,
+    final separator = SizedBox(
+      width: 22,
+      child: Center(
+        child: ReaderIcon(
+          ReaderGlyph.chevronRight,
+          size: 14,
+          color: tokens.ink300,
+        ),
+      ),
     );
 
     double measure(String text, TextStyle style) {
@@ -124,10 +199,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
                       : FontWeight.w500,
                 ),
               ) +
-              padding +
-              (i == 0 && crumbs.length > 1
-                  ? rootIcon.size! + ScoreSpace.xs
-                  : 0),
+              padding,
         ),
     ];
     final menuWidth = math.max(
@@ -144,7 +216,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
       double extent(List<int> indices) =>
           indices.fold(0.0, (n, i) => n + natural[i]) +
           (hiddenCount > 0 ? menuWidth : 0) +
-          (indices.length - 1 + (hiddenCount > 0 ? 1 : 0)) * separator.size!;
+          (indices.length - 1 + (hiddenCount > 0 ? 1 : 0)) * 22;
       var indices = visible();
       // Preserve root, current and the nearest parent as long as their whole
       // controls fit. Hide only the earliest middle prefix needed by width.
@@ -155,7 +227,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
       double minimumExtent() =>
           indices.length * ScoreSpace.huge +
           (hiddenCount > 0 ? menuWidth : 0) +
-          (indices.length - 1 + (hiddenCount > 0 ? 1 : 0)) * separator.size!;
+          (indices.length - 1 + (hiddenCount > 0 ? 1 : 0)) * 22;
       while (minimumExtent() > available && hiddenCount < crumbs.length - 2) {
         hiddenCount++;
         indices = visible();
@@ -169,7 +241,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
         0.0,
         available -
             (hidden.isEmpty ? 0 : menuWidth) -
-            (indices.length - 1 + (hidden.isEmpty ? 0 : 1)) * separator.size!,
+            (indices.length - 1 + (hidden.isEmpty ? 0 : 1)) * 22,
       );
       final minimumLabel = math.min(ScoreSpace.huge, budget / indices.length);
       for (final i in indices) {
@@ -215,7 +287,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
             _CrumbButton(
               crumb: crumb,
               tooltip: crumb.path.isEmpty ? '$rootLabel · 根目录' : crumb.path,
-              leading: i == 0 ? rootIcon : null,
+              leading: null,
               width: widths[i]!,
               onTap: onNavigate == null ? null : () => onNavigate!(crumb.path),
             ),
@@ -267,15 +339,14 @@ class DirectoryBreadcrumbs extends StatelessWidget {
               onPressed: currentPath.isEmpty || onNavigate == null
                   ? null
                   : () => onNavigate!(_parentPath),
-              icon: Icon(
-                currentPath.isEmpty
-                    ? Icons.folder_outlined
-                    : Icons.arrow_upward,
-                size: 22,
+              icon: ReaderIcon(
+                ReaderGlyph.back,
+                size: ScoreLayout.iconVisual,
                 color: currentPath.isEmpty ? tokens.ink300 : tokens.ink700,
               ),
             ),
           ),
+          const SizedBox(width: ScoreSpace.sm),
           Expanded(
             child: Semantics(
               container: true,
@@ -313,7 +384,7 @@ class _CrumbButton extends StatelessWidget {
 
   final _Crumb crumb;
   final String tooltip;
-  final Icon? leading;
+  final Widget? leading;
   final double width;
   final VoidCallback? onTap;
 

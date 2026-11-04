@@ -1,6 +1,6 @@
 import '../library/score_path_label.dart';
 import '../library/directory_navigation.dart';
-import '../library/page_count_service.dart';
+import '../library/library_widgets.dart';
 import '../library/score_file_icon.dart';
 
 import 'dart:async';
@@ -14,7 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:path/path.dart' as p;
-import 'package:reader_state/reader_state.dart' show PageKey;
+import 'package:reader_state/reader_state.dart' show PageKey, ScoreSetList;
 
 import '../reader/library_reader_screen.dart';
 import '../reader/reader_session.dart';
@@ -24,6 +24,8 @@ import '../theme/reader_icons.dart';
 import 'sync_controller.dart';
 import 'sync_screen.dart';
 import '../theme/app_theme.dart';
+import '../theme/device_layout.dart';
+import '../theme/tokens.dart';
 import '../sharing/score_share.dart';
 
 class OfflineLibraryScreen extends StatefulWidget {
@@ -72,8 +74,6 @@ class _OfflineStatusIcon extends StatelessWidget {
                 ? ScoreFileIconState.unreadable
                 : !ready
                 ? ScoreFileIconState.cloud
-                : pendingVersion
-                ? ScoreFileIconState.update
                 : ScoreFileIconState.ready,
           ),
         ),
@@ -86,10 +86,18 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   final TextEditingController _search = TextEditingController();
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
+  String _query = '';
+  bool _setListsOpen = false;
+  String? _setListId;
+  bool _setListCreate = false;
+  int _setListEntry = 0;
   final Set<String> _collapsed = {};
+  final Set<String> _knownTreeFolders = {};
   Object? _treeStructure;
   FolderHierarchy? _hierarchy;
   List<FolderTreeRow>? _treeRows;
+  Object? _navEntriesKey;
+  List<LibraryNavEntry> _navEntries = const [];
   String _folder = '';
   bool _withinFolder = false;
   bool _opening = false;
@@ -108,7 +116,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _openSearch() {
-    setState(() => _searchOpen = true);
+    setState(() {
+      _searchOpen = true;
+      _setListsOpen = false;
+      _setListId = null;
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _searchFocus.requestFocus();
     });
@@ -118,11 +130,22 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     setState(() {
       _searchOpen = false;
       _search.clear();
+      _query = '';
     });
     _searchFocus.unfocus();
   }
 
   KeyEventResult _searchKey(KeyEvent event) {
+    if (mounted &&
+        _searchOpen &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        (!_search.value.composing.isValid ||
+            _search.value.composing.isCollapsed)) {
+      _closeSearch();
+      return KeyEventResult.handled;
+    }
     if (mounted &&
         (ModalRoute.of(context)?.isCurrent ?? true) &&
         event is KeyDownEvent &&
@@ -142,11 +165,14 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _selectSource(String id) => setState(() {
+    _setListsOpen = false;
+    _setListId = null;
     _searchOpen = false;
     _searchFocus.unfocus();
     _sourceId = id;
     _folder = '';
     _search.clear();
+    _query = '';
     _collapsed.clear();
   });
   String _size(int bytes) => bytes >= 1024 * 1024 * 1024
@@ -237,23 +263,26 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _selectFolder(String folder) {
+    _setListsOpen = false;
+    _setListId = null;
+    _collapsed.removeWhere(
+      (path) => folder == path || folder.startsWith('$path/'),
+    );
+    _treeRows = null;
     setState(() {
       _folder = folder;
       _searchOpen = false;
       _searchFocus.unfocus();
       _search.clear();
+      _query = '';
     });
   }
 
   List<ScoreTarget> _targets() => widget.controller.offlineTargets;
-  Future<void> _sync() => Navigator.push(
+  Future<void> _sync() => showDeviceSyncPanel(
     context,
-    MaterialPageRoute<void>(
-      builder: (_) => SyncScreen(
-        controller: widget.controller,
-        openOffline: () => Navigator.pop(context),
-      ),
-    ),
+    controller: widget.controller,
+    openOffline: () => Navigator.pop(context),
   );
 
   String _activityLabel(SyncController sync) {
@@ -273,88 +302,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     return '同步中';
   }
 
-  Widget _syncActions({
-    required bool compact,
-    required bool minimal,
-    required double maxWidth,
-  }) {
-    final sync = widget.controller;
-    final active = sync.hasSyncActivity;
-    final label = active
-        ? _activityLabel(sync)
-        : sync.paired
-        ? '同步管理'
-        : '连接电脑';
-    final shortLabel = minimal
-        ? active
-              ? sync.phase == SyncPhase.transferring &&
-                        (sync.totalObjects ?? 0) > 0
-                    ? '${(100 * sync.processedObjects / sync.totalObjects!).clamp(0, 100).floor()}%'
-                    : !sync.busy && sync.backgroundPendingObjects > 0
-                    ? '余${sync.backgroundPendingObjects}份'
-                    : '同步中'
-              : sync.paired
-              ? '管理'
-              : label
-        : label;
-    final manage = Tooltip(
-      message: active ? '$label，查看同步与连接' : label,
-      child: TextButton.icon(
-        key: const ValueKey('offline-sync-management'),
-        onPressed: () => unawaited(_sync()),
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          minimumSize: const Size(48, 48),
-          textStyle: minimal ? const TextStyle(fontSize: 12) : null,
-          iconSize: minimal ? 18 : null,
-        ),
-        icon: compact && !active
-            ? null
-            : active
-            ? const _SyncActivityIcon()
-            : Icon(sync.paired ? Icons.sync : Icons.computer),
-        label: Text(shortLabel, maxLines: 1, overflow: TextOverflow.ellipsis),
-      ),
-    );
-    final refresh = Tooltip(
-      message: '更新电脑上的曲谱目录',
-      child: TextButton.icon(
-        key: const ValueKey('offline-refresh-catalog'),
-        onPressed: sync.paired && sync.initializationError == null
-            ? () => unawaited(_refresh())
-            : null,
-        icon: const Icon(Icons.refresh),
-        label: const Text('更新目录', maxLines: 1, overflow: TextOverflow.ellipsis),
-      ),
-    );
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      mainAxisAlignment: MainAxisAlignment.end,
-      children: [
-        if (!active && !(compact && (_searchOpen || !sync.paired))) ...[
-          if (compact)
-            IconButton(
-              key: const ValueKey('offline-refresh-catalog'),
-              tooltip: '更新目录',
-              icon: const Icon(Icons.refresh),
-              onPressed: sync.paired && sync.initializationError == null
-                  ? () => unawaited(_refresh())
-                  : null,
-            )
-          else
-            refresh,
-        ],
-        ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxWidth),
-          child: manage,
-        ),
-      ],
-    );
-  }
-
   Future<void> _open(LibraryEntry entry) async {
     if (_opening) return;
     _opening = true;
+    final savedQuery = _searchOpen ? _query : null;
+    var opened = false;
     try {
       var target = widget.controller.locateOffline(entry.id);
       if (target == null) {
@@ -364,6 +316,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
         if (target == null) return;
       }
       final readable = target;
+      opened = true;
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
@@ -384,49 +337,95 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       );
     } finally {
       _opening = false;
+      if (mounted && opened && savedQuery != null) {
+        setState(() {
+          _searchOpen = true;
+          _search.text = savedQuery;
+          _query = savedQuery;
+        });
+      }
     }
   }
 
-  Widget? _folderDownloadMenu({
+  Widget _folderDownloadMenu({
     required String sourceId,
     required String folder,
   }) {
-    if (!widget.controller.needsOfflineDownload(
+    final needsDownload = widget.controller.needsOfflineDownload(
       sourceId: sourceId,
       folder: folder,
-    )) {
-      return null;
-    }
+    );
     return PopupMenuButton<String>(
+      style: libraryIconButtonStyle(context),
+      constraints: const BoxConstraints.tightFor(width: ScoreLayout.menuWidth),
       tooltip: '文件夹选项',
-      onSelected: (_) =>
-          unawaited(_download(sourceId: sourceId, folder: folder)),
+      icon: const ReaderIcon(ReaderGlyph.more),
+      padding: EdgeInsets.zero,
+      onSelected: (value) {
+        if (value == 'download') {
+          unawaited(_download(sourceId: sourceId, folder: folder));
+        } else {
+          showDialog<void>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('文件夹位置'),
+              content: SelectableText('$_sourceName / $folder'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('关闭'),
+                ),
+              ],
+            ),
+          );
+        }
+      },
       itemBuilder: (_) => [
-        PopupMenuItem(
-          value: 'download',
-          child: Text(folder.isEmpty ? '下载整个谱库' : '下载此文件夹'),
-        ),
+        const PopupMenuItem(value: 'location', child: Text('查看位置')),
+        if (needsDownload)
+          PopupMenuItem(
+            value: 'download',
+            child: Text(folder.isEmpty ? '下载整个谱库' : '下载此文件夹'),
+          ),
       ],
     );
   }
 
-  void _setLists() => unawaited(
-    Navigator.push(
-      context,
-      MaterialPageRoute<void>(
-        builder: (_) => SetListsScreen(
-          workspace: widget.controller.workspace,
-          locate: widget.controller.locateOffline,
-          targets: _targets,
-          catalog: () => widget.controller.offlineScoreCatalog,
-          prepare: widget.controller.prepareOfflineScores,
-          preparationLabel: '下载本曲单缺少内容',
-          preparationNotice: '需要电脑在线。离线时会记住所选曲目，连接后再准备。',
-          sourceChanges: widget.controller,
-        ),
-      ),
-    ),
+  void _setLists({String? initialListId, bool initialCreate = false}) {
+    setState(() {
+      _setListsOpen = true;
+      _setListId = initialListId;
+      _setListCreate = initialCreate;
+      _setListEntry++;
+    });
+    _searchFocus.unfocus();
+  }
+
+  Widget _embeddedSetLists() => SetListsScreen(
+    key: ValueKey(('offline-setlists', _setListEntry)),
+    workspace: widget.controller.workspace,
+    embedded: true,
+    initialListId: _setListId,
+    initialCreate: _setListCreate,
+    pageCounts: widget.controller.pageCounts,
+    onBack: () => setState(() {
+      _setListsOpen = false;
+      _setListId = null;
+      _setListCreate = false;
+    }),
+    onSelectionChanged: (id) => setState(() {
+      _setListId = id;
+      _setListCreate = false;
+    }),
+    locate: widget.controller.locateOffline,
+    targets: _targets,
+    catalog: () => widget.controller.offlineScoreCatalog,
+    prepare: widget.controller.prepareOfflineScores,
+    preparationLabel: '下载本曲单缺少内容',
+    preparationNotice: '需要电脑在线。离线时会记住所选曲目，连接后再准备。',
+    sourceChanges: widget.controller,
   );
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: Listenable.merge([
@@ -435,425 +434,646 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     ]),
     builder: (context, _) {
       final sync = widget.controller;
-      final view = sync.replica;
       final folders =
           sync.activeCollection?.index?.folders[_activeSourceId] ??
-          view?.snapshot.folders ??
+          sync.replica?.snapshot.folders ??
           const [''];
       final folder = folders.contains(_folder) ? _folder : '';
-      final searching = _search.text.trim().isNotEmpty;
+      final searching = _query.trim().isNotEmpty;
       final entries = sync.offlineEntries(
         sourceId: _activeSourceId,
         folder: folder,
-        query: _search.text,
+        query: _query,
         withinFolder: _withinFolder,
       );
       _ensureHierarchy(folders);
       final children = searching ? <String>[] : _hierarchy!.childrenOf(folder);
-      final missing = sync.offlineMissingEntries;
+      final ipad = DeviceLayoutScope.isCompact(context);
       return LayoutBuilder(
         builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 850;
-          // Keep connection/status text readable in phone and split-view widths.
-          final compactActions =
-              constraints.maxWidth < 700 ||
-              MediaQuery.textScalerOf(context).scale(14) > 18;
-          final otherActionsWidth =
-              48.0 + // Appearance.
-              48.0 + // Search.
-              (!_searchOpen ? 48 : 0) + // Set lists.
-              (!wide && !widget.isHome ? 48 : 0) + // Folders.
-              (!sync.hasSyncActivity &&
-                      !(compactActions && (_searchOpen || !sync.paired))
-                  ? compactActions
-                        ? 48
-                        : 124
-                  : 0);
-          final managementWidth =
-              (constraints.maxWidth -
-                      otherActionsWidth -
-                      (!wide || !widget.isHome ? 56 : 0) -
-                      (widget.isHome && !_searchOpen && compactActions
-                          ? 80
-                          : 16))
-                  .clamp(56.0, 240.0);
+          final wide =
+              constraints.maxWidth >=
+              (ipad
+                  ? ScoreLayout.ipadSidebarMin
+                  : ScoreLayout.windowsSidebarMin);
           return Scaffold(
-            appBar: AppBar(
-              titleSpacing: compactActions ? 8 : null,
-              title: wide && defaultTargetPlatform == TargetPlatform.windows
-                  ? Row(
-                      children: [
-                        SizedBox(
-                          width: 261,
-                          child: Text(widget.isHome ? '曲谱库' : '离线谱库'),
-                        ),
-                        if (_searchOpen)
-                          Expanded(
-                            child: DirectorySearchField(
-                              controller: _search,
-                              focusNode: _searchFocus,
-                              onChanged: (_) => setState(() {}),
-                            ),
-                          ),
-                      ],
-                    )
-                  : LayoutBuilder(
-                      builder: (context, titleConstraints) => Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (_searchOpen ||
-                              !widget.isHome ||
-                              defaultTargetPlatform != TargetPlatform.iOS ||
-                              titleConstraints.maxWidth >= 160)
-                            Flexible(
-                              child: _searchOpen
-                                  ? DirectorySearchField(
-                                      controller: _search,
-                                      focusNode: _searchFocus,
-                                      onChanged: (_) => setState(() {}),
-                                    )
-                                  : Text(
-                                      widget.isHome ? '曲谱库' : '离线谱库',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                            ),
-                          if (widget.isHome &&
-                              !kIsWeb &&
-                              defaultTargetPlatform == TargetPlatform.iOS)
-                            Flexible(
-                              child: Visibility(
-                                visible: !_searchOpen,
-                                maintainState: true,
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    left: compactActions ? 0 : 8,
-                                  ),
-                                  child: SigningExpiryChip(
-                                    compact: compactActions,
-                                    onRead: (value) =>
-                                        sync.reportLocalSigningExpiry(
-                                          value.expiration,
-                                        ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-              leading: widget.isHome
-                  ? null
-                  : IconButton(
-                      tooltip: '返回谱库',
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.arrow_back),
-                    ),
-              actions: [
-                IconButton(
-                  tooltip: _searchOpen ? '关闭搜索' : '搜索',
-                  icon: Icon(_searchOpen ? Icons.close : Icons.search),
-                  onPressed: _searchOpen ? _closeSearch : _openSearch,
-                ),
-                const ThemeAction(),
-                _syncActions(
-                  compact: compactActions,
-                  minimal: constraints.maxWidth < 360,
-                  maxWidth: managementWidth,
-                ),
-                if (!wide && !widget.isHome)
-                  Builder(
-                    builder: (context) => IconButton(
-                      tooltip: '离线文件夹',
-                      onPressed: () => Scaffold.of(context).openDrawer(),
-                      icon: const Icon(Icons.folder_outlined),
-                    ),
-                  ),
-                if (!_searchOpen)
-                  IconButton(
-                    tooltip: '曲单',
-                    onPressed: _setLists,
-                    icon: const Icon(Icons.queue_music),
-                  ),
-              ],
-            ),
             drawer: wide
                 ? null
-                : Drawer(child: SafeArea(child: _tree(folders))),
-            body: Row(
-              children: [
-                if (wide) SizedBox(width: 260, child: _tree(folders)),
-                Expanded(
-                  child: Column(
-                    children: [
-                      if (sync.initializationError != null)
-                        Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Text(sync.initializationError!),
-                        ),
-                      if (sync.busy)
-                        const LinearProgressIndicator(minHeight: 2),
-                      if (sync.message != null &&
-                          sync.message != _dismissedMessage &&
-                          (sync.phase == SyncPhase.partial ||
-                              sync.phase == SyncPhase.failed ||
-                              sync.phase == SyncPhase.cancelled))
-                        ListTile(
-                          dense: true,
-                          title: Text(
-                            sync.message!,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
+                : Drawer(
+                    width: ScoreLayout.drawerWidth,
+                    child: SafeArea(child: _tree(folders)),
+                  ),
+            body: SafeArea(
+              child: Row(
+                children: [
+                  if (wide)
+                    SizedBox(
+                      width: ScoreLayout.sidebarWidth,
+                      child: _tree(folders),
+                    ),
+                  Expanded(
+                    child: _setListsOpen
+                        ? _embeddedSetLists()
+                        : Column(
                             children: [
-                              TextButton(
-                                onPressed: sync.busy
-                                    ? null
-                                    : () => unawaited(sync.synchronize()),
-                                child: const Text('重试'),
+                              Builder(
+                                builder: (headerContext) =>
+                                    _header(headerContext, wide, folder),
                               ),
-                              IconButton(
-                                tooltip: '关闭此提示',
-                                onPressed: () => setState(
-                                  () => _dismissedMessage = sync.message,
+                              if (!wide && ipad)
+                                SizedBox(
+                                  height: ScoreLayout.sourceStripHeight,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: ScoreLayout.listMargin,
+                                    ),
+                                    itemCount: sync.offlineSources.length,
+                                    separatorBuilder: (_, _) =>
+                                        const SizedBox(width: 8),
+                                    itemBuilder: (_, index) {
+                                      final source = sync.offlineSources[index];
+                                      final selected =
+                                          source.id == _activeSourceId;
+                                      return Center(
+                                        child: TextButton(
+                                          onPressed: () =>
+                                              _selectSource(source.id),
+                                          style: TextButton.styleFrom(
+                                            backgroundColor: selected
+                                                ? ScoreTokens.of(context)
+                                                      .pineWash
+                                                : ScoreTokens.of(context)
+                                                      .paper0,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                            ),
+                                            minimumSize: const Size(0, 40),
+                                            shape: const RoundedRectangleBorder(
+                                              borderRadius:
+                                                  ScoreRadius.controlAll,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            source.name,
+                                            style: ScoreText.caption.copyWith(
+                                              color: selected
+                                                  ? ScoreTokens.of(context).pine
+                                                  : ScoreTokens.of(context)
+                                                        .ink700,
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
                                 ),
-                                icon: const Icon(Icons.close),
+                              Expanded(
+                                child: Listener(
+                                  behavior: HitTestBehavior.translucent,
+                                  onPointerUp: (_) => scheduleMicrotask(() {
+                                    if (mounted &&
+                                        _searchOpen &&
+                                        (ModalRoute.of(context)?.isCurrent ??
+                                            true)) {
+                                      _closeSearch();
+                                    }
+                                  }),
+                                  child: Column(
+                                    children: [
+                                      if (!wide)
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: ScoreLayout.listMargin,
+                                          ),
+                                          child: DirectoryBreadcrumbs(
+                                            rootLabel: _sourceName,
+                                            currentPath: folder,
+                                            onNavigate: _selectFolder,
+                                          ),
+                                        ),
+                                      if (searching)
+                                        LibrarySearchContext(
+                                          count: entries.length,
+                                          withinFolder: _withinFolder,
+                                          onScopeChanged: (value) => setState(
+                                            () => _withinFolder = value,
+                                          ),
+                                        ),
+                                      if (sync.initializationError != null)
+                                        _notice(sync.initializationError!),
+                                      if (sync.busy)
+                                        const LinearProgressIndicator(
+                                          minHeight: 2,
+                                        ),
+                                      if (sync.message != null &&
+                                          sync.message != _dismissedMessage &&
+                                          [
+                                            SyncPhase.partial,
+                                            SyncPhase.failed,
+                                            SyncPhase.cancelled,
+                                          ].contains(sync.phase))
+                                        _notice(
+                                          sync.message!,
+                                          action: TextButton(
+                                            onPressed: sync.busy
+                                                ? null
+                                                : () => unawaited(
+                                                    sync.synchronize(),
+                                                  ),
+                                            child: const Text('重试'),
+                                          ),
+                                          dismiss: () => setState(
+                                            () => _dismissedMessage =
+                                                sync.message,
+                                          ),
+                                        ),
+                                      if (sync.offlineMissingEntries.isNotEmpty)
+                                        _notice(
+                                          '${sync.offlineMissingEntries.length} 份源曲谱缺失',
+                                          action: TextButton(
+                                            onPressed: _missingDetails,
+                                            child: const Text('查看'),
+                                          ),
+                                        ),
+                                      if (sync.workspace.unsavedCount > 0)
+                                        _notice(
+                                          '${sync.workspace.unsavedCount} 项批注未保存',
+                                          action: TextButton(
+                                            onPressed: () => unawaited(
+                                              sync.workspace.retryStrokes(),
+                                            ),
+                                            child: const Text('重试保存'),
+                                          ),
+                                        ),
+                                      Expanded(
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: ScoreLayout.listMargin,
+                                          ),
+                                          child: Column(
+                                            children: [
+                                              const LibraryColumnHeader(),
+                                              Expanded(
+                                                child:
+                                                    entries.isEmpty &&
+                                                        children.isEmpty
+                                                    ? Center(
+                                                        child: Text(
+                                                          searching
+                                                              ? '未找到曲谱'
+                                                              : '这个文件夹里还没有曲谱',
+                                                          style: ScoreText.body
+                                                              .copyWith(
+                                                                color:
+                                                                    ScoreTokens.of(
+                                                                      context,
+                                                                    ).ink500,
+                                                              ),
+                                                        ),
+                                                      )
+                                                    : ListView.builder(
+                                                        key: PageStorageKey((
+                                                          _activeSourceId,
+                                                          folder,
+                                                          _query,
+                                                        )),
+                                                        padding:
+                                                            EdgeInsets.zero,
+                                                        itemCount:
+                                                            entries.length +
+                                                            children.length,
+                                                        itemBuilder: (context, index) {
+                                                          if (index <
+                                                              children.length) {
+                                                            final child =
+                                                                children[index];
+                                                            final status = sync
+                                                                .folderOfflineStatus(
+                                                                  sourceId:
+                                                                      _activeSourceId!,
+                                                                  folder: child,
+                                                                );
+                                                            return LibraryFileRow(
+                                                              key: ValueKey(
+                                                                'offline-library-folder-$child',
+                                                              ),
+                                                              leading:
+                                                                  _OfflineFolderIcon(
+                                                                    status:
+                                                                        status,
+                                                                  ),
+                                                              name: p.posix
+                                                                  .basename(
+                                                                    child,
+                                                                  ),
+                                                              subtitle:
+                                                                  '${status.total} 项',
+                                                              action: _folderDownloadMenu(
+                                                                sourceId:
+                                                                    _activeSourceId!,
+                                                                folder: child,
+                                                              ),
+                                                              onTap: () =>
+                                                                  _selectFolder(
+                                                                    child,
+                                                                  ),
+                                                            );
+                                                          }
+                                                          final entry =
+                                                              entries[index -
+                                                                  children
+                                                                      .length];
+                                                          final ready =
+                                                              entry
+                                                                  .availability ==
+                                                              ContentAvailability
+                                                                  .ready;
+                                                          final pending =
+                                                              ready &&
+                                                              sync.hasPendingVersion(
+                                                                entry.id,
+                                                              );
+                                                          return LibraryFileRow(
+                                                            key: ValueKey(
+                                                              'offline-library-file-${entry.id}',
+                                                            ),
+                                                            leading: _OfflineStatusIcon(
+                                                              availability: entry
+                                                                  .availability,
+                                                              pendingVersion:
+                                                                  pending,
+                                                              path: entry
+                                                                  .relativePath,
+                                                            ),
+                                                            name: p.posix.basename(
+                                                              entry
+                                                                  .relativePath,
+                                                            ),
+                                                            query: searching
+                                                                ? _query
+                                                                : '',
+                                                            subtitle: searching
+                                                                ? '${sync.sourceNameFor(entry.id)} / ${scoreParentFolder(entry.relativePath)}'
+                                                                : null,
+                                                            metadata: LibraryFileMetadata(
+                                                              entryId: entry.id,
+                                                              revisionId: entry
+                                                                  .currentRevisionId,
+                                                              path: entry
+                                                                  .relativePath,
+                                                              service: sync
+                                                                  .pageCounts,
+                                                            ),
+                                                            action: Builder(
+                                                              builder: (shareContext) => PopupMenuButton<String>(
+                                                                style:
+                                                                    libraryIconButtonStyle(
+                                                                      context,
+                                                                    ),
+                                                                constraints:
+                                                                    const BoxConstraints.tightFor(
+                                                                      width: ScoreLayout
+                                                                          .menuWidth,
+                                                                    ),
+                                                                tooltip: '曲谱选项',
+                                                                icon:
+                                                                    const ReaderIcon(
+                                                                      ReaderGlyph
+                                                                          .more,
+                                                                    ),
+                                                                padding:
+                                                                    EdgeInsets
+                                                                        .zero,
+                                                                enabled:
+                                                                    !_sharingEntries
+                                                                        .contains(
+                                                                          entry
+                                                                              .id,
+                                                                        ),
+                                                                onSelected: (value) {
+                                                                  if (value ==
+                                                                      'add') {
+                                                                    unawaited(
+                                                                      showAddToSetList(
+                                                                        context,
+                                                                        workspace:
+                                                                            sync.workspace,
+                                                                        entryId:
+                                                                            entry.id,
+                                                                        displayPath:
+                                                                            entry.relativePath,
+                                                                      ),
+                                                                    );
+                                                                  } else if (value ==
+                                                                      'location') {
+                                                                    _pathDetails(
+                                                                      entry,
+                                                                    );
+                                                                  } else {
+                                                                    unawaited(
+                                                                      value ==
+                                                                              'share'
+                                                                          ? _shareEntry(
+                                                                              shareContext,
+                                                                              entry,
+                                                                            )
+                                                                          : value == 'download'
+                                                                          ? _download(
+                                                                              entry: entry,
+                                                                            )
+                                                                          : value == 'remove'
+                                                                          ? sync.removeOfflineDownload(
+                                                                              entry.id,
+                                                                            )
+                                                                          : sync.selectOffline(
+                                                                              OfflineRule(
+                                                                                sourceId: sync.sourceIdFor(entry.id)!,
+                                                                                entryId: entry.id,
+                                                                                selected: false,
+                                                                              ),
+                                                                            ),
+                                                                    );
+                                                                  }
+                                                                },
+                                                                itemBuilder: (_) => [
+                                                                  const PopupMenuItem(
+                                                                    value:
+                                                                        'add',
+                                                                    child: Text(
+                                                                      '加入曲单',
+                                                                    ),
+                                                                  ),
+                                                                  PopupMenuItem(
+                                                                    value:
+                                                                        'share',
+                                                                    enabled:
+                                                                        ready,
+                                                                    child: Text(
+                                                                      ready
+                                                                          ? '分享'
+                                                                          : '下载后可分享',
+                                                                    ),
+                                                                  ),
+                                                                  const PopupMenuItem(
+                                                                    value: 'location',
+                                                                    child: Text(
+                                                                      '查看位置',
+                                                                    ),
+                                                                  ),
+                                                                  if (!ready ||
+                                                                      pending)
+                                                                    PopupMenuItem(
+                                                                      value: 'download',
+                                                                      child: Text(
+                                                                        pending
+                                                                            ? '更新下载'
+                                                                            : '下载到 iPad',
+                                                                      ),
+                                                                    ),
+                                                                  const PopupMenuItem(
+                                                                    value: 'unselect',
+                                                                    child: Text(
+                                                                      '取消离线选择',
+                                                                    ),
+                                                                  ),
+                                                                  if (ready)
+                                                                    const PopupMenuItem(
+                                                                      value: 'remove',
+                                                                      child:
+                                                                          Text(
+                                                                            '移除本机下载',
+                                                                          ),
+                                                                    ),
+                                                                ],
+                                                              ),
+                                                            ),
+                                                            onTap: () =>
+                                                                unawaited(
+                                                                  _open(entry),
+                                                                ),
+                                                          );
+                                                        },
+                                                      ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             ],
                           ),
-                        ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: DirectoryBreadcrumbs(
-                                rootLabel:
-                                    sync.offlineSources
-                                        .where(
-                                          (source) =>
-                                              source.id == _activeSourceId,
-                                        )
-                                        .firstOrNull
-                                        ?.name ??
-                                    '谱库',
-                                currentPath: folder,
-                                onNavigate: _selectFolder,
-                              ),
-                            ),
-                            if (_activeSourceId != null)
-                              _OfflineFolderIcon(
-                                status: sync.folderOfflineStatus(
-                                  sourceId: _activeSourceId!,
-                                  folder: folder,
-                                ),
-                              ),
-                            if (_activeSourceId != null &&
-                                sync.needsOfflineDownload(
-                                  sourceId: _activeSourceId!,
-                                  folder: folder,
-                                ))
-                              _folderDownloadMenu(
-                                sourceId: _activeSourceId!,
-                                folder: folder,
-                              )!,
-                          ],
-                        ),
-                      ),
-                      if (searching)
-                        CheckboxListTile(
-                          dense: true,
-                          title: const Text('仅搜索当前文件夹及子文件夹'),
-                          value: _withinFolder,
-                          onChanged: (value) =>
-                              setState(() => _withinFolder = value ?? false),
-                        ),
-                      if (missing.isNotEmpty)
-                        ListTile(
-                          dense: true,
-                          leading: const Icon(Icons.info_outline),
-                          title: Text('${missing.length} 份源曲谱缺失'),
-                          onTap: () => showDialog<void>(
-                            context: context,
-                            builder: (_) => AlertDialog(
-                              title: const Text('源曲谱缺失'),
-                              content: SizedBox(
-                                width: 550,
-                                child: SingleChildScrollView(
-                                  child: SelectableText(
-                                    missing
-                                        .map((e) => e.relativePath)
-                                        .join('\n'),
-                                  ),
-                                ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context),
-                                  child: const Text('关闭'),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      if (sync.workspace.unsavedCount > 0)
-                        ListTile(
-                          title: Text('${sync.workspace.unsavedCount} 项批注未保存'),
-                          trailing: TextButton(
-                            onPressed: () =>
-                                unawaited(sync.workspace.retryStrokes()),
-                            child: const Text('重试保存'),
-                          ),
-                        ),
-                      Expanded(
-                        child: entries.isEmpty && children.isEmpty
-                            ? const Center(child: Text('没有找到曲谱'))
-                            : ListView.builder(
-                                itemCount: entries.length + children.length,
-                                itemBuilder: (context, index) {
-                                  if (index < children.length) {
-                                    final child = children[index];
-                                    return ListTile(
-                                      leading: _OfflineFolderIcon(
-                                        status: sync.folderOfflineStatus(
-                                          sourceId: _activeSourceId!,
-                                          folder: child,
-                                        ),
-                                      ),
-                                      title: Text(p.posix.basename(child)),
-                                      subtitle: Text(child),
-                                      trailing: _folderDownloadMenu(
-                                        sourceId: _activeSourceId!,
-                                        folder: child,
-                                      ),
-                                      onTap: () => _selectFolder(child),
-                                    );
-                                  }
-                                  final entry =
-                                      entries[index - children.length];
-                                  final ready =
-                                      entry.availability ==
-                                      ContentAvailability.ready;
-                                  final pending =
-                                      ready && sync.hasPendingVersion(entry.id);
-                                  return ListTile(
-                                    minTileHeight: 72,
-                                    leading: _OfflineStatusIcon(
-                                      availability: entry.availability,
-                                      pendingVersion: pending,
-                                      path: entry.relativePath,
-                                    ),
-                                    title: Text(
-                                      p.posix.basenameWithoutExtension(
-                                        entry.relativePath,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    subtitle: Text(
-                                      '${sync.sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}',
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    onTap: () => unawaited(_open(entry)),
-                                    trailing: ScoreFileTrailing(
-                                      addToSetListAction: IconButton(
-                                        tooltip: '加入曲单',
-                                        icon: const ReaderIcon(
-                                          ReaderGlyph.playlistAdd,
-                                        ),
-                                        onPressed: () => showAddToSetList(
-                                          context,
-                                          workspace: sync.workspace,
-                                          entryId: entry.id,
-                                          displayPath: entry.relativePath,
-                                        ),
-                                      ),
-                                      metadata: ScoreFileMetadata(
-                                        key: ValueKey((
-                                          entry.id,
-                                          entry.currentRevisionId,
-                                        )),
-                                        entryId: entry.id,
-                                        revisionId: entry.currentRevisionId,
-                                        path: entry.relativePath,
-                                        service: sync.pageCounts,
-                                      ),
-                                      menuAction: Builder(
-                                        builder: (shareContext) =>
-                                            PopupMenuButton<String>(
-                                              tooltip: '离线选项',
-                                              enabled: !_sharingEntries
-                                                  .contains(entry.id),
-                                              onSelected: (value) => unawaited(
-                                                value == 'share'
-                                                    ? _shareEntry(
-                                                        shareContext,
-                                                        entry,
-                                                      )
-                                                    : value == 'download'
-                                                    ? _download(entry: entry)
-                                                    : value == 'remove'
-                                                    ? sync.removeOfflineDownload(
-                                                        entry.id,
-                                                      )
-                                                    : sync.selectOffline(
-                                                        OfflineRule(
-                                                          sourceId: sync
-                                                              .sourceIdFor(
-                                                                entry.id,
-                                                              )!,
-                                                          entryId: entry.id,
-                                                          selected: false,
-                                                        ),
-                                                      ),
-                                              ),
-                                              itemBuilder: (_) => [
-                                                PopupMenuItem(
-                                                  value: 'share',
-                                                  enabled: ready,
-                                                  child: Text(
-                                                    ready ? '分享' : '下载后可分享',
-                                                  ),
-                                                ),
-                                                if (!ready || pending)
-                                                  PopupMenuItem(
-                                                    value: 'download',
-                                                    child: Text(
-                                                      pending
-                                                          ? '更新下载'
-                                                          : '下载到iPad',
-                                                    ),
-                                                  ),
-                                                const PopupMenuItem(
-                                                  value: 'unselect',
-                                                  child: Text('取消离线选择'),
-                                                ),
-                                                if (ready)
-                                                  const PopupMenuItem(
-                                                    value: 'remove',
-                                                    child: Text('移除本机下载'),
-                                                  ),
-                                              ],
-                                            ),
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           );
         },
       );
     },
   );
+
+  String get _sourceName =>
+      widget.controller.offlineSources
+          .where((source) => source.id == _activeSourceId)
+          .firstOrNull
+          ?.name ??
+      '谱库';
+
+  Widget _header(BuildContext headerContext, bool wide, String folder) =>
+      SizedBox(
+        height: ScoreLayout.headerHeight,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: ScoreLayout.listMargin,
+          ),
+          child: Row(
+            children: [
+              if (!wide) ...[
+                LibraryIconButton(
+                  glyph: ReaderGlyph.list,
+                  label: '打开来源',
+                  onPressed: () => Scaffold.of(headerContext).openDrawer(),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Expanded(
+                child: _searchOpen
+                    ? DirectorySearchField(
+                        controller: _search,
+                        focusNode: _searchFocus,
+                        onChanged: (text) => setState(() => _query = text),
+                      )
+                    : wide
+                    ? DirectoryBreadcrumbs(
+                        rootLabel: _sourceName,
+                        currentPath: folder,
+                        onNavigate: _selectFolder,
+                      )
+                    : Text(
+                        widget.isHome ? '曲谱库' : '离线谱库',
+                        style: ScoreText.title.copyWith(
+                          color: ScoreTokens.of(context).ink900,
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 8),
+              LibraryIconButton(
+                glyph: _searchOpen ? ReaderGlyph.close : ReaderGlyph.search,
+                label: _searchOpen ? '关闭搜索' : '搜索',
+                onPressed: _searchOpen ? _closeSearch : _openSearch,
+              ),
+              const SizedBox(width: 8),
+              const ThemeAction(),
+              if (!wide) ...[
+                const SizedBox(width: 8),
+                LibraryIconButton(
+                  glyph: ReaderGlyph.downloadList,
+                  label: '曲单',
+                  onPressed: _setLists,
+                ),
+                const SizedBox(width: 8),
+                _deviceSummary(compact: true),
+              ],
+            ],
+          ),
+        ),
+      );
+
+  Widget _deviceSummary({bool compact = false}) {
+    final sync = widget.controller;
+    final t = ScoreTokens.of(context);
+    final ios = !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+    final signing = SigningExpiryChip(
+      summaryOnly: true,
+      compact: compact,
+      pairedDevice: !ios,
+      pairedStatus: ios ? null : sync.signingStatus,
+      unavailable: ios ? null : sync.signingUnavailable,
+      onRefresh: ios ? null : sync.refreshSigningStatus,
+      onRead: ios
+          ? (value) => sync.reportLocalSigningExpiry(value.expiration)
+          : null,
+    );
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: compact ? 160 : double.infinity,
+        minHeight: compact ? ScoreLayout.touchTarget : 0,
+      ),
+      child: InkWell(
+        key: const ValueKey('offline-sync-management'),
+        onTap: () => unawaited(_sync()),
+        borderRadius: ScoreRadius.controlAll,
+        child: Padding(
+          padding: compact
+              ? const EdgeInsets.symmetric(horizontal: ScoreSpace.md)
+              : const EdgeInsets.all(ScoreSpace.md),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              sync.hasSyncActivity
+                  ? const LibrarySyncActivityIcon()
+                  : ReaderIcon(ReaderGlyph.sync, color: t.pine),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!compact)
+                      Text(
+                        sync.paired ? '电脑 · 已连接' : '连接电脑',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ScoreText.body.copyWith(color: t.ink900),
+                      ),
+                    IgnorePointer(child: signing),
+                    if (!compact && sync.hasSyncActivity)
+                      Text(
+                        _activityLabel(sync),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: ScoreText.caption.copyWith(color: t.ink500),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _notice(String message, {Widget? action, VoidCallback? dismiss}) =>
+      Material(
+        color: ScoreTokens.of(context).warnBg,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  message,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: ScoreText.note,
+                ),
+              ),
+              ?action,
+              if (dismiss != null)
+                LibraryIconButton(
+                  glyph: ReaderGlyph.close,
+                  label: '关闭提示',
+                  onPressed: dismiss,
+                ),
+            ],
+          ),
+        ),
+      );
+
+  void _missingDetails() => showDialog<void>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('源曲谱缺失'),
+      content: SizedBox(
+        width: 550,
+        child: SingleChildScrollView(
+          child: SelectableText(
+            widget.controller.offlineMissingEntries
+                .map((e) => e.relativePath)
+                .join('\n'),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+
+  void _pathDetails(LibraryEntry entry) => showDialog<void>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(p.posix.basename(entry.relativePath)),
+      content: SelectableText(
+        '${widget.controller.sourceNameFor(entry.id)} / ${entry.relativePath}',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
+
   Future<void> _shareEntry(BuildContext anchor, LibraryEntry entry) async {
     if (!_sharingEntries.add(entry.id)) return;
     setState(() {});
@@ -902,6 +1122,14 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     );
     if (key != _treeStructure) {
       _treeStructure = key;
+      for (final path in folders) {
+        if (_knownTreeFolders.add(path) &&
+            path.isNotEmpty &&
+            _folder != path &&
+            !_folder.startsWith('$path/')) {
+          _collapsed.add(path);
+        }
+      }
       _hierarchy = FolderHierarchy(folders);
       _treeRows = null;
     }
@@ -910,145 +1138,118 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   Widget _tree(List<String> folders) {
     _ensureHierarchy(folders);
     final visible = _treeRows ??= _hierarchy!.visibleRows(_collapsed);
-    final rows = [
-      for (final source in widget.controller.offlineSources) ...[
-        (source, null as FolderTreeRow?),
-        if (_activeSourceId == source.id)
-          for (final row in visible) (source, row),
-      ],
-    ];
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: Column(
-        children: [
-          Expanded(
-            child: ListView.builder(
-              key: const PageStorageKey('offline-folder-tree'),
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              itemCount: rows.length + 1,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text(
-                      '离线文件夹',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  );
-                }
-                final (source, row) = rows[index - 1];
-                if (row != null) return _node(row.path, row.depth);
-                return ListTile(
-                  title: Text(
-                    source.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  leading: _OfflineFolderIcon(
-                    status: widget.controller.folderOfflineStatus(
-                      sourceId: source.id,
-                    ),
-                  ),
-                  selected: _activeSourceId == source.id && _folder.isEmpty,
-                  onTap: () => _selectSource(source.id),
-                  trailing: _folderDownloadMenu(
-                    sourceId: source.id,
-                    folder: '',
-                  ),
-                );
-              },
-            ),
-          ),
-          if (defaultTargetPlatform == TargetPlatform.windows)
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: SigningExpiryChip(
-                  pairedDevice: true,
-                  pairedStatus: widget.controller.signingStatus,
-                  unavailable: widget.controller.signingUnavailable,
-                  onRefresh: widget.controller.refreshSigningStatus,
-                ),
-              ),
-            ),
+    final key = (
+      _treeStructure,
+      _activeSourceId,
+      visible,
+      widget.controller.workspace.store.snapshot,
+    );
+    if (_navEntriesKey != key) {
+      _navEntriesKey = key;
+      _navEntries = [
+        const LibraryNavEntry(LibraryNavKind.group, label: '谱库来源'),
+        for (final source in widget.controller.offlineSources) ...[
+          LibraryNavEntry(LibraryNavKind.source, value: source),
+          if (_activeSourceId == source.id)
+            for (final row in visible)
+              if (row.path.isNotEmpty)
+                LibraryNavEntry(LibraryNavKind.folder, value: row),
         ],
-      ),
+        const LibraryNavEntry(LibraryNavKind.addSource),
+        const LibraryNavEntry(LibraryNavKind.group, label: '曲单'),
+        for (final list
+            in widget.controller.workspace.store.snapshot.activeSetLists)
+          LibraryNavEntry(LibraryNavKind.setList, value: list),
+        const LibraryNavEntry(LibraryNavKind.newSetList),
+        const LibraryNavEntry(LibraryNavKind.refresh),
+        if (!widget.isHome) const LibraryNavEntry(LibraryNavKind.returnLibrary),
+      ];
+    }
+    return LibrarySidebar(
+      entries: _navEntries,
+      device: _deviceSummary(),
+      itemBuilder: (context, entry) {
+        switch (entry.kind) {
+          case LibraryNavKind.group:
+            return Padding(
+              padding: EdgeInsets.only(
+                top: entry.label == '曲单' ? ScoreSpace.lg : 0,
+              ),
+              child: LibraryGroupLabel(entry.label),
+            );
+          case LibraryNavKind.source:
+            final source = entry.value! as LibrarySourceInfo;
+            return LibraryNavigationItem(
+              label: source.name,
+              selected: !_setListsOpen && source.id == _activeSourceId,
+              count:
+                  '${widget.controller.folderOfflineStatus(sourceId: source.id).total}',
+              onTap: () => _selectSource(source.id),
+            );
+          case LibraryNavKind.folder:
+            final row = entry.value! as FolderTreeRow;
+            return _node(row.path, row.depth);
+          case LibraryNavKind.addSource:
+            return LibraryNavigationItem(
+              label: '连接电脑',
+              glyph: ReaderGlyph.plus,
+              onTap: () => unawaited(_sync()),
+            );
+          case LibraryNavKind.setList:
+            final list = entry.value! as ScoreSetList;
+            return LibraryNavigationItem(
+              label: list.name,
+              glyph: ReaderGlyph.list,
+              selected: _setListsOpen && list.id == _setListId,
+              count: '${list.activeItems.length}',
+              onTap: () => _setLists(initialListId: list.id),
+            );
+          case LibraryNavKind.newSetList:
+            return LibraryNavigationItem(
+              label: '新建曲单',
+              glyph: ReaderGlyph.plus,
+              onTap: () => _setLists(initialCreate: true),
+            );
+          case LibraryNavKind.refresh:
+            return LibraryNavigationItem(
+              label: '更新目录',
+              glyph: ReaderGlyph.sync,
+              onTap: () => unawaited(_refresh()),
+            );
+          case LibraryNavKind.returnLibrary:
+            return LibraryNavigationItem(
+              label: '返回谱库',
+              glyph: ReaderGlyph.back,
+              onTap: () => Navigator.pop(context),
+            );
+          default:
+            return const SizedBox.shrink();
+        }
+      },
     );
   }
 
   Widget _node(String folder, int depth) {
     final children = _hierarchy!.childrenOf(folder);
     final expanded = !_collapsed.contains(folder);
-    return Padding(
+    return LibraryNavigationItem(
       key: ValueKey('offline-folder-$folder'),
-      padding: EdgeInsets.only(left: (depth * 12.0).clamp(0, 132)),
-      child: ListTile(
-        dense: true,
-        selected: _folder == folder,
-        leading: _OfflineFolderIcon(
-          status: widget.controller.folderOfflineStatus(
-            sourceId: _activeSourceId!,
-            folder: folder,
-          ),
-        ),
-        title: Text(
-          folder.isEmpty ? '全部离线谱库' : p.posix.basename(folder),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        onTap: () => _selectFolder(folder),
-        trailing: children.isEmpty
-            ? null
-            : IconButton(
-                tooltip: expanded ? '收起文件夹' : '展开文件夹',
-                icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
-                onPressed: () => setState(() {
-                  expanded ? _collapsed.add(folder) : _collapsed.remove(folder);
-                  _treeRows = null;
-                }),
-              ),
-      ),
+      label: p.posix.basename(folder),
+      selected: !_setListsOpen && _folder == folder,
+      indent: (depth * ScoreLayout.treeIndent).clamp(0, 132),
+      onTap: () => _selectFolder(folder),
+      trailing: children.isEmpty
+          ? null
+          : LibraryIconButton(
+              touch: true,
+              glyph: expanded ? ReaderGlyph.chevronUp : ReaderGlyph.chevronDown,
+              label: expanded ? '收起文件夹' : '展开文件夹',
+              onPressed: () => setState(() {
+                expanded ? _collapsed.add(folder) : _collapsed.remove(folder);
+                _treeRows = null;
+              }),
+            ),
     );
-  }
-}
-
-class _SyncActivityIcon extends StatefulWidget {
-  const _SyncActivityIcon();
-
-  @override
-  State<_SyncActivityIcon> createState() => _SyncActivityIconState();
-}
-
-class _SyncActivityIconState extends State<_SyncActivityIcon>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _turns = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1200),
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (MediaQuery.disableAnimationsOf(context) ||
-        !TickerMode.valuesOf(context).enabled) {
-      _turns.stop();
-    } else {
-      _turns.repeat();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => RotationTransition(
-    key: const ValueKey('offline-sync-rotation'),
-    turns: _turns,
-    child: const Icon(Icons.sync),
-  );
-
-  @override
-  void dispose() {
-    _turns.dispose();
-    super.dispose();
   }
 }
 
@@ -1065,7 +1266,7 @@ class _OfflineFolderIcon extends StatelessWidget {
         child: ScoreFileIcon.folder(
           state: status.total == 0
               ? ScoreFileIconState.empty
-              : status.allCurrent
+              : status.readable == status.total
               ? ScoreFileIconState.ready
               : status.readable == 0
               ? ScoreFileIconState.cloud

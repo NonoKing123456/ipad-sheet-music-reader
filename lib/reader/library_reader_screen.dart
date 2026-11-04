@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
@@ -24,6 +26,7 @@ import '../library/desktop_navigation_history.dart';
 import '../theme/app_theme.dart';
 import '../theme/device_layout.dart';
 import '../theme/reader_icons.dart';
+import '../theme/tokens.dart';
 import 'add_to_set_list_dialog.dart';
 import '../sharing/score_share.dart';
 
@@ -73,6 +76,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   double _reportedFontSize = 20 / 1024;
   bool _textDraftActive = false;
   bool _writing = false;
+  bool _sharing = false;
+  bool _dotsSuppressed = false;
+  final _penPointers = <int>{};
+  Timer? _dotRestore;
+  Matrix4? _readingTransform;
+  PageKey? _readingTransformPage;
   late final PaperColorSampler _colorSampler =
       widget.colorSampler ?? PaperColorSampler();
   bool _picking = false, _sampling = false;
@@ -92,7 +101,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   int _inputGeneration = 0;
   int? _lastSample;
   bool _usingSample = false;
-  final _quickPageController = TextEditingController();
   final _quickPageMenu = MenuController();
   final _toolsScrollController = ScrollController();
   Future<void> _annotationHistoryTail = Future<void>.value();
@@ -346,7 +354,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   @override
   void dispose() {
     FocusManager.instance.removeEarlyKeyEventHandler(_annotationHistoryKey);
-    _quickPageController.dispose();
+    _dotRestore?.cancel();
     _toolsScrollController.dispose();
     _pickEpoch++;
     _colorSampler.dispose();
@@ -491,18 +499,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     _togglePicking();
   }
 
-  void _useSampleColor() {
-    final sample = _lastSample;
-    if (_writing || sample == null || _visiblePage != _session.pageKey) return;
-    setState(() {
-      _cancelPick();
-      _color = sample;
-      _usingSample = true;
-    });
-    if (_textTool) _textControls.changeColor(sample);
-  }
-
   Future<bool> _setEditing(bool editing) async {
+    if (!editing && !_editing) return true;
+    if (editing && !_editing) {
+      _readingTransform = Matrix4.copy(_transform.value);
+      _readingTransformPage = _visiblePage;
+    }
     if (!editing && (!await _textControls.finish() || !mounted)) return false;
     editing = editing && widget.allowAnnotations;
     setState(() {
@@ -514,7 +516,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _inputGeneration++;
         _cancelPick();
         _touchTransforming = false;
-        _transform.value = Matrix4.identity();
+        _transform.value =
+            _readingTransformPage == _visiblePage && _readingTransform != null
+            ? Matrix4.copy(_readingTransform!)
+            : Matrix4.identity();
+        _readingTransform = null;
+        _readingTransformPage = null;
       }
     });
     return true;
@@ -594,199 +601,151 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: readerSurroundColor(context),
-      body: ReaderStage(
-        controller: _stageControls,
-        hasReadablePage: _visiblePage != null,
-        statusLabel: workspace.unsavedCount > 0
-            ? '${workspace.unsavedCount} 项未保存'
-            : '阅读状态',
-        onToolsLayoutSettled: _refreshReaderLayout,
-        beforeHideTools: () async =>
-            !_writing && (!_editing || await _setEditing(false)),
-        blockArrowKeys: _desktopMenuOpen,
-        onObstructionChanged: (insets) => setState(() => _panInsets = insets),
-        onPrevious: () => _navigate(NavigationDirection.backward),
-        onNext: () => _navigate(NavigationDirection.forward),
-        onViewportChanged: _resetViewport,
-        top: Material(
-          color: Theme.of(context).colorScheme.surface,
-          child: Column(
+      body: _trackPen(
+        ReaderStage(
+          controller: _stageControls,
+          hasReadablePage: _visiblePage != null,
+          statusLabel: workspace.unsavedCount > 0
+              ? '${workspace.unsavedCount} 项未保存'
+              : '阅读状态',
+          onToolsLayoutSettled: _refreshReaderLayout,
+          beforeHideTools: () async =>
+              !_writing && (!_editing || await _setEditing(false)),
+          blockArrowKeys: _desktopMenuOpen,
+          onObstructionChanged: (insets) => setState(() => _panInsets = insets),
+          onPrevious: () => _navigate(NavigationDirection.backward),
+          onNext: () => _navigate(NavigationDirection.forward),
+          onViewportChanged: _resetViewport,
+          top: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              AppBar(
-                leading: IconButton(
-                  tooltip: '返回谱库',
-                  onPressed: _back,
-                  icon: const Icon(Icons.arrow_back),
-                ),
-                title: Text(
-                  p.posix.basename(title.replaceAll('\\', '/')),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                actions: [
-                  if (widget.allowAnnotations)
-                    IconButton(
-                      tooltip: '加入曲单',
-                      onPressed: _writing ? null : _addToSetList,
-                      icon: const ReaderIcon(ReaderGlyph.playlistAdd),
-                    ),
-                  if (widget.allowAnnotations)
-                    IconButton(
-                      key: const ValueKey('ipad-annotation-toggle'),
-                      tooltip: _editing ? '完成批注' : '批注',
-                      onPressed: _writing ? null : _annotationAction,
-                      isSelected: _editing,
-                      icon: _editing
-                          ? const Icon(Icons.check)
-                          : const ReaderIcon(ReaderGlyph.pen),
-                    ),
-                  const ThemeAction(),
-                  if (current != null)
-                    ShareAction(
-                      filePath: current.target.filePath,
-                      fileName: p.basename(title),
-                      validate: current.target.validateBeforeRead,
-                      beforeShare: _prepareShare,
-                      annotationsFor: (number) =>
-                          _shareAnnotations(current.target, number),
-                    ),
-                  if (_visibleDocument != null && _visibleDocument!.pdf == null)
-                    PopupMenuButton<String>(
-                      tooltip: '更多',
-                      onSelected: (_) => unawaited(
-                        showImageDisplayInfo(
-                          context,
-                          _imageInfos[_visiblePage],
-                        ),
-                      ),
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 'info', child: Text('图片信息')),
-                      ],
-                    ),
-                ],
-              ),
+              _compactHeader(current, title),
               if (page != null && widget.allowAnnotations && _editing)
                 _tools(_visiblePage ?? page),
             ],
           ),
-        ),
-        bottom: _footer(),
-        notices: [
-          if (workspace.store.storageWarnings.isNotEmpty)
-            _notice('已从备份恢复，请检查最近修改。'),
-          if (workspace.error != null) _notice(workspace.error!),
-          if (workspace.textConflictNotice != null)
-            _notice(workspace.textConflictNotice!),
-          if (workspace.unsavedCount > 0)
-            Material(
-              color: Theme.of(context).colorScheme.tertiaryContainer,
-              child: ListTile(
-                dense: true,
-                title: Text('${workspace.unsavedCount} 项批注未保存'),
-                trailing: TextButton(
-                  onPressed: () => unawaited(workspace.retryStrokes()),
-                  child: const Text('重试保存'),
-                ),
-              ),
-            ),
-          if (_session.message != null)
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _notice(_session.message!),
-                if (_visiblePage != null)
-                  TextButton(
-                    onPressed: () => _navigate(
-                      _direction > 0
-                          ? NavigationDirection.forward
-                          : NavigationDirection.backward,
-                    ),
-                    child: const Text('重试翻页'),
+          bottom: _footer(),
+          notices: [
+            if (workspace.store.storageWarnings.isNotEmpty)
+              _notice('已从备份恢复，请检查最近修改。'),
+            if (workspace.error != null) _notice(workspace.error!),
+            if (workspace.textConflictNotice != null)
+              _notice(workspace.textConflictNotice!),
+            if (workspace.unsavedCount > 0)
+              Material(
+                color: Theme.of(context).colorScheme.tertiaryContainer,
+                child: ListTile(
+                  dense: true,
+                  title: Text('${workspace.unsavedCount} 项批注未保存'),
+                  trailing: TextButton(
+                    onPressed: () => unawaited(workspace.retryStrokes()),
+                    child: const Text('重试保存'),
                   ),
-              ],
-            ),
-          if (_navigationWarning != null) _notice(_navigationWarning!),
-          if (_pickMessage != null) _notice(_pickMessage!),
-          if (_session.sourceChanged) _notice('源曲谱已变更，当前为旧版。'),
-        ],
-        loading: _session.loading && _visiblePage != null,
-        contentBuilder: (toggleTools) => current == null || page == null
-            ? Center(
-                child: _initialLoading || _session.loading
-                    ? const CircularProgressIndicator()
-                    : FilledButton(
-                        onPressed: () {
-                          final latest = widget.locate(
-                            widget.initialTarget.entryId,
-                          );
-                          if (latest != null) {
-                            unawaited(
-                              _session.open(
-                                latest,
-                                itemId: widget.itemId,
-                                restore: false,
-                              ),
-                            );
-                          }
-                        },
-                        child: const Text('重新打开'),
-                      ),
-              )
-            : ReaderInput(
-                onPrevious: () => _navigate(NavigationDirection.backward),
-                onNext: () => _navigate(NavigationDirection.forward),
-                onCenterTap: _picking ? null : toggleTools,
-                allowPointerPageTurns:
-                    !_picking && !_textTool && _tool == null && _scale <= 1.01,
-                panInsets: _panInsets,
-                pageAspect:
-                    _visibleDocument?.aspectFor(
-                      _visiblePage?.pageNumber ?? 1,
-                    ) ??
-                    current.aspectFor(_session.page),
-                mouseInk: _editing && _tool != null,
-                touchInk: _editing && _tool != null,
-                editing: _editing,
-                ignorePointerGestures: _desktopMenuOpen,
-                gestureGeneration: _inputGeneration,
-                onTransformGestureChanged: (active) =>
-                    setState(() => _touchTransforming = active),
-                transform: _transform,
-                viewportKey: _viewportKey,
-                touchControlKey: _seekRegionKey,
-                textTool: _textTool,
-                textSelectionKey: _textSelectionKey,
-                textControls: _picking ? null : _textControls,
-                child: ReaderPageWindow(
-                  documentKey: current.target.key,
-                  pageNumber: _session.page,
-                  pageCount: current.pageCount,
-                  aspectFor: current.aspectFor,
-                  direction: _direction,
-                  requestedAt: _requestedAt,
-                  presentationClock: widget.presentationClock,
-                  retainDocument: current.retain,
-                  releaseDocument: current.release,
-                  holdPresentation: _writing,
-                  onPresented: (document, number) {
-                    if (document == current.target.key) {
-                      _markPresented(current, number);
-                    }
-                  },
-                  prewarm: _prewarmScore == null
-                      ? null
-                      : ReaderPrewarmPage(
-                          documentKey: _prewarmScore!.target.key,
-                          aspect: _prewarmScore!.aspectFor(1),
-                          retainDocument: _prewarmScore!.retain,
-                          releaseDocument: _prewarmScore!.release,
-                          pageBuilder: _prewarmBuilder(_prewarmScore!),
-                        ),
-                  readyPageBuilder: (number, active, ready, failed) =>
-                      _surface(current, number, active, ready, failed),
                 ),
               ),
+            if (_session.message != null)
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _notice(_session.message!),
+                  if (_visiblePage != null)
+                    TextButton(
+                      onPressed: () => _navigate(
+                        _direction > 0
+                            ? NavigationDirection.forward
+                            : NavigationDirection.backward,
+                      ),
+                      child: const Text('重试翻页'),
+                    ),
+                ],
+              ),
+            if (_navigationWarning != null) _notice(_navigationWarning!),
+            if (_pickMessage != null) _notice(_pickMessage!),
+            if (_session.sourceChanged) _notice('源曲谱已变更，当前为旧版。'),
+          ],
+          loading: _session.loading && _visiblePage != null,
+          contentBuilder: (toggleTools) => current == null || page == null
+              ? Center(
+                  child: _initialLoading || _session.loading
+                      ? const CircularProgressIndicator()
+                      : FilledButton(
+                          onPressed: () {
+                            final latest = widget.locate(
+                              widget.initialTarget.entryId,
+                            );
+                            if (latest != null) {
+                              unawaited(
+                                _session.open(
+                                  latest,
+                                  itemId: widget.itemId,
+                                  restore: false,
+                                ),
+                              );
+                            }
+                          },
+                          child: const Text('重新打开'),
+                        ),
+                )
+              : _paperViewport(
+                  ReaderInput(
+                    onPrevious: () => _navigate(NavigationDirection.backward),
+                    onNext: () => _navigate(NavigationDirection.forward),
+                    onCenterTap: _picking ? null : toggleTools,
+                    allowPointerPageTurns:
+                        !_picking &&
+                        !_textTool &&
+                        _tool == null &&
+                        _scale <= 1.01,
+                    panInsets: _panInsets,
+                    pageAspect:
+                        _visibleDocument?.aspectFor(
+                          _visiblePage?.pageNumber ?? 1,
+                        ) ??
+                        current.aspectFor(_session.page),
+                    mouseInk: _editing && _tool != null,
+                    touchInk: _editing && _tool != null,
+                    editing: _editing,
+                    ignorePointerGestures: _desktopMenuOpen,
+                    gestureGeneration: _inputGeneration,
+                    onTransformGestureChanged: (active) =>
+                        setState(() => _touchTransforming = active),
+                    transform: _transform,
+                    viewportKey: _viewportKey,
+                    touchControlKey: _seekRegionKey,
+                    textTool: _textTool,
+                    textSelectionKey: _textSelectionKey,
+                    textControls: _picking ? null : _textControls,
+                    child: ReaderPageWindow(
+                      documentKey: current.target.key,
+                      pageNumber: _session.page,
+                      pageCount: current.pageCount,
+                      aspectFor: current.aspectFor,
+                      direction: _direction,
+                      requestedAt: _requestedAt,
+                      presentationClock: widget.presentationClock,
+                      retainDocument: current.retain,
+                      releaseDocument: current.release,
+                      holdPresentation: _writing,
+                      onPresented: (document, number) {
+                        if (document == current.target.key) {
+                          _markPresented(current, number);
+                        }
+                      },
+                      prewarm: _prewarmScore == null
+                          ? null
+                          : ReaderPrewarmPage(
+                              documentKey: _prewarmScore!.target.key,
+                              aspect: _prewarmScore!.aspectFor(1),
+                              retainDocument: _prewarmScore!.retain,
+                              releaseDocument: _prewarmScore!.release,
+                              pageBuilder: _prewarmBuilder(_prewarmScore!),
+                            ),
+                      readyPageBuilder: (number, active, ready, failed) =>
+                          _surface(current, number, active, ready, failed),
+                    ),
+                  ),
+                ),
+        ),
       ),
     );
   }
@@ -989,284 +948,345 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     return Scaffold(
       resizeToAvoidBottomInset: false,
       backgroundColor: readerSurroundColor(context),
-      body: ReaderStage(
-        top: const SizedBox.shrink(),
-        bottom: const SizedBox.shrink(),
-        hasReadablePage: _visiblePage != null,
-        onViewportChanged: _resetViewport,
-        onPrevious: () => _navigate(NavigationDirection.backward),
-        onNext: () => _navigate(NavigationDirection.forward),
-        blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
-        contentBuilder: (_) => DesktopReaderShell(
-          primaryActions: [
-            if (widget.allowAnnotations)
-              if (MediaQuery.sizeOf(context).width >= 1200)
-                TextButton.icon(
-                  onPressed: _writing ? null : _addToSetList,
-                  icon: const ReaderIcon(ReaderGlyph.playlistAdd, size: 20),
-                  label: const Text('加入曲单'),
-                )
-              else
-                IconButton(
-                  tooltip: '加入曲单',
-                  onPressed: _writing ? null : _addToSetList,
-                  icon: const ReaderIcon(ReaderGlyph.playlistAdd),
-                ),
-          ],
-          actions: [
-            const ThemeAction(),
-            if (document != null)
-              ShareAction(
-                filePath: document.target.filePath,
-                fileName: p.basename(title),
-                validate: document.target.validateBeforeRead,
-                beforeShare: _prepareShare,
-                annotationsFor: (number) =>
-                    _shareAnnotations(document.target, number),
-              ),
-          ],
-          title: p.basename(title),
-          pageLabel: pageLabel,
-          mode: _effectiveDesktopMode,
-          arrangement: grouping.arrangement,
-          onMenuChanged: (open) {
-            if (mounted && _desktopMenuOpen != open) {
-              setState(() => _desktopMenuOpen = open);
-            }
-          },
-          onMode: _changeView,
-          onArrangement: _changeArrangement,
+      body: _trackPen(
+        ReaderStage(
+          top: const SizedBox.shrink(),
+          bottom: const SizedBox.shrink(),
+          hasReadablePage: _visiblePage != null,
+          onViewportChanged: _resetViewport,
           onPrevious: () => _navigate(NavigationDirection.backward),
           onNext: () => _navigate(NavigationDirection.forward),
-          onBack: () => unawaited(_back()),
-          onZoom: _zoom,
-          onFit: () {
-            if (_effectiveDesktopMode == ReaderViewMode.continuous) {
-              _continuous.fit();
-            } else {
-              _transform.value = Matrix4.identity();
-            }
-          },
-          onJump: () => unawaited(_jumpDialog()),
-          onAnnotate: widget.allowAnnotations
-              ? () => unawaited(_annotationAction())
-              : null,
-          onFinishEditing: _finishAnnotation,
-          beforeHideTools: () => _setEditing(false),
-          editing: _editing,
-          writing: _writing,
-          textEditing: _textDraftActive,
-          annotationTools: page == null
-              ? null
-              : IgnorePointer(
-                  ignoring: _visiblePage != page,
-                  child: _tools(_annotationPage ?? _visiblePage ?? page),
+          blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
+          contentBuilder: (_) => DesktopReaderShell(
+            documentMenu: [
+              if (document != null && Platform.isWindows)
+                MenuItemButton(
+                  onPressed: () =>
+                      unawaited(_revealCurrentFile(document.target)),
+                  child: const Text('打开文件所在目录'),
                 ),
-          bottom: _footer(),
-          notices: _desktopNotices(),
-          statusLabel: widget.workspace.unsavedCount > 0
-              ? '${widget.workspace.unsavedCount} 项未保存'
-              : '阅读状态',
-          loading:
-              (_initialLoading || _session.loading) && _visiblePage != null,
-          contentBuilder: (toggleBar) {
-            if (current == null || page == null) {
-              return Center(
-                child: _initialLoading || _session.loading
-                    ? const CircularProgressIndicator()
-                    : FilledButton(
-                        onPressed: _retryOpen,
-                        child: const Text('重新打开'),
-                      ),
-              );
-            }
-            if (_effectiveDesktopMode == ReaderViewMode.continuous) {
-              return ReaderContinuousView(
-                key: ValueKey(current.target.key),
-                documentKey: current.target.key,
-                pageCount: current.pageCount,
-                aspectFor: current.aspectFor,
-                controller: _continuous,
-                requestedPage: _session.page,
-                navigationToken: _continuousNavigation,
-                initialAnchor: _continuousRestore,
-                controlKey: _seekRegionKey,
-                viewportKey: _viewportKey,
-                retainDocument: current.retain,
-                releaseDocument: current.release,
-                onCenterTap: toggleBar,
-                onPrevious: () => _navigate(NavigationDirection.backward),
-                onNext: () => _navigate(NavigationDirection.forward),
-                pageBuilder: (number, active, ready, failed) =>
-                    _surface(current, number, active, ready, failed),
-                previewPageBuilder: (number, pixels, ready, failed) => _surface(
-                  current,
-                  number,
-                  false,
-                  ready,
-                  failed,
-                  previewPixels: pixels,
+              if (document != null && document.pdf == null)
+                MenuItemButton(
+                  onPressed: () => unawaited(
+                    showImageDisplayInfo(context, _imageInfos[_visiblePage]),
+                  ),
+                  child: const Text('图片信息'),
                 ),
-                onPresented: (number) {
-                  if (_effectiveDesktopMode != ReaderViewMode.continuous ||
-                      _session.current?.target.key != current.target.key) {
-                    return;
-                  }
-                  _followingContinuous = true;
-                  try {
-                    _session.followPresentedPage(
-                      PageKey(
-                        entryId: current.target.entryId,
-                        revisionId: current.target.revisionId,
-                        pageNumber: number,
-                      ),
-                    );
-                  } finally {
-                    _followingContinuous = false;
-                  }
-                  _markPresented(current, number);
-                },
-              );
-            }
-            final groups = ReaderSpreads(
-              pageCount: current.pageCount,
-              doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
-              arrangement: _arrangementFor(current.target.entryId),
-            );
-            final mode = _effectiveDesktopMode;
-            final viewKey = (current.target.key, mode, groups.arrangement);
-            double aspect(int index) {
-              final group = groups.at(index);
-              if (!groups.doublePage) return current.aspectFor(group.first);
-              return current.aspectFor(group.first) +
-                  current.aspectFor(
-                    group.last == group.first ? group.first : group.last,
-                  ) +
-                  .025;
-            }
-
-            ReaderPrewarmPage? warm;
-            final next = _terminalVisiblePage == null ? null : _prewarmScore;
-            if (next != null) {
-              final nextGroups = ReaderSpreads(
-                pageCount: next.pageCount,
-                doublePage: groups.doublePage,
-                arrangement: _arrangementFor(next.target.entryId),
-              );
-              final first = nextGroups.at(1);
-              warm = ReaderPrewarmPage(
-                documentKey: (next.target.key, mode, nextGroups.arrangement),
-                aspect: !nextGroups.doublePage
-                    ? next.aspectFor(first.first)
-                    : next.aspectFor(first.first) +
-                          next.aspectFor(first.last) +
-                          .025,
-                retainDocument: next.retain,
-                releaseDocument: next.release,
-                pageBuilder: (_, active, ready, failed) => ReaderSpreadSurface(
-                  spread: first,
-                  aspectFor: next.aspectFor,
-                  onReady: ready,
-                  onError: failed,
-                  pageBuilder: (number, pageReady, pageFailed) =>
-                      _surface(next, number, active, pageReady, pageFailed),
+            ],
+            primaryActions: [
+              if (widget.allowAnnotations)
+                ReaderActionButton(
+                  label: '加入曲单',
+                  icon: const ReaderIcon(
+                    ReaderGlyph.playlistAdd,
+                    size: ScoreLayout.iconVisual,
+                  ),
+                  target: ScoreLayout.desktopTarget,
+                  onPressed: _writing ? null : _addToSetList,
                 ),
-              );
-            }
-
-            return ReaderInput(
-              onPrevious: () => _navigate(NavigationDirection.backward),
-              onNext: () => _navigate(NavigationDirection.forward),
-              onCenterTap: _tool != null || _textTool || _picking
-                  ? null
-                  : toggleBar,
-              allowPointerPageTurns:
-                  _tool == null && !_textTool && !_picking && _scale <= 1.01,
-              pageAspect: aspect(
-                groups
-                    .forPage(
-                      _visiblePage?.document == current.target.key
-                          ? _visiblePage!.pageNumber
-                          : _session.page,
-                    )
-                    .index,
+            ],
+            actions: [
+              if (document != null)
+                _shareButton(document, title, ScoreLayout.desktopTarget),
+              const SizedBox(
+                width: ScoreLayout.desktopTarget,
+                height: ScoreLayout.desktopTarget,
+                child: ThemeAction(),
               ),
-              mouseInk: _editing && _tool != null,
-              touchInk: _editing && _tool != null,
-              mouseWheel: true,
-              editing: _editing,
-              gestureGeneration: _inputGeneration,
-              transform: _transform,
-              viewportKey: _viewportKey,
-              touchControlKey: _seekRegionKey,
-              textTool: _textTool,
-              textSelectionKey: _textSelectionKey,
-              textControls: _picking ? null : _textControls,
-              ignorePointerGestures: _desktopMenuOpen || _quickPageMenu.isOpen,
-              onTransformGestureChanged: (active) =>
-                  setState(() => _touchTransforming = active),
-              child: ReaderPageWindow(
-                documentKey: viewKey,
-                pageNumber: groups.forPage(_session.page).index,
-                pageCount: groups.count,
-                aspectFor: aspect,
-                direction: _direction,
-                requestedAt: _requestedAt,
-                presentationClock: widget.presentationClock,
-                forwardWindowOnly: true,
-                paperWidthTransition: true,
-                shortPageTransition: true,
-                onWillPresent: () => _transform.value = Matrix4.identity(),
-                prewarm: warm,
-                surfaceBackground: Colors.transparent,
-                retainDocument: current.retain,
-                releaseDocument: current.release,
-                holdPresentation: _writing,
-                onSelected: (key, index) {
-                  if (key != viewKey ||
-                      _effectiveDesktopMode != mode ||
-                      _session.current?.target.key != current.target.key ||
-                      _arrangementFor(current.target.entryId) !=
-                          groups.arrangement) {
-                    return;
-                  }
-                  final group = groups.at(index);
-                  _selectVisible(
-                    current,
-                    group.contains(_session.page) ? _session.page : group.first,
-                  );
-                },
-                onPresented: (key, index) {
-                  if (key != viewKey ||
-                      _effectiveDesktopMode != mode ||
-                      _session.current?.target.key != current.target.key ||
-                      _arrangementFor(current.target.entryId) !=
-                          groups.arrangement) {
-                    return;
-                  }
-                  final group = groups.at(index);
-                  _markPresented(
-                    current,
-                    group.contains(_session.page) ? _session.page : group.first,
-                  );
-                },
-                readyPageBuilder: (index, active, ready, failed) =>
-                    ReaderSpreadSurface(
-                      spread: groups.at(index),
-                      aspectFor: current.aspectFor,
-                      onReady: ready,
-                      onError: failed,
-                      pageBuilder: (number, pageReady, pageFailed) => _surface(
+            ],
+            onObstructionChanged: (insets) {
+              if (mounted && _panInsets != insets) {
+                setState(() => _panInsets = insets);
+              }
+            },
+            title: p.basename(title),
+            pageLabel: pageLabel,
+            mode: _effectiveDesktopMode,
+            arrangement: grouping.arrangement,
+            onMenuChanged: (open) {
+              if (mounted && _desktopMenuOpen != open) {
+                setState(() => _desktopMenuOpen = open);
+              }
+            },
+            onMode: _changeView,
+            onArrangement: _changeArrangement,
+            onPrevious: () => _navigate(NavigationDirection.backward),
+            onNext: () => _navigate(NavigationDirection.forward),
+            onBack: () => unawaited(_back()),
+            onZoom: _zoom,
+            onFit: () {
+              if (_effectiveDesktopMode == ReaderViewMode.continuous) {
+                _continuous.fit();
+              } else {
+                _transform.value = Matrix4.identity();
+              }
+            },
+            onJump: () => unawaited(_jumpDialog()),
+            onAnnotate: widget.allowAnnotations
+                ? () => unawaited(_annotationAction())
+                : null,
+            onFinishEditing: _finishAnnotation,
+            beforeHideTools: () => _setEditing(false),
+            editing: _editing,
+            writing: _writing,
+            textEditing: _textDraftActive,
+            annotationTools: page == null
+                ? null
+                : IgnorePointer(
+                    ignoring: _visiblePage != page,
+                    child: _tools(_annotationPage ?? _visiblePage ?? page),
+                  ),
+            bottom: _footer(),
+            notices: _desktopNotices(),
+            statusLabel: widget.workspace.unsavedCount > 0
+                ? '${widget.workspace.unsavedCount} 项未保存'
+                : '阅读状态',
+            loading:
+                (_initialLoading || _session.loading) && _visiblePage != null,
+            contentBuilder: (toggleBar) {
+              if (current == null || page == null) {
+                return Center(
+                  child: _initialLoading || _session.loading
+                      ? const CircularProgressIndicator()
+                      : FilledButton(
+                          onPressed: _retryOpen,
+                          child: const Text('重新打开'),
+                        ),
+                );
+              }
+              if (_effectiveDesktopMode == ReaderViewMode.continuous) {
+                return ReaderContinuousView(
+                  key: ValueKey(current.target.key),
+                  documentKey: current.target.key,
+                  pageCount: current.pageCount,
+                  aspectFor: current.aspectFor,
+                  controller: _continuous,
+                  requestedPage: _session.page,
+                  navigationToken: _continuousNavigation,
+                  initialAnchor: _continuousRestore,
+                  controlKey: _seekRegionKey,
+                  viewportKey: _viewportKey,
+                  retainDocument: current.retain,
+                  releaseDocument: current.release,
+                  onCenterTap: toggleBar,
+                  onPrevious: () => _navigate(NavigationDirection.backward),
+                  onNext: () => _navigate(NavigationDirection.forward),
+                  pageBuilder: (number, active, ready, failed) =>
+                      _surface(current, number, active, ready, failed),
+                  previewPageBuilder: (number, pixels, ready, failed) =>
+                      _surface(
                         current,
                         number,
-                        active,
-                        pageReady,
-                        pageFailed,
+                        false,
+                        ready,
+                        failed,
+                        previewPixels: pixels,
+                      ),
+                  onPresented: (number) {
+                    if (_effectiveDesktopMode != ReaderViewMode.continuous ||
+                        _session.current?.target.key != current.target.key) {
+                      return;
+                    }
+                    _followingContinuous = true;
+                    try {
+                      _session.followPresentedPage(
+                        PageKey(
+                          entryId: current.target.entryId,
+                          revisionId: current.target.revisionId,
+                          pageNumber: number,
+                        ),
+                      );
+                    } finally {
+                      _followingContinuous = false;
+                    }
+                    _markPresented(current, number);
+                  },
+                );
+              }
+              return LayoutBuilder(
+                builder: (context, paperConstraints) {
+                  final paperSize = Size(
+                    paperConstraints.maxWidth - 2 * ScoreLayout.pageGutter,
+                    paperConstraints.maxHeight - 2 * ScoreLayout.pageGutter,
+                  );
+                  final groups = ReaderSpreads(
+                    pageCount: current.pageCount,
+                    doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
+                    arrangement: _arrangementFor(current.target.entryId),
+                  );
+                  final mode = _effectiveDesktopMode;
+                  final viewKey = (
+                    current.target.key,
+                    mode,
+                    groups.arrangement,
+                  );
+                  double aspect(int index) {
+                    final group = groups.at(index);
+                    if (!groups.doublePage) {
+                      return current.aspectFor(group.first);
+                    }
+                    return readerSpreadAspect(
+                      paperSize,
+                      group,
+                      current.aspectFor,
+                    );
+                  }
+
+                  ReaderPrewarmPage? warm;
+                  final next = _terminalVisiblePage == null
+                      ? null
+                      : _prewarmScore;
+                  if (next != null) {
+                    final nextGroups = ReaderSpreads(
+                      pageCount: next.pageCount,
+                      doublePage: groups.doublePage,
+                      arrangement: _arrangementFor(next.target.entryId),
+                    );
+                    final first = nextGroups.at(1);
+                    warm = ReaderPrewarmPage(
+                      documentKey: (
+                        next.target.key,
+                        mode,
+                        nextGroups.arrangement,
+                      ),
+                      aspect: !nextGroups.doublePage
+                          ? next.aspectFor(first.first)
+                          : readerSpreadAspect(
+                              paperSize,
+                              first,
+                              next.aspectFor,
+                            ),
+                      retainDocument: next.retain,
+                      releaseDocument: next.release,
+                      pageBuilder: (_, active, ready, failed) =>
+                          ReaderSpreadSurface(
+                            spread: first,
+                            aspectFor: next.aspectFor,
+                            onReady: ready,
+                            onError: failed,
+                            pageBuilder: (number, pageReady, pageFailed) =>
+                                _surface(
+                                  next,
+                                  number,
+                                  active,
+                                  pageReady,
+                                  pageFailed,
+                                ),
+                          ),
+                    );
+                  }
+
+                  return _paperViewport(
+                    ReaderInput(
+                      onPrevious: () => _navigate(NavigationDirection.backward),
+                      onNext: () => _navigate(NavigationDirection.forward),
+                      onCenterTap: _tool != null || _textTool || _picking
+                          ? null
+                          : toggleBar,
+                      allowPointerPageTurns:
+                          _tool == null &&
+                          !_textTool &&
+                          !_picking &&
+                          _scale <= 1.01,
+                      pageAspect: aspect(
+                        groups
+                            .forPage(
+                              _visiblePage?.document == current.target.key
+                                  ? _visiblePage!.pageNumber
+                                  : _session.page,
+                            )
+                            .index,
+                      ),
+                      mouseInk: _editing && _tool != null,
+                      touchInk: _editing && _tool != null,
+                      mouseWheel: true,
+                      panInsets: _panInsets,
+                      editing: _editing,
+                      gestureGeneration: _inputGeneration,
+                      transform: _transform,
+                      viewportKey: _viewportKey,
+                      touchControlKey: _seekRegionKey,
+                      textTool: _textTool,
+                      textSelectionKey: _textSelectionKey,
+                      textControls: _picking ? null : _textControls,
+                      ignorePointerGestures:
+                          _desktopMenuOpen || _quickPageMenu.isOpen,
+                      onTransformGestureChanged: (active) =>
+                          setState(() => _touchTransforming = active),
+                      child: ReaderPageWindow(
+                        documentKey: viewKey,
+                        pageNumber: groups.forPage(_session.page).index,
+                        pageCount: groups.count,
+                        aspectFor: aspect,
+                        direction: _direction,
+                        requestedAt: _requestedAt,
+                        presentationClock: widget.presentationClock,
+                        forwardWindowOnly: true,
+                        paperWidthTransition: true,
+                        shortPageTransition: true,
+                        onWillPresent: () =>
+                            _transform.value = Matrix4.identity(),
+                        prewarm: warm,
+                        surfaceBackground: Colors.transparent,
+                        retainDocument: current.retain,
+                        releaseDocument: current.release,
+                        holdPresentation: _writing,
+                        onSelected: (key, index) {
+                          if (key != viewKey ||
+                              _effectiveDesktopMode != mode ||
+                              _session.current?.target.key !=
+                                  current.target.key ||
+                              _arrangementFor(current.target.entryId) !=
+                                  groups.arrangement) {
+                            return;
+                          }
+                          final group = groups.at(index);
+                          _selectVisible(
+                            current,
+                            group.contains(_session.page)
+                                ? _session.page
+                                : group.first,
+                          );
+                        },
+                        onPresented: (key, index) {
+                          if (key != viewKey ||
+                              _effectiveDesktopMode != mode ||
+                              _session.current?.target.key !=
+                                  current.target.key ||
+                              _arrangementFor(current.target.entryId) !=
+                                  groups.arrangement) {
+                            return;
+                          }
+                          final group = groups.at(index);
+                          _markPresented(
+                            current,
+                            group.contains(_session.page)
+                                ? _session.page
+                                : group.first,
+                          );
+                        },
+                        readyPageBuilder: (index, active, ready, failed) =>
+                            ReaderSpreadSurface(
+                              spread: groups.at(index),
+                              aspectFor: current.aspectFor,
+                              onReady: ready,
+                              onError: failed,
+                              pageBuilder: (number, pageReady, pageFailed) =>
+                                  _surface(
+                                    current,
+                                    number,
+                                    active,
+                                    pageReady,
+                                    pageFailed,
+                                  ),
+                            ),
                       ),
                     ),
-              ),
-            );
-          },
+                  );
+                },
+              );
+            },
+          ),
         ),
       ),
     );
@@ -1518,522 +1538,347 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Widget _tools(PageKey page) {
     final activeTool = _tool ?? ReaderTool.pen;
-    final size = _sizes[activeTool]!;
-    const minTextSize = 8 / 1024;
-    const maxTextSize = 96 / 1024;
-    final currentSize = _textTool ? _textControls.fontSizeFraction : size;
-    final minSize = _textTool ? minTextSize : activeTool.minSize;
-    final maxSize = _textTool ? maxTextSize : activeTool.maxSize;
-    final sizeLabel = _textTool ? '字号' : '粗细';
-    if (!DeviceLayoutScope.isCompact(context)) {
-      return _desktopAnnotationTools(
-        page: page,
-        activeTool: activeTool,
-        currentSize: currentSize,
-        minSize: minSize,
-        maxSize: maxSize,
-        sizeLabel: sizeLabel,
-        size: size,
-      );
-    }
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final available = (constraints.maxWidth - 16).clamp(
-          0.0,
-          double.infinity,
-        );
-        const controlsWidth = 664.0;
-        Widget separator() => const SizedBox(
-          width: 12,
-          height: 22,
-          child: VerticalDivider(width: 1),
-        );
-        Widget history(bool undo) => SizedBox.square(
-          dimension: 44,
-          child: IconButton(
-            tooltip: undo ? '撤销' : '重做',
-            onPressed:
-                (undo
-                        ? widget.workspace.store.canUndo(page)
-                        : widget.workspace.store.canRedo(page)) ||
-                    widget.workspace.savingAnnotations
-                ? () => _queueAnnotationHistory(page, undo: undo)
-                : null,
-            icon: ReaderIcon(undo ? ReaderGlyph.undo : ReaderGlyph.redo),
+    final currentSize = _textTool
+        ? _textControls.fontSizeFraction
+        : _sizes[activeTool]!;
+    final minSize = _textTool ? 8 / 1024 : activeTool.minSize;
+    final maxSize = _textTool ? 96 / 1024 : activeTool.maxSize;
+    Widget history(bool undo) => ReaderActionButton(
+      label: undo ? '撤销' : '重做',
+      icon: ReaderIcon(
+        undo ? ReaderGlyph.undo : ReaderGlyph.redo,
+        size: ScoreLayout.iconVisual,
+      ),
+      onPressed:
+          (undo
+                  ? widget.workspace.store.canUndo(page)
+                  : widget.workspace.store.canRedo(page)) ||
+              widget.workspace.savingAnnotations
+          ? () => _queueAnnotationHistory(page, undo: undo)
+          : null,
+    );
+    return Container(
+      key: _textToolsKey,
+      height: ScoreLayout.annotationBarHeight,
+      decoration: BoxDecoration(
+        color: ScoreTokens.of(context).paper0,
+        border: Border(
+          bottom: BorderSide(color: ScoreTokens.of(context).hair2),
+        ),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.lg),
+      child: Row(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              key: ValueKey(
+                _isCompact
+                    ? 'reader-ipad-annotation-scroll'
+                    : 'reader-desktop-annotation-scroll',
+              ),
+              controller: _toolsScrollController,
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final tool in ReaderTool.values) ...[
+                    if (tool != ReaderTool.values.first)
+                      const SizedBox(width: ScoreSpace.xs),
+                    ReaderToolButton(
+                      key: ValueKey(tool),
+                      tool: tool,
+                      selected: !_picking && !_textTool && _tool == tool,
+                      value: _sizes[tool]!,
+                      onSelect: () => _selectTool(tool),
+                    ),
+                  ],
+                  const SizedBox(width: ScoreSpace.xs),
+                  ReaderActionButton(
+                    label: '文字批注',
+                    icon: const ReaderIcon(
+                      ReaderGlyph.text,
+                      size: ScoreLayout.iconVisual,
+                    ),
+                    selected: _textTool && !_picking,
+                    tool: true,
+                    onPressed: _toggleTextTool,
+                  ),
+                  const SizedBox(width: ScoreSpace.lg),
+                  ReaderPaletteButton(
+                    argb: _color,
+                    onMenuChanged: (open) =>
+                        setState(() => _desktopMenuOpen = open),
+                    onChanged: _textControls.saving
+                        ? null
+                        : (color) {
+                            setState(() {
+                              _cancelPick();
+                              _usingSample = false;
+                              _color = color;
+                            });
+                            if (_textTool) _textControls.changeColor(color);
+                          },
+                  ),
+                  const SizedBox(width: ScoreSpace.xs),
+                  ReaderSampleColorButton(
+                    sample: _lastSample == null ? null : Color(_lastSample!),
+                    picking: _picking,
+                    busy: _sampling,
+                    usingSample: _usingSample,
+                    onPressed:
+                        _visiblePage == null ||
+                            _visiblePage != _session.pageKey ||
+                            _writing
+                        ? null
+                        : _sampleAction,
+                  ),
+                  const SizedBox(width: ScoreSpace.lg),
+                  ReaderSizeButton(
+                    key: const ValueKey('annotation-size-button'),
+                    value: currentSize.clamp(minSize, maxSize),
+                    min: minSize,
+                    max: maxSize,
+                    label: _textTool ? '字号' : '粗细',
+                    tool: activeTool,
+                    textMode: _textTool,
+                    onChanged: _textTool && _textControls.saving
+                        ? null
+                        : (value) => setState(() {
+                            if (_textTool) {
+                              _textControls.changeFontSizeFraction(value);
+                            } else {
+                              _sizes[activeTool] = value;
+                            }
+                          }),
+                    onChangeEnd: _textTool
+                        ? (_) => unawaited(_textControls.commitFontSize())
+                        : null,
+                  ),
+                ],
+              ),
+            ),
           ),
-        );
-        return Container(
-          key: _textToolsKey,
-          color: Theme.of(context).colorScheme.surface,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Divider(height: 1, thickness: 1),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                child: Scrollbar(
-                  controller: _toolsScrollController,
-                  thumbVisibility: available < controlsWidth,
-                  child: SingleChildScrollView(
-                    key: const ValueKey('reader-ipad-annotation-scroll'),
-                    controller: _toolsScrollController,
-                    scrollDirection: Axis.horizontal,
+          const SizedBox(width: ScoreSpace.lg),
+          history(true),
+          const SizedBox(width: ScoreSpace.xs),
+          history(false),
+        ],
+      ),
+    );
+  }
+
+  Widget _paperViewport(Widget child) => Padding(
+    padding: const EdgeInsets.all(ScoreLayout.pageGutter),
+    child: child,
+  );
+
+  Widget _trackPen(Widget child) => Listener(
+    onPointerDown: (event) {
+      if (event.kind != PointerDeviceKind.stylus &&
+          event.kind != PointerDeviceKind.invertedStylus) {
+        return;
+      }
+      _dotRestore?.cancel();
+      _penPointers.add(event.pointer);
+      if (!_dotsSuppressed) setState(() => _dotsSuppressed = true);
+    },
+    onPointerUp: _releasePen,
+    onPointerCancel: _releasePen,
+    child: child,
+  );
+  void _releasePen(PointerEvent event) {
+    if (!_penPointers.remove(event.pointer) || _penPointers.isNotEmpty) return;
+    _dotRestore?.cancel();
+    _dotRestore = Timer(ScoreMotion.micro, () {
+      if (mounted) setState(() => _dotsSuppressed = false);
+    });
+  }
+
+  Future<void> _revealCurrentFile(ScoreTarget target) async {
+    try {
+      if (!await File(target.filePath).exists()) {
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(
+            context,
+          )?.showSnackBar(const SnackBar(content: Text('文件已移动或不存在，请刷新谱库后重试。')));
+        }
+        return;
+      }
+      await Process.start(
+        'explorer.exe',
+        ['/select,', target.filePath],
+        runInShell: false,
+        mode: ProcessStartMode.detached,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)
+            ?.showSnackBar(const SnackBar(content: Text('无法打开文件所在目录，请重试。')));
+      }
+    }
+  }
+
+  Future<void> _share(LoadedScore document, String title) async {
+    if (_sharing || _writing) return;
+    setState(() => _sharing = true);
+    try {
+      await shareScore(
+        context,
+        filePath: document.target.filePath,
+        fileName: p.basename(title),
+        validate: document.target.validateBeforeRead,
+        beforeShare: _prepareShare,
+        annotationsFor: (number) => _shareAnnotations(document.target, number),
+      );
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  Widget _shareButton(LoadedScore document, String title, double target) =>
+      ReaderActionButton(
+        label: _sharing ? '正在分享' : '分享',
+        target: target,
+        icon: _sharing
+            ? const SizedBox.square(
+                dimension: ScoreLayout.iconVisual,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const ReaderIcon(ReaderGlyph.share, size: ScoreLayout.iconVisual),
+        onPressed: _writing || _sharing
+            ? null
+            : () => unawaited(_share(document, title)),
+      );
+
+  Widget _compactHeader(LoadedScore? current, String title) {
+    final t = ScoreTokens.of(context);
+    final document = _visibleDocument ?? current;
+    return Container(
+      height: ScoreLayout.readerHeaderHeight,
+      decoration: BoxDecoration(
+        color: t.paper0,
+        border: Border(bottom: BorderSide(color: t.hair2)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.lg),
+      child: Row(
+        children: [
+          ReaderActionButton(
+            label: '返回曲库',
+            onPressed: _back,
+            icon: const ReaderIcon(
+              ReaderGlyph.back,
+              size: ScoreLayout.iconVisual,
+            ),
+          ),
+          const SizedBox(width: ScoreSpace.sm),
+          Expanded(
+            child: MenuAnchor(
+              style: const MenuStyle(
+                minimumSize: WidgetStatePropertyAll(
+                  Size(ScoreLayout.menuWidth, 0),
+                ),
+              ),
+              onOpen: () => setState(() => _desktopMenuOpen = true),
+              onClose: () => setState(() => _desktopMenuOpen = false),
+              menuChildren: [
+                if (widget.allowAnnotations)
+                  MenuItemButton(
+                    onPressed: _addToSetList,
+                    child: const Text('加入曲单'),
+                  ),
+                if (document != null && document.pdf == null)
+                  MenuItemButton(
+                    onPressed: () => unawaited(
+                      showImageDisplayInfo(context, _imageInfos[_visiblePage]),
+                    ),
+                    child: const Text('图片信息'),
+                  ),
+              ],
+              builder: (context, controller, _) => Semantics(
+                button: true,
+                label: '曲谱操作',
+                child: Tooltip(
+                  message: '曲谱操作',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => controller.isOpen
+                        ? controller.close()
+                        : controller.open(),
                     child: SizedBox(
-                      width: available > controlsWidth
-                          ? available
-                          : controlsWidth,
-                      height: 44,
+                      key: const ValueKey('reader-title-menu'),
+                      height: ScoreLayout.readerTitleMenuHitHeight,
                       child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          for (final tool in ReaderTool.values)
-                            ReaderToolButton(
-                              key: ValueKey(tool),
-                              tool: tool,
-                              selected:
-                                  !_picking && !_textTool && _tool == tool,
-                              value: _sizes[tool]!,
-                              onSelect: () => _selectTool(tool),
-                              buttonWidth: 44,
-                              buttonHeight: 44,
-                              iconOnly: true,
-                            ),
-                          SizedBox.square(
-                            dimension: 44,
-                            child: IconButton(
-                              tooltip: '文字批注',
-                              onPressed: _toggleTextTool,
-                              isSelected: _textTool,
-                              style: IconButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                backgroundColor: _textTool
-                                    ? Theme.of(context)
-                                          .colorScheme
-                                          .secondaryContainer
-                                    : Colors.transparent,
+                          Flexible(
+                            child: Text(
+                              p.posix.basename(title.replaceAll('\\', '/')),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: ScoreText.body.copyWith(
+                                color: t.ink900,
+                                fontWeight: FontWeight.w500,
                               ),
-                              icon: const ReaderIcon(ReaderGlyph.text),
                             ),
                           ),
-                          separator(),
-                          ReaderAnnotationColors(
-                            compact: true,
-                            showCustomColor: false,
-                            argb: _color,
-                            onChanged: _textControls.saving
-                                ? null
-                                : (color) {
-                                    setState(() {
-                                      _cancelPick();
-                                      _usingSample = false;
-                                      _color = color;
-                                    });
-                                    if (_textTool) {
-                                      _textControls.changeColor(color);
-                                    }
-                                  },
+                          const SizedBox(width: ScoreSpace.xs),
+                          const ReaderIcon(
+                            ReaderGlyph.chevronDown,
+                            size: ScoreLayout.readerTitleChevron,
                           ),
-                          ReaderSampleColorButton(
-                            sample: _lastSample == null
-                                ? null
-                                : Color(_lastSample!),
-                            picking: _picking,
-                            busy: _sampling,
-                            usingSample: _usingSample,
-                            onPressed:
-                                _visiblePage == null ||
-                                    _visiblePage != _session.pageKey ||
-                                    _writing
-                                ? null
-                                : _sampleAction,
-                          ),
-                          separator(),
-                          ReaderSizeButton(
-                            key: const ValueKey('annotation-size-button'),
-                            value: currentSize.clamp(minSize, maxSize),
-                            min: minSize,
-                            max: maxSize,
-                            label: sizeLabel,
-                            tool: activeTool,
-                            color: Color(_color),
-                            textMode: _textTool,
-                            onChanged: _textTool && _textControls.saving
-                                ? null
-                                : (value) => setState(() {
-                                    if (_textTool) {
-                                      _textControls.changeFontSizeFraction(
-                                        value,
-                                      );
-                                    } else {
-                                      _sizes[activeTool] = value;
-                                    }
-                                  }),
-                            onChangeEnd: _textTool
-                                ? (_) =>
-                                      unawaited(_textControls.commitFontSize())
-                                : null,
-                          ),
-                          separator(),
-                          history(true),
-                          history(false),
                         ],
                       ),
                     ),
                   ),
                 ),
               ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _desktopAnnotationTools({
-    required PageKey page,
-    required ReaderTool activeTool,
-    required double currentSize,
-    required double minSize,
-    required double maxSize,
-    required String sizeLabel,
-    required double size,
-  }) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final availableWidth = constraints.maxWidth > 16
-            ? constraints.maxWidth - 16
-            : constraints.maxWidth;
-        final showLabels = availableWidth >= 1000;
-        final toolButtonWidth = showLabels ? 84.0 : 36.0;
-        final toolButtonHeight = showLabels ? 40.0 : 36.0;
-        final paletteCellSize = showLabels ? 36.0 : 32.0;
-        final sampleSize = showLabels ? 36.0 : 32.0;
-        final iconSize = showLabels ? 38.0 : 34.0;
-        final sliderWidth = showLabels ? 112.0 : 82.0;
-        const textButtonWidthWide = 72.0;
-        final textButtonWidth = showLabels ? textButtonWidthWide : 36.0;
-        const gap = 6.0;
-        final paletteWidth = paletteCellSize * 7;
-        final toolWidth = toolButtonWidth * 3 + textButtonWidth;
-        final sliderGroupWidth =
-            (showLabels ? 44.0 : 30.0) +
-            sliderWidth +
-            (showLabels ? 30.0 : 26.0) +
-            (showLabels ? 32.0 : 28.0);
-        final fixedWidth =
-            toolWidth +
-            paletteWidth +
-            sampleSize * 2 +
-            sliderGroupWidth +
-            iconSize * 2 +
-            gap * 4;
-        final contentWidth = fixedWidth < availableWidth
-            ? availableWidth
-            : fixedWidth;
-        final showScrollbar = fixedWidth > availableWidth;
-
-        Widget spacing() => const SizedBox(width: gap);
-        Widget denseSwatch(Widget child) => SizedBox(
-          width: sampleSize,
-          height: sampleSize,
-          child: FittedBox(fit: BoxFit.scaleDown, child: child),
-        );
-        Widget undoRedo({required bool undo}) {
-          final enabled =
-              (undo
-                  ? widget.workspace.store.canUndo(page)
-                  : widget.workspace.store.canRedo(page)) ||
-              widget.workspace.savingAnnotations;
-          void callback() => _queueAnnotationHistory(page, undo: undo);
-          return SizedBox(
-            width: iconSize,
-            height: iconSize,
-            child: IconButton(
-              tooltip: undo ? '撤销' : '重做',
-              onPressed: enabled ? callback : null,
-              padding: EdgeInsets.zero,
-              constraints: BoxConstraints.tight(Size(iconSize, iconSize)),
-              iconSize: 20,
-              icon: ReaderIcon(undo ? ReaderGlyph.undo : ReaderGlyph.redo),
-            ),
-          );
-        }
-
-        return Align(
-          alignment: Alignment.center,
-          child: Container(
-            key: _textToolsKey,
-            width: double.infinity,
-            color: Theme.of(context).colorScheme.surface,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Divider(
-                  height: 1,
-                  thickness: 1,
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
-                  child: Scrollbar(
-                    controller: _toolsScrollController,
-                    thumbVisibility: showScrollbar,
-                    interactive: true,
-                    thickness: 4,
-                    radius: const Radius.circular(4),
-                    scrollbarOrientation: ScrollbarOrientation.bottom,
-                    child: SingleChildScrollView(
-                      key: const ValueKey('reader-desktop-annotation-scroll'),
-                      controller: _toolsScrollController,
-                      scrollDirection: Axis.horizontal,
-                      child: SizedBox(
-                        key: const ValueKey(
-                          'reader-desktop-annotation-content',
-                        ),
-                        width: contentWidth,
-                        height: 45,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            for (final tool in ReaderTool.values)
-                              ReaderToolButton(
-                                key: ValueKey(tool),
-                                tool: tool,
-                                selected:
-                                    !_picking && !_textTool && _tool == tool,
-                                value: _sizes[tool]!,
-                                onSelect: () => _selectTool(tool),
-                                buttonWidth: toolButtonWidth,
-                                buttonHeight: toolButtonHeight,
-                                iconOnly: !showLabels,
-                              ),
-                            SizedBox(
-                              width: textButtonWidth,
-                              height: toolButtonHeight,
-                              child: Tooltip(
-                                message: '文字批注',
-                                child: showLabels
-                                    ? TextButton.icon(
-                                        onPressed: _toggleTextTool,
-                                        icon: const ReaderIcon(
-                                          ReaderGlyph.text,
-                                          size: 20,
-                                        ),
-                                        label: const Text('文字'),
-                                        style: _desktopToolButtonStyle(
-                                          selected: _textTool,
-                                          width: textButtonWidth,
-                                          height: toolButtonHeight,
-                                        ),
-                                      )
-                                    : IconButton(
-                                        onPressed: _toggleTextTool,
-                                        icon: const ReaderIcon(
-                                          ReaderGlyph.text,
-                                        ),
-                                        style: IconButton.styleFrom(
-                                          fixedSize: Size(
-                                            textButtonWidth,
-                                            toolButtonHeight,
-                                          ),
-                                          minimumSize: Size(
-                                            textButtonWidth,
-                                            toolButtonHeight,
-                                          ),
-                                          maximumSize: Size(
-                                            textButtonWidth,
-                                            toolButtonHeight,
-                                          ),
-                                          padding: EdgeInsets.zero,
-                                          backgroundColor: _textTool
-                                              ? Theme.of(context)
-                                                    .colorScheme
-                                                    .secondaryContainer
-                                              : Colors.transparent,
-                                        ),
-                                      ),
-                              ),
-                            ),
-                            spacing(),
-                            SizedBox(
-                              width: paletteWidth,
-                              height: 40,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerLeft,
-                                child: ReaderAnnotationColors(
-                                  argb: _color,
-                                  onChanged: _textControls.saving
-                                      ? null
-                                      : (color) {
-                                          setState(() {
-                                            _cancelPick();
-                                            _usingSample = false;
-                                            _color = color;
-                                          });
-                                          if (_textTool) {
-                                            _textControls.changeColor(color);
-                                          }
-                                        },
-                                ),
-                              ),
-                            ),
-                            denseSwatch(
-                              ReaderSampleColorButton(
-                                sample: _lastSample == null
-                                    ? null
-                                    : Color(_lastSample!),
-                                picking: _picking,
-                                busy: _sampling,
-                                usingSample: _usingSample,
-                                onPressed:
-                                    _visiblePage == null ||
-                                        _visiblePage != _session.pageKey ||
-                                        _writing
-                                    ? null
-                                    : _sampleAction,
-                              ),
-                            ),
-                            denseSwatch(
-                              ReaderSampleReuseButton(
-                                sample: _lastSample == null
-                                    ? null
-                                    : Color(_lastSample!),
-                                selected: _usingSample,
-                                onPressed: _lastSample == null || _writing
-                                    ? null
-                                    : _useSampleColor,
-                              ),
-                            ),
-                            spacing(),
-                            SizedBox(
-                              width: showLabels ? 44 : 30,
-                              child: Tooltip(
-                                message: sizeLabel,
-                                child: Text(
-                                  sizeLabel,
-                                  maxLines: 1,
-                                  softWrap: false,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .labelMedium,
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: sliderWidth,
-                              child: Slider(
-                                key: const ValueKey('annotation-size-slider'),
-                                min: minSize,
-                                max: maxSize,
-                                divisions: 100,
-                                value: currentSize.clamp(minSize, maxSize),
-                                label: _textTool
-                                    ? (currentSize * 1024).toStringAsFixed(0)
-                                    : currentSize.toStringAsFixed(1),
-                                onChanged: _textTool && _textControls.saving
-                                    ? null
-                                    : (value) => setState(() {
-                                        if (_textTool) {
-                                          _textControls.changeFontSizeFraction(
-                                            value,
-                                          );
-                                        } else {
-                                          _sizes[activeTool] = value;
-                                        }
-                                      }),
-                                onChangeEnd: _textTool
-                                    ? (_) => unawaited(
-                                        _textControls.commitFontSize(),
-                                      )
-                                    : null,
-                              ),
-                            ),
-                            SizedBox(
-                              width: showLabels ? 30 : 26,
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: Text(
-                                  _textTool
-                                      ? (currentSize * 1024).toStringAsFixed(0)
-                                      : currentSize.toStringAsFixed(1),
-                                  maxLines: 1,
-                                  softWrap: false,
-                                  textAlign: TextAlign.end,
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: showLabels ? 32 : 28,
-                              height: 28,
-                              child: _textTool
-                                  ? Center(
-                                      child: Text(
-                                        'A',
-                                        key: const ValueKey(
-                                          'annotation-size-preview',
-                                        ),
-                                        style: TextStyle(
-                                          color: Color(_color),
-                                          fontSize: (currentSize * 1024).clamp(
-                                            8,
-                                            28,
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  : CustomPaint(
-                                      key: const ValueKey(
-                                        'annotation-size-preview',
-                                      ),
-                                      painter: ReaderToolSizePreview(
-                                        activeTool,
-                                        size,
-                                        Color(_color),
-                                      ),
-                                    ),
-                            ),
-                            spacing(),
-                            undoRedo(undo: true),
-                            undoRedo(undo: false),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
-        );
-      },
+          const SizedBox(width: ScoreSpace.sm),
+          if (document != null)
+            TextButton(
+              onPressed: _writing ? null : _jumpDialog,
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, ScoreLayout.touchTarget),
+                padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
+                foregroundColor: t.ink500,
+                textStyle: Theme.of(context).textTheme.labelLarge,
+                splashFactory: NoSplash.splashFactory,
+              ),
+              child: Text(
+                '${_visiblePage?.pageNumber ?? _session.page} / ${document.pageCount}',
+              ),
+            ),
+          if (widget.allowAnnotations) ...[
+            const SizedBox(width: ScoreSpace.xs),
+            ReaderActionButton(
+              key: const ValueKey('ipad-annotation-toggle'),
+              label: _editing ? '完成批注' : '批注',
+              caption: _editing ? '完成批注' : '批注',
+              width: _editing
+                  ? ScoreLayout.readerAnnotationDoneButtonWidth
+                  : ScoreLayout.readerAnnotationButtonWidth,
+              selected: _editing,
+              onPressed: _writing ? null : _annotationAction,
+              icon: const ReaderIcon(
+                ReaderGlyph.pen,
+                size: ScoreLayout.iconVisual,
+              ),
+            ),
+          ],
+          if (document != null) ...[
+            const SizedBox(width: ScoreSpace.xs),
+            _shareButton(document, title, ScoreLayout.touchTarget),
+          ],
+          const SizedBox(width: ScoreSpace.xs),
+          const SizedBox(
+            width: ScoreLayout.touchTarget,
+            height: ScoreLayout.touchTarget,
+            child: ThemeAction(),
+          ),
+        ],
+      ),
     );
   }
-
-  ButtonStyle _desktopToolButtonStyle({
-    required bool selected,
-    required double width,
-    required double height,
-  }) => TextButton.styleFrom(
-    fixedSize: Size(width, height),
-    minimumSize: Size(width, height),
-    maximumSize: Size(width, height),
-    padding: const EdgeInsets.symmetric(horizontal: 4),
-    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    backgroundColor: selected
-        ? Theme.of(context).colorScheme.secondaryContainer
-        : Colors.transparent,
-    foregroundColor: selected
-        ? Theme.of(context).colorScheme.onSecondaryContainer
-        : Theme.of(context).colorScheme.onSurface,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-  );
 
   Future<void> _navigate(NavigationDirection direction) async {
     if (!await _textControls.finish() || !mounted) return;
@@ -2077,159 +1922,42 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Widget _footer() {
-    if (!_isCompact && _visiblePage != null) {
-      final document = _visibleDocument;
-      if (document == null) return const SizedBox.shrink();
-      final focus = _visiblePage!.pageNumber;
-      final grouping = ReaderSpreads(
-        pageCount: document.pageCount,
-        doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
-        arrangement: _arrangementFor(document.target.entryId),
-      ).forPage(focus);
-      final label = grouping.first == grouping.last
-          ? '$focus / ${document.pageCount}'
-          : '${grouping.first}–${grouping.last} / ${document.pageCount}';
-      return Align(
-        alignment: Alignment.centerRight,
-        child: Padding(
-          padding: const EdgeInsets.only(right: 18),
-          child: MenuAnchor(
-            controller: _quickPageMenu,
-            alignmentOffset: const Offset(0, -8),
-            consumeOutsideTap: true,
-            onOpen: () {
-              if (mounted) setState(() => _desktopMenuOpen = true);
-            },
-            onClose: () {
-              if (mounted) setState(() => _desktopMenuOpen = false);
-            },
-            menuChildren: [
-              SizedBox(
-                width: 236,
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _quickPageController,
-                          autofocus: true,
-                          keyboardType: TextInputType.number,
-                          decoration: InputDecoration(
-                            isDense: true,
-                            labelText: '跳到页',
-                            suffixText: '/ ${document.pageCount}',
-                          ),
-                          onSubmitted: (_) =>
-                              unawaited(_seekQuickPage(document)),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      IconButton(
-                        tooltip: '前往',
-                        onPressed: () => unawaited(_seekQuickPage(document)),
-                        icon: const Icon(Icons.arrow_forward),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-            builder: (context, controller, child) => TextButton(
-              key: const ValueKey('desktop-bottom-page-indicator'),
-              onPressed: _writing
-                  ? null
-                  : () {
-                      _quickPageController.text = '$focus';
-                      controller.isOpen
-                          ? controller.close()
-                          : controller.open();
-                    },
-              child: Text(label),
-            ),
-          ),
-        ),
-      );
-    }
-    if (!_isCompact ||
-        _tool != null ||
-        _textTool ||
-        _picking ||
+    if ((!_isCompact && _effectiveDesktopMode == ReaderViewMode.continuous) ||
+        _dotsSuppressed ||
         _writing ||
+        _textDraftActive ||
+        MediaQuery.viewInsetsOf(context).bottom > 0 ||
         _visiblePage == null) {
       return const SizedBox.shrink();
     }
-    return Padding(
-      padding: EdgeInsets.only(bottom: _pageBottomGap()),
-      child: ReaderPageSeekBar(
-        hitRegionKey: _seekRegionKey,
-        key: ValueKey(_visibleDocument?.target.key),
-        currentPage: _visiblePage!.pageNumber,
-        pageCount: _visibleDocument?.pageCount ?? 1,
-        enabled: _session.current?.target.key == _visibleDocument?.target.key,
-        onCancel: _session.cancelSeek,
-        onSeek: (number, gesture) async {
-          if (_writing ||
-              _tool != null ||
-              _textTool ||
-              _picking ||
-              _session.current?.target.key != _visibleDocument?.target.key) {
-            return;
-          }
-          final document = _visibleDocument;
-          if (!await _textControls.finish() ||
-              !mounted ||
-              _visibleDocument != document ||
-              _writing ||
-              _tool != null ||
-              _textTool ||
-              _picking) {
-            return;
-          }
-          if (_picking) setState(_cancelPick);
-          _direction = number >= _visiblePage!.pageNumber ? 1 : -1;
-          _requestedAt =
-              widget.presentationClock?.call() ?? readerPresentationNow();
-          unawaited(_session.seek(number, gesture: gesture));
-        },
-      ),
+    return ReaderPageSeekBar(
+      hitRegionKey: _seekRegionKey,
+      key: ValueKey(_visibleDocument?.target.key),
+      currentPage: _visiblePage!.pageNumber,
+      pageCount: _visibleDocument?.pageCount ?? 1,
+      enabled:
+          !_picking &&
+          _session.current?.target.key == _visibleDocument?.target.key,
+      onCancel: _session.cancelSeek,
+      onSeek: (number, gesture) async {
+        if (_writing ||
+            _picking ||
+            _session.current?.target.key != _visibleDocument?.target.key) {
+          return;
+        }
+        final document = _visibleDocument;
+        if (!await _textControls.finish() ||
+            !mounted ||
+            _visibleDocument != document ||
+            _writing) {
+          return;
+        }
+        _direction = number >= _visiblePage!.pageNumber ? 1 : -1;
+        _requestedAt =
+            widget.presentationClock?.call() ?? readerPresentationNow();
+        unawaited(_session.seek(number, gesture: gesture));
+      },
     );
-  }
-
-  double _pageBottomGap() {
-    final viewport =
-        _viewportKey.currentContext?.findRenderObject() as RenderBox?;
-    final document = _visibleDocument;
-    if (viewport == null || !viewport.hasSize || document == null) return 0;
-    final aspect = document.aspectFor(_visiblePage?.pageNumber ?? 1);
-    final fitted = applyBoxFit(
-      BoxFit.contain,
-      Size(aspect, 1),
-      viewport.size,
-    ).destination;
-    final paper = Alignment.center.inscribe(
-      fitted,
-      Offset.zero & viewport.size,
-    );
-    final scale = _transform.value.getMaxScaleOnAxis();
-    final bottom = paper.bottom * scale + _transform.value.storage[13];
-    return (viewport.size.height - bottom).clamp(0.0, viewport.size.height);
-  }
-
-  Future<void> _seekQuickPage(LoadedScore document) async {
-    _quickPageMenu.close();
-    final target = int.tryParse(_quickPageController.text.trim());
-    if (target == null ||
-        !await _textControls.finish() ||
-        !mounted ||
-        !identical(_visibleDocument, document) ||
-        _writing) {
-      return;
-    }
-    if (_picking) setState(_cancelPick);
-    _direction = target >= (_visiblePage?.pageNumber ?? 1) ? 1 : -1;
-    _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
-    unawaited(_session.seek(target, gesture: Object()));
   }
 
   void _zoom(double factor) {

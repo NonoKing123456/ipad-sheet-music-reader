@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:library_sync/library_sync.dart';
 
+import '../theme/tokens.dart';
+
 class SigningExpiry {
   const SigningExpiry(this.expiration);
   final DateTime? expiration;
@@ -49,6 +51,18 @@ class SigningExpiry {
       expiration != null &&
       expiration!.difference(now) < const Duration(days: 1);
 
+  /// Approved v2 presentation rounds a partial day/hour upward. Persistence
+  /// and the existing native/paired status sources remain unchanged.
+  String summaryLabel(DateTime now) {
+    final date = expiration;
+    if (date == null) return '未取得签名日期';
+    final remaining = date.difference(now);
+    if (remaining <= Duration.zero) return '签名已到期';
+    final seconds = remaining.inMicroseconds / Duration.microsecondsPerSecond;
+    if (seconds >= 86400) return '签名${(seconds / 86400).ceil()}天';
+    return '签名${(seconds / 3600).ceil()}小时';
+  }
+
   String get exactLocalTime {
     final date = expiration?.toLocal();
     if (date == null) return '到期时间待确认';
@@ -72,6 +86,9 @@ class SigningExpiryChip extends StatefulWidget {
     this.unavailable,
     this.onRefresh,
     this.compact = false,
+    this.summaryOnly = false,
+    this.onTap,
+    this.section = false,
   });
   final ValueChanged<SigningExpiry>? onRead;
   final bool pairedDevice;
@@ -79,6 +96,9 @@ class SigningExpiryChip extends StatefulWidget {
   final ValueListenable<bool>? unavailable;
   final Future<void> Function()? onRefresh;
   final bool compact;
+  final bool summaryOnly;
+  final VoidCallback? onTap;
+  final bool section;
 
   @override
   State<SigningExpiryChip> createState() => _SigningExpiryChipState();
@@ -115,7 +135,8 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
     if (!mounted) return;
     setState(
       () => _expiry = SigningExpiry(
-        widget.pairedStatus?.value?.status.expiration,
+        widget.pairedStatus?.value?.status.expiration ??
+            widget.pairedStatus?.value?.lastKnownExpiration,
       ),
     );
     _scheduleLabel();
@@ -203,7 +224,9 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
 
   Widget _detailsDialog(BuildContext context, SigningStatusReceipt? receipt) {
     final display = widget.pairedDevice
-        ? SigningExpiry(receipt?.status.expiration)
+        ? SigningExpiry(
+            receipt?.status.expiration ?? receipt?.lastKnownExpiration,
+          )
         : _expiry;
     return AlertDialog(
       title: Text(widget.pairedDevice ? 'iPad 签名上次回报' : '签名到期时间'),
@@ -268,12 +291,72 @@ class _SigningExpiryChipState extends State<SigningExpiryChip>
         ? '签名期限未读取'
         : _expiry.label(now);
     final color = _expiry.nearExpiry(now)
-        ? const Color(0xff946124)
-        : Theme.of(context).colorScheme.onSurfaceVariant;
+        ? ScoreTokens.of(context).warnInk
+        : ScoreTokens.of(context).ink500;
+    if (widget.summaryOnly) {
+      final summary = Semantics(
+        label: '${_expiry.summaryLabel(now)}，${_expiry.exactLocalTime}',
+        child: Text(
+          MediaQuery.textScalerOf(context).scale(13) > 13 * 1.3 &&
+                  _expiry.expiration != null
+              ? _expiry.summaryLabel(now).replaceFirst('签名', '')
+              : _expiry.summaryLabel(now),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: ScoreText.caption.copyWith(
+            color: color,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      );
+      return widget.onTap == null
+          ? summary
+          : GestureDetector(onTap: widget.onTap, child: summary);
+    }
+    if (widget.section) {
+      final tokens = ScoreTokens.of(context);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _expiry.summaryLabel(now),
+                  style: ScoreText.body.copyWith(
+                    color: tokens.ink900,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: widget.onTap ?? _details,
+                child: const Text('管理'),
+              ),
+            ],
+          ),
+          Text(
+            _expiry.expiration == null
+                ? '连接设备获取签名日期'
+                : '到期 ${_expiry.exactLocalTime}',
+            style: ScoreText.caption.copyWith(color: tokens.ink500),
+          ),
+          if (widget.pairedDevice && receipt != null)
+            Text(
+              '最近确认 ${SigningExpiry(receipt.status.expiration != null ? receipt.receivedAt : receipt.lastKnownReceivedAt).exactLocalTime}',
+              style: ScoreText.caption.copyWith(color: tokens.ink500),
+            ),
+          Text(
+            '续签由电脑管理 · 等待电脑确认续签状态',
+            style: ScoreText.caption.copyWith(color: tokens.ink500),
+          ),
+        ],
+      );
+    }
     return Tooltip(
       message: widget.pairedDevice ? 'iPad 签名上次回报；点击查看电脑确认时间' : '查看签名到期时间与续签方式',
       child: TextButton(
-        onPressed: _details,
+        onPressed: widget.onTap ?? _details,
         style: TextButton.styleFrom(
           foregroundColor: color,
           backgroundColor: color.withValues(alpha: .07),
