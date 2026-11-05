@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A08800000000000000000002 /* ExternalFileImportBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A08800000000000000000001 /* ExternalFileImportBridge.swift */; };
 		A08700000000000000000002 /* BackgroundDownloadBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A08700000000000000000001 /* BackgroundDownloadBridge.swift */; };
 		A08600000000000000000002 /* ProvisioningExpiry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A08600000000000000000001 /* ProvisioningExpiry.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
@@ -44,6 +45,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A08800000000000000000001 /* ExternalFileImportBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ExternalFileImportBridge.swift; sourceTree = "<group>"; };
 		A08700000000000000000001 /* BackgroundDownloadBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackgroundDownloadBridge.swift; sourceTree = "<group>"; };
 		A08600000000000000000001 /* ProvisioningExpiry.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProvisioningExpiry.swift; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
@@ -128,6 +130,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				A08600000000000000000001 /* ProvisioningExpiry.swift */,
 				A08700000000000000000001 /* BackgroundDownloadBridge.swift */,
+				A08800000000000000000001 /* ExternalFileImportBridge.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -290,6 +293,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				A08600000000000000000002 /* ProvisioningExpiry.swift in Sources */,
 				A08700000000000000000002 /* BackgroundDownloadBridge.swift in Sources */,
+				A08800000000000000000002 /* ExternalFileImportBridge.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);

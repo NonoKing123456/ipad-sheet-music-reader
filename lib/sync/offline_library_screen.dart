@@ -33,9 +33,11 @@ class OfflineLibraryScreen extends StatefulWidget {
     super.key,
     required this.controller,
     this.isHome = false,
+    this.openLocalImports,
   });
   final SyncController controller;
   final bool isHome;
+  final VoidCallback? openLocalImports;
   @override
   State<OfflineLibraryScreen> createState() => _OfflineLibraryScreenState();
 }
@@ -928,6 +930,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
               ),
               const SizedBox(width: 8),
               const ThemeAction(),
+              if (widget.openLocalImports != null)
+                LibraryIconButton(
+                  glyph: ReaderGlyph.folder,
+                  label: '本机导入',
+                  onPressed: widget.openLocalImports,
+                ),
               if (!wide) ...[
                 const SizedBox(width: 8),
                 LibraryIconButton(

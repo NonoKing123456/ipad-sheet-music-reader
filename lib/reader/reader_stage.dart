@@ -22,6 +22,12 @@ Color readerSurroundColor(BuildContext context) =>
     ? Colors.black
     : ScoreTokens.of(context).paper2;
 
+/// Tablet paper uses every available pixel; desktop retains its approved gutter.
+EdgeInsets readerPagePadding(BuildContext context) =>
+    DeviceLayoutScope.isCompact(context)
+    ? EdgeInsets.zero
+    : const EdgeInsets.all(ScoreLayout.pageGutter);
+
 /// Root navigation visibility distinguishes opaque pages from local popups.
 class ReaderRouteVisibilityObserver extends NavigatorObserver
     with ChangeNotifier {
@@ -96,6 +102,7 @@ class ReaderStage extends StatefulWidget {
     this.statusLabel = '阅读状态',
     this.loading = false,
     this.controller,
+    this.initiallyShowTools,
   });
   final Widget Function(VoidCallback toggleTools) contentBuilder;
   final Widget top, bottom;
@@ -113,6 +120,7 @@ class ReaderStage extends StatefulWidget {
   final bool hasReadablePage, loading;
   final String statusLabel;
   final ReaderStageController? controller;
+  final bool? initiallyShowTools;
   @override
   State<ReaderStage> createState() => _ReaderStageState();
 }
@@ -201,7 +209,7 @@ class _ReaderStageState extends State<ReaderStage>
     if (_lastCompact != compact) {
       final initialLayout = _lastCompact == null;
       _lastCompact = compact;
-      _tools = !compact;
+      _tools = widget.initiallyShowTools ?? !compact;
       _reserveTools = _tools;
       _animation.value = _tools ? 1 : 0;
       if (!initialLayout) widget.onToolsVisibilityChanged?.call(_tools);
@@ -362,31 +370,61 @@ class _ReaderStageState extends State<ReaderStage>
     });
   }
 
-  @override
-  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
-    value: Theme.of(context).brightness == Brightness.dark
+  SystemUiOverlayStyle _systemOverlayStyle(BuildContext context, Size size) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final aspectFor = widget.fitAspectFor;
+      var paperCoversTop = false;
+      if (widget.hasReadablePage && !_reserveTools && aspectFor != null) {
+        final paper = applyBoxFit(
+          BoxFit.contain,
+          Size(aspectFor(size), 1),
+          size,
+        ).destination;
+        // Native status text is black over a page filling the top edge. When
+        // aspect-preserving fit exposes dark surround, keep its text readable.
+        paperCoversTop =
+            paper.width >= size.width - precisionErrorTolerance &&
+            paper.height >= size.height - precisionErrorTolerance;
+      }
+      return dark && !paperCoversTop
+          ? SystemUiOverlayStyle.light
+          : SystemUiOverlayStyle.dark;
+    }
+    return dark
         ? SystemUiOverlayStyle.light.copyWith(
             statusBarColor: Colors.black,
             systemNavigationBarColor: Colors.black,
           )
-        : SystemUiOverlayStyle.dark,
-    child: ColoredBox(
-      key: const ValueKey('reader-surround'),
-      color: readerSurroundColor(context),
-      child: SafeArea(
-        maintainBottomViewPadding: true,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final size = constraints.biggest;
-            _measureObstruction();
-            if (_viewport != null && _viewport != size) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) widget.onViewportChanged?.call();
-              });
-            }
-            _viewport = size;
-            final content = widget.contentBuilder(_toggle);
-            return Stack(
+        : SystemUiOverlayStyle.dark;
+  }
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    key: const ValueKey('reader-surround'),
+    color: readerSurroundColor(context),
+    child: SafeArea(
+      // Only controls consume safe insets on tablet. Paper extends beneath
+      // the native status bar and home indicator without cropping its content.
+      top: !DeviceLayoutScope.isCompact(context),
+      bottom: !DeviceLayoutScope.isCompact(context),
+      left: !DeviceLayoutScope.isCompact(context),
+      right: !DeviceLayoutScope.isCompact(context),
+      maintainBottomViewPadding: true,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final size = constraints.biggest;
+          _measureObstruction();
+          if (_viewport != null && _viewport != size) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) widget.onViewportChanged?.call();
+            });
+          }
+          _viewport = size;
+          final content = widget.contentBuilder(_toggle);
+          return AnnotatedRegion<SystemUiOverlayStyle>(
+            value: _systemOverlayStyle(context, size),
+            child: Stack(
               key: const ValueKey('reading-viewport'),
               fit: StackFit.expand,
               children: [
@@ -416,6 +454,7 @@ class _ReaderStageState extends State<ReaderStage>
                           key: const ValueKey('reader-content-inset'),
                           topInset: constraints.maxHeight - available.maxHeight,
                           fitAspectFor: widget.fitAspectFor,
+                          pagePadding: readerPagePadding(context),
                           child: content,
                         ),
                       ),
@@ -467,9 +506,9 @@ class _ReaderStageState extends State<ReaderStage>
                   ),
                 ),
               ],
-            );
-          },
-        ),
+            ),
+          );
+        },
       ),
     ),
   );
@@ -504,10 +543,12 @@ class ReaderChromeViewport extends StatefulWidget {
     required this.topInset,
     required this.child,
     this.fitAspectFor,
+    this.pagePadding = const EdgeInsets.all(ScoreLayout.pageGutter),
   });
   final double topInset;
   final Widget child;
   final double Function(Size viewport)? fitAspectFor;
+  final EdgeInsets pagePadding;
   @override
   State<ReaderChromeViewport> createState() => _ReaderChromeViewportState();
 }
@@ -556,8 +597,11 @@ class _ReaderChromeViewportState extends State<ReaderChromeViewport>
       final aspectFor = widget.fitAspectFor;
       if (aspectFor != null) {
         Size inner(Size size) => Size(
-          (size.width - 2 * ScoreLayout.pageGutter).clamp(1.0, double.infinity),
-          (size.height - 2 * ScoreLayout.pageGutter).clamp(
+          (size.width - widget.pagePadding.horizontal).clamp(
+            1.0,
+            double.infinity,
+          ),
+          (size.height - widget.pagePadding.vertical).clamp(
             1.0,
             double.infinity,
           ),

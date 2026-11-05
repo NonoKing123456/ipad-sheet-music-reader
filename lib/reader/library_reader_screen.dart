@@ -46,6 +46,10 @@ class LibraryReaderScreen extends StatefulWidget {
     this.onPresented,
     this.initialPageNumber,
     this.onLoaded,
+    this.headerAction,
+    this.beforeLeave,
+    this.restoreScreen,
+    this.initiallyShowToolbar = false,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -60,6 +64,10 @@ class LibraryReaderScreen extends StatefulWidget {
   final ValueChanged<PageKey>? onPresented;
   final int? initialPageNumber;
   final ValueChanged<LoadedScore>? onLoaded;
+  final Widget? headerAction;
+  final Future<bool> Function()? beforeLeave;
+  final Widget? Function(int pageNumber)? restoreScreen;
+  final bool initiallyShowToolbar;
   @override
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
@@ -144,6 +152,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   String? _historyItemId;
   LoadedScore? _notifiedDocument;
   ReaderSnapshot? _shareSnapshot;
+  bool _leaving = false;
 
   @override
   void didChangeDependencies() {
@@ -152,6 +161,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (route == null) return;
     DesktopHistoryScope.of(context)?.reader(route, _leaveSafely, () {
       final position = _historyPosition;
+      final restored = widget.restoreScreen?.call(
+        position?.pageNumber ?? widget.initialPageNumber ?? 1,
+      );
+      if (restored != null) return restored;
       final latest = widget.locate(
         position?.entryId ?? widget.initialTarget.entryId,
       );
@@ -170,6 +183,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         allowAnnotations: widget.allowAnnotations,
         onPresented: widget.onPresented,
         onLoaded: widget.onLoaded,
+        headerAction: widget.headerAction,
+        beforeLeave: widget.beforeLeave,
+        restoreScreen: widget.restoreScreen,
+        initiallyShowToolbar: widget.initiallyShowToolbar,
       );
     }, blockKeys: () => _desktopMenuOpen || _writing || readerTextEditorActive);
   }
@@ -193,6 +210,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   KeyEventResult _annotationHistoryKey(KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        widget.beforeLeave != null &&
+        !readerTextEditorActive &&
+        !_desktopMenuOpen &&
+        (ModalRoute.of(context)?.isCurrent ?? false)) {
+      unawaited(_back());
+      return KeyEventResult.handled;
+    }
     if (event is! KeyDownEvent || !_annotationHistoryAllowed()) {
       return KeyEventResult.ignored;
     }
@@ -414,6 +440,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<bool> _leaveSafely() async {
+    if (_leaving) return false;
+    _leaving = true;
+    try {
+      return await _finishLeaving();
+    } finally {
+      _leaving = false;
+    }
+  }
+
+  Future<bool> _finishLeaving() async {
     if (!mounted || _blockLeavingWhileWriting()) return false;
     if (!await _textControls.finish() ||
         !mounted ||
@@ -423,6 +459,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (widget.allowAnnotations && !await _confirmLeaving()) return false;
     if (!mounted || _blockLeavingWhileWriting()) return false;
     await widget.workspace.flushPositions();
+    if (!mounted || _blockLeavingWhileWriting()) return false;
+    if (widget.beforeLeave != null && !await widget.beforeLeave!()) {
+      return false;
+    }
     return mounted && !_blockLeavingWhileWriting();
   }
 
@@ -596,6 +636,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final child = _buildReader(context);
+    if (widget.beforeLeave == null) return child;
+    return PopScope<Object?>(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        // Explicit toolbar/history pops already completed _leaveSafely. A
+        // system maybePop arrives here first and takes that same guarded path.
+        if (!didPop) unawaited(_back());
+      },
+      child: child,
+    );
+  }
+
+  Widget _buildReader(BuildContext context) {
     final current = _session.current;
     final page = _session.pageKey;
     final workspace = widget.workspace;
@@ -610,6 +664,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       body: _trackPen(
         ReaderStage(
           controller: _stageControls,
+          initiallyShowTools: widget.initiallyShowToolbar ? true : null,
           fitAspectFor: _readerFitAspect,
           hasReadablePage: _visiblePage != null,
           statusLabel: workspace.unsavedCount > 0
@@ -985,6 +1040,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 ),
             ],
             primaryActions: [
+              if (widget.headerAction != null) widget.headerAction!,
               if (widget.allowAnnotations)
                 ReaderActionButton(
                   label: '加入曲单',
@@ -1694,7 +1750,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Widget _paperViewport(Widget child) => Padding(
-    padding: const EdgeInsets.all(ScoreLayout.pageGutter),
+    padding: readerPagePadding(context),
     child: LayoutBuilder(
       builder: (context, constraints) {
         final next = constraints.biggest, before = _paperViewportSize;
@@ -1930,6 +1986,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             ),
           ),
           const SizedBox(width: ScoreSpace.sm),
+          if (widget.headerAction != null) ...[
+            widget.headerAction!,
+            const SizedBox(width: ScoreSpace.xs),
+          ],
           if (document != null)
             TextButton(
               onPressed: _writing ? null : _jumpDialog,

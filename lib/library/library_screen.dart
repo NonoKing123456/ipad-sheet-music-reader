@@ -9,12 +9,9 @@ import 'package:library_sync/library_sync.dart'
     show PageMetadataKey, CatalogSourceBinding;
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:file_selector/file_selector.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
@@ -37,18 +34,13 @@ import '../theme/app_theme.dart';
 import '../theme/device_layout.dart';
 import '../theme/tokens.dart';
 import '../sharing/score_share.dart';
+import '../importing/external_import_store.dart';
+import '../importing/file_import_bridge.dart';
+import '../importing/import_screens.dart';
+import '../importing/import_annotation_mirror.dart';
 
 const sidebarWidth = ScoreLayout.sidebarWidth;
 const dividerWidth = 1.0;
-
-Future<String> _hashExternalFile(String path) async =>
-    (await sha256.bind(File(path).openRead()).first).toString();
-
-class _ExternalHashRequest {
-  const _ExternalHashRequest(this.path);
-  final String path;
-  Future<String> call() => _hashExternalFile(path);
-}
 
 /// Host files never show replica availability badges.
 class _HostLibraryIcon extends StatelessWidget {
@@ -113,6 +105,14 @@ class _LibraryScreenState extends State<LibraryScreen>
   SyncController? _sync;
   Future<SyncController>? _syncFuture;
   SyncController? _setListSync;
+  ExternalImportStore? _imports;
+  final _importBridge = FileImportBridge();
+  final _incomingImports = <String>[];
+  final _offeredImports = <String>{};
+  bool _consumeImportsAgain = false;
+  bool _consumingImports = false,
+      _showingImport = false,
+      _importReaderOpen = false;
   bool get _canProvideLibrary =>
       defaultTargetPlatform != TargetPlatform.iOS &&
       defaultTargetPlatform != TargetPlatform.android;
@@ -147,7 +147,37 @@ class _LibraryScreenState extends State<LibraryScreen>
       controller.addListener(_changed);
       setState(() {});
       if (!controller.initialized) await controller.initialize();
+      try {
+        final imports = ExternalImportStore(
+          Directory(p.join(controller.dataDirectory.path, 'external-imports')),
+          copyToNewFile: FileImportBridge.copyToNewFile,
+        );
+        await imports.initialize();
+        if (!mounted) {
+          imports.dispose();
+          return;
+        }
+        _imports = imports;
+        for (final score in imports.records.where((s) => s.mirrorPending)) {
+          final workspace = await _prepareReader();
+          await mirrorImportAnnotations(
+            workspace,
+            DocumentKey(entryId: 'import-${score.id}', revisionId: score.hash),
+            DocumentKey(
+              entryId: score.catalogEntryId!,
+              revisionId: score.catalogRevisionId!,
+            ),
+          );
+          await imports.completeMirror(score.id);
+        }
+      } catch (failure) {
+        debugPrint('IMPORT initialization_failed: $failure');
+        if (mounted) _message('本机导入暂时不可用，原稿已保留。');
+      }
       await _prepareSync();
+      _importBridge.onChanged = _consumeImports;
+      _importBridge.start();
+      unawaited(_consumeImports());
       if (widget.initialPath != null && mounted) {
         unawaited(_openPath(widget.initialPath!));
       }
@@ -232,6 +262,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     _sync?.removeListener(_changed);
     if (widget.readerWorkspace == null) _workspace?.dispose();
     _sync?.dispose();
+    _importBridge.dispose();
+    _imports?.dispose();
     FocusManager.instance.removeEarlyKeyEventHandler(_searchKey);
     _searchFocus.dispose();
     _search.dispose();
@@ -315,6 +347,139 @@ class _LibraryScreenState extends State<LibraryScreen>
     }
   }
 
+  Future<void> _consumeImports() async {
+    if (_imports == null) return;
+    if (_consumingImports) {
+      _consumeImportsAgain = true;
+      return;
+    }
+    _consumingImports = true;
+    try {
+      do {
+        _consumeImportsAgain = false;
+        for (final item in await _importBridge.listPending()) {
+          final id = item['id'] as String;
+          if (item['error'] != null || item['path'] == null) {
+            if (mounted) _message('无法接收 ${item['name'] ?? '文件'}，请检查格式与文件权限。');
+            await _importBridge.acknowledge(id);
+            continue;
+          }
+          try {
+            final score = await _imports!.receive(
+              item['path'] as String,
+              name: item['name'] as String?,
+              originId: id,
+            );
+            try {
+              await _importBridge.acknowledge(id);
+            } catch (failure) {
+              debugPrint('IMPORT acknowledgement_failed: $failure');
+            }
+            if (_offeredImports.add(score.id)) _incomingImports.add(score.id);
+          } catch (_) {
+            if (mounted) _message('文件接收失败，原文件未改动，可重新打开或分享。');
+          }
+        }
+      } while (_consumeImportsAgain && mounted);
+    } catch (failure) {
+      debugPrint('IMPORT pending_failed: $failure');
+    } finally {
+      _consumingImports = false;
+    }
+    unawaited(_showIncomingImports());
+  }
+
+  Future<void> _showIncomingImports() async {
+    if (_showingImport || _importReaderOpen || !mounted) return;
+    _showingImport = true;
+    try {
+      while (_incomingImports.isNotEmpty && mounted) {
+        final id = _incomingImports.removeAt(0);
+        if (_imports?.byId(id) != null) await _openImportedScore(id);
+      }
+    } finally {
+      _showingImport = false;
+    }
+  }
+
+  List<ImportDestination> get _importDestinations => [
+    if (_canProvideLibrary)
+      for (final source in _library?.sources ?? <CatalogSourceBinding>[])
+        if (source.online)
+          ImportDestination(source.name, Directory(source.catalog.rootPath)),
+  ];
+
+  Future<(String, String)?> _savedCatalogIdentity(String path) async {
+    final library = _library!;
+    final managed = library.sources.any(
+      (source) => p.isWithin(source.catalog.rootPath, path),
+    );
+    if (!managed) return null;
+    await library.rescan();
+    final (_, first) = await library.entryForFilePath(path);
+    if (first == null) throw StateError('保存后目录尚未更新');
+    await library.ensureReady(first.id);
+    final (_, ready) = await library.entryForFilePath(path);
+    if (ready == null) throw StateError('保存后曲谱尚未准备');
+    return (ready.id, ready.currentRevisionId);
+  }
+
+  Future<void> _openImportedScore(String id) async {
+    final imports = _imports;
+    if (imports == null || imports.byId(id) == null) return;
+    final workspace = await _prepareReader();
+    final score = imports.byId(id)!;
+    if (score.mirrorPending) {
+      try {
+        await mirrorImportAnnotations(
+          workspace,
+          DocumentKey(entryId: 'import-${score.id}', revisionId: score.hash),
+          DocumentKey(
+            entryId: score.catalogEntryId!,
+            revisionId: score.catalogRevisionId!,
+          ),
+        );
+        await imports.completeMirror(score.id);
+      } catch (_) {
+        if (mounted) _message('批注暂时无法整理，原稿已保留，请重试。');
+        return;
+      }
+    }
+    if (!mounted) return;
+    final route = MaterialPageRoute<void>(
+      builder: (_) => ImportReaderScreen(
+        store: imports,
+        scoreId: id,
+        workspace: workspace,
+        destinations: _importDestinations,
+        allowOtherDirectories: _canProvideLibrary,
+        catalogIdentity: _canProvideLibrary ? _savedCatalogIdentity : null,
+      ),
+    );
+    _importReaderOpen = true;
+    try {
+      await Navigator.of(context).push(route);
+      await route.completed;
+    } finally {
+      _importReaderOpen = false;
+      if (!_showingImport) unawaited(_showIncomingImports());
+    }
+  }
+
+  Future<void> _openImports() async {
+    final imports = _imports;
+    if (imports == null) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ImportLibraryScreen(
+          store: imports,
+          openScore: _openImportedScore,
+          openFiles: () => unawaited(_openSingle()),
+        ),
+      ),
+    );
+  }
+
   Future<void> _openPath(String path) async {
     final library = _library;
     if (library == null || _openingReader) return;
@@ -330,40 +495,9 @@ class _LibraryScreenState extends State<LibraryScreen>
         _message('目录正在更新，请刷新后重试。');
         return;
       }
-      _openingReader = true;
-      final workspace = await _prepareReader();
-      final actual = p.normalize(await File(path).resolveSymbolicLinks());
-      final stat = await File(actual).stat();
-      final contentHash = await Isolate.run(_ExternalHashRequest(actual).call);
-      final after = await File(actual).stat();
-      if (after.size != stat.size || after.modified != stat.modified) {
-        throw const FileSystemException('Selected file changed.');
-      }
-      final revision = sha256
-          .convert(
-            utf8.encode(
-              '$actual/${stat.size}/${stat.modified.microsecondsSinceEpoch}',
-            ),
-          )
-          .toString();
-      final target = ScoreTarget(
-        entryId: 'external-view',
-        revisionId: revision,
-        filePath: actual,
-        contentHash: contentHash,
-        displayPath: actual,
-      );
-      if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => LibraryReaderScreen(
-            workspace: workspace,
-            initialTarget: target,
-            locate: (id) => id == target.entryId ? target : null,
-            allowAnnotations: false,
-          ),
-        ),
-      );
+      final score = await _imports!.receive(path);
+      _incomingImports.add(score.id);
+      await _showIncomingImports();
     } catch (failure) {
       if (mounted) _message('无法打开曲谱，请重试。');
       debugPrint('READER selected_path_failed: $failure');
@@ -659,7 +793,10 @@ class _LibraryScreenState extends State<LibraryScreen>
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
-          builder: (_) => OfflineLibraryScreen(controller: sync),
+          builder: (_) => OfflineLibraryScreen(
+            controller: sync,
+            openLocalImports: _openImports,
+          ),
         ),
       );
     } catch (_) {
@@ -672,7 +809,11 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (!_canProvideLibrary) {
       final sync = _sync;
       if (sync != null) {
-        return OfflineLibraryScreen(controller: sync, isHome: true);
+        return OfflineLibraryScreen(
+          controller: sync,
+          isHome: true,
+          openLocalImports: _openImports,
+        );
       }
       return Scaffold(
         body: Center(
@@ -863,6 +1004,13 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
             const SizedBox(width: 8),
             const ThemeAction(),
+            LibraryIconButton(
+              glyph: ReaderGlyph.folder,
+              label: '本机导入',
+              onPressed: _imports == null
+                  ? null
+                  : () => unawaited(_openImports()),
+            ),
             if (!wide) ...[
               const SizedBox(width: 8),
               LibraryIconButton(
@@ -1096,12 +1244,15 @@ class _LibraryScreenState extends State<LibraryScreen>
                     unawaited(library.rescan(verifyAll: true));
                   case 'offline':
                     unawaited(_openOffline());
+                  case 'imports':
+                    unawaited(_openImports());
                   case 'layout':
                     DeviceLayoutScope.maybeOf(context)?.toggle();
                 }
               },
               itemBuilder: (_) => [
                 const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
+                const PopupMenuItem(value: 'imports', child: Text('本机导入与暂存')),
                 PopupMenuItem(
                   value: 'refresh',
                   enabled: !library.scanning,

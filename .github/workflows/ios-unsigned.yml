@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: 76a1d1f8bd97079e8859ff4cdb0dbfb402e44a379e3b61983d951368c18c0ad9
+      REVIEWED_SOURCE_SHA256: 62ffc77401862307c31cfb25e1d255b4358e069d79c581c0b3dc69a48a991eef
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +71,15 @@ jobs:
             | tee "$RUNNER_TEMP/raster-fixture-make.txt"
           "$RUNNER_TEMP/raster-decode-smoke" --decode "$RUNNER_TEMP/raster-fixture.PNG" \
             | tee "$RUNNER_TEMP/raster-imageio-smoke.txt"
+
+      - name: Run the file import queue on synthetic files
+        run: |
+          set -euo pipefail
+          xcrun swiftc -swift-version 5 -parse-as-library \
+            ios/Runner/ExternalFileImportBridge.swift tool/file_import_smoke.swift \
+            -o "$RUNNER_TEMP/file-import-smoke"
+          "$RUNNER_TEMP/file-import-smoke" | tee "$RUNNER_TEMP/file-import-smoke.txt"
+          grep -Eq '^FILE_IMPORT_SMOKE_OK checks=[0-9]+ stream_chunks=4 queue_restart=1 ack_release_recovery=1 interrupted=1 exclusive_copy=1$' "$RUNNER_TEMP/file-import-smoke.txt"
 
       - name: Run the shared signing-expiry parser with synthetic CMS profiles
         run: |

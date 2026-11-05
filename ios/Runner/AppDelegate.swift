@@ -33,8 +33,17 @@ import AVFoundation
     }
   }
 
+  override func application(_ application: UIApplication, open url: URL,
+    options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+    if ExternalFileImportBridge.shared.receive([url]) { return true }
+    return super.application(application, open: url, options: options)
+  }
+
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ExternalFileImportBridge") {
+      ExternalFileImportBridge.shared.register(registrar: registrar)
+    }
     BackgroundDownloadBridge.shared.register(messenger: engineBridge.applicationRegistrar.messenger())
     signingExpiryChannel = ProvisioningExpiryBridge.register(
       messenger: engineBridge.applicationRegistrar.messenger()
