@@ -26,11 +26,16 @@ class FileImportBridge {
     await channel.invokeMethod<bool>('release', {'id': id});
   }
 
-  static Future<void> copyToNewFile(String source, String destination) async {
+  static Future<void> copyToNewFile(
+    String source,
+    String destination, {
+    String? trustedRootPath,
+  }) async {
     try {
       await channel.invokeMethod<bool>('copyToNewFile', {
         'sourcePath': source,
         'destinationPath': destination,
+        'trustedRootPath': ?trustedRootPath,
       });
     } on PlatformException catch (error) {
       if (error.code == 'already_exists') throw const ImportDestinationExists();

@@ -6,7 +6,7 @@ import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
 import 'package:library_sync/library_sync.dart'
-    show PageMetadataKey, CatalogSourceBinding;
+    show PageMetadataKey, CatalogSourceBinding, SyncProtocolException;
 
 import 'dart:async';
 import 'dart:io';
@@ -429,7 +429,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (imports == null || imports.byId(id) == null) return;
     final workspace = await _prepareReader();
     final score = imports.byId(id)!;
-    if (score.mirrorPending) {
+    final sync = !_canProvideLibrary ? await _prepareSync() : null;
+    if (score.saved && score.mirrorPending) {
       try {
         await mirrorImportAnnotations(
           workspace,
@@ -439,6 +440,9 @@ class _LibraryScreenState extends State<LibraryScreen>
             revisionId: score.catalogRevisionId!,
           ),
         );
+        if (score.remoteTransaction != null) {
+          await sync?.syncImportedReaderState();
+        }
         await imports.completeMirror(score.id);
       } catch (_) {
         if (mounted) _message('批注暂时无法整理，原稿已保留，请重试。');
@@ -454,6 +458,54 @@ class _LibraryScreenState extends State<LibraryScreen>
         destinations: _importDestinations,
         allowOtherDirectories: _canProvideLibrary,
         catalogIdentity: _canProvideLibrary ? _savedCatalogIdentity : null,
+        computerDestinationProvider: sync == null
+            ? null
+            : () => [
+                for (final source
+                    in sync.activeCollection?.index?.sources ?? [])
+                  ImportComputerDestination(
+                    id: source.id,
+                    name: source.name,
+                    folders:
+                        sync.activeCollection!.index!.folders[source.id] ??
+                        const [],
+                  ),
+              ],
+        saveToComputer: sync == null
+            ? null
+            : (transaction, score, filePath) async {
+                try {
+                  if (sync.busy) throw const ImportSaveBusy();
+                  final receipt = await sync.importScoreToComputer(
+                    operationId: transaction.operationId,
+                    sourceId: transaction.sourceId,
+                    relativeFolder: transaction.relativeFolder,
+                    fileName: transaction.fileName,
+                    filePath: filePath,
+                    hash: score.hash,
+                  );
+                  final target = sync.locateOffline(receipt.item.entryId);
+                  if (target == null) throw StateError('保存的曲谱尚未进入离线谱库');
+                  return ImportRemoteResult(
+                    entryId: target.entryId,
+                    revisionId: target.revisionId,
+                    localPath: target.filePath,
+                    receipt: Map<String, dynamic>.from(receipt.toJson()),
+                  );
+                } on SyncProtocolException catch (failure) {
+                  if (failure.status == 409 &&
+                      failure.code == 'import_destination_exists') {
+                    throw const ImportSaveConflict();
+                  }
+                  rethrow;
+                }
+              },
+        syncImportedReaderState: sync == null
+            ? null
+            : () async {
+                if (sync.busy) throw const ImportSaveBusy();
+                await sync.syncImportedReaderState();
+              },
       ),
     );
     _importReaderOpen = true;
@@ -475,6 +527,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           store: imports,
           openScore: _openImportedScore,
           openFiles: () => unawaited(_openSingle()),
+          initialDrafts: !_canProvideLibrary,
         ),
       ),
     );

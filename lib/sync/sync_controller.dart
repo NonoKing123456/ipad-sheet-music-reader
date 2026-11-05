@@ -20,6 +20,7 @@ import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import 'pairing_qr.dart';
 import 'ios_background_transfer.dart';
+import 'host_score_import.dart';
 
 enum SyncPhase {
   idle,
@@ -1343,6 +1344,19 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         port: identity['port'] as int,
         ioTimeout: ioTimeout,
       );
+      if (Platform.isWindows) {
+        final imports = createHostScoreImportStore(
+          library: library,
+          directory: p.join(
+            directory.path,
+            'servers',
+            identity['id'] as String,
+            'score-imports',
+          ),
+          collectionId: identity['id'] as String,
+        );
+        started.onScoreImport = imports.receive;
+      }
       if (_disposed || library.rootPath != root) {
         await started.close();
         return;
@@ -1625,6 +1639,125 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           ? SyncPhase.cancelled
           : SyncPhase.partial;
       message = cancellation.isCancelled ? '更新已取消。' : '目录更新未完成，请检查电脑与网络后重试。';
+    } finally {
+      _cancellation = null;
+      busy = false;
+      _tick();
+      _changed();
+    }
+  }
+
+  /// Success means the PC committed a new score and this device has verified
+  /// offline bytes under exactly the PC's normal collection identity.
+  Future<ScoreImportReceipt> importScoreToComputer({
+    required String operationId,
+    required String sourceId,
+    required String relativeFolder,
+    required String fileName,
+    required String filePath,
+    required String hash,
+  }) async {
+    final client = _client, view = collection;
+    if (client == null || view == null) throw StateError('请先连接已配对电脑。');
+    if (busy) throw StateError('正在同步曲谱。请先暂停同步，再重试保存到电脑。');
+    busy = true;
+    final cancellation = SyncCancellation();
+    _cancellation = cancellation;
+    _changed();
+    try {
+      final file = File(filePath);
+      final request = ScoreImportRequest(
+        operationId: operationId,
+        sourceId: sourceId,
+        relativeFolder: relativeFolder,
+        fileName: fileName,
+        length: await file.length(),
+        hash: hash,
+      );
+      final receipt = await client.importScore(
+        request,
+        file,
+        cancellation: cancellation,
+      );
+      if (!identical(client, _client) || !identical(view, collection)) {
+        throw StateError('配对电脑已改变，请重试。');
+      }
+      final index = view.index;
+      if (index != null && index.id != receipt.collectionId) {
+        throw StateError('电脑返回了另一份谱库。');
+      }
+      // Extend only this confirmed entry, preserving unrelated directory data,
+      // selection rules and native transfers already in progress.
+      final folders = <String, List<String>>{
+        ...?index?.folders,
+        receipt.source.id: [...?index?.folders[receipt.source.id]],
+      };
+      var folder = relativeFolder;
+      while (true) {
+        if (!folders[receipt.source.id]!.contains(folder)) {
+          folders[receipt.source.id]!.add(folder);
+        }
+        if (folder.isEmpty) break;
+        final slash = folder.lastIndexOf('/');
+        folder = slash < 0 ? '' : folder.substring(0, slash);
+      }
+      await view.updateIndex(
+        CollectionIndex(
+          id: receipt.collectionId,
+          legacyLibraryId: index?.legacyLibraryId,
+          sources: [
+            for (final source in index?.sources ?? <LibrarySourceInfo>[])
+              source.id == receipt.source.id ? receipt.source : source,
+            if (index?.sources.any((s) => s.id == receipt.source.id) != true)
+              receipt.source,
+          ],
+          entries: [
+            for (final item in view.currentItems)
+              item.entryId == receipt.item.entryId ? receipt.item : item,
+            if (view.itemFor(receipt.item.entryId) == null) receipt.item,
+          ],
+          folders: folders,
+        ),
+      );
+      await view.select(
+        OfflineRule(
+          sourceId: sourceId,
+          entryId: receipt.item.entryId,
+          selected: true,
+        ),
+      );
+      await view.receive(
+        receipt.item,
+        file.openRead(),
+        cancellation: cancellation,
+      );
+      await view.flush();
+      _tick();
+      return receipt;
+    } finally {
+      _cancellation = null;
+      busy = false;
+      _changed();
+    }
+  }
+
+  /// The import UI first mirrors its draft into the confirmed document key.
+  /// Use the established state transaction without scheduling other downloads.
+  Future<void> syncImportedReaderState() async {
+    final client = _client;
+    if (client == null) throw StateError('请先连接已配对电脑。');
+    if (busy) throw StateError('请等待当前同步完成。');
+    if (hasUnsavedEdits) throw StateError('批注尚未保存，请重试。');
+    busy = true;
+    final cancellation = SyncCancellation();
+    _cancellation = cancellation;
+    _changed();
+    try {
+      await client.syncReaderState(
+        workspace.store,
+        cancellation: cancellation,
+        afterMerge: () async => workspace.refreshFromStore(force: true),
+      );
     } finally {
       _cancellation = null;
       busy = false;

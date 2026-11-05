@@ -16,17 +16,19 @@ class ImportLibraryScreen extends StatefulWidget {
     required this.store,
     required this.openScore,
     required this.openFiles,
+    this.initialDrafts = false,
   });
   final ExternalImportStore store;
   final Future<void> Function(String id) openScore;
   final VoidCallback openFiles;
+  final bool initialDrafts;
   @override
   State<ImportLibraryScreen> createState() => _ImportLibraryScreenState();
 }
 
 class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
   late String _folder = widget.store.localLibrary.path;
-  bool _drafts = false;
+  late bool _drafts = widget.initialDrafts;
   List<Directory> _folders = [];
   @override
   void initState() {
@@ -57,11 +59,17 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
   }
 
   Future<void> _delete(ImportedScore score) async {
+    final pending =
+        score.remoteTransaction != null && !score.remoteTransaction!.conflict;
     final remove = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除临时曲谱？'),
-        content: Text('删除“${score.name}”的本机临时副本。'),
+        content: Text(
+          pending
+              ? '电脑可能已收到“${score.name}”。只删除本机暂存，不删除电脑文件。'
+              : '删除“${score.name}”的本机临时副本。',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -69,14 +77,14 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除'),
+            child: Text(pending ? '删除本机暂存' : '删除'),
           ),
         ],
       ),
     );
     if (remove != true) return;
     try {
-      await widget.store.remove(score.id);
+      await widget.store.remove(score.id, allowPendingRemote: pending);
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -171,6 +179,7 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                   final records = widget.store.records.where((score) {
                     if (_drafts) return !score.saved;
                     if (!score.saved) return false;
+                    if (score.remoteTransaction != null) return false;
                     final directory = p.dirname(score.savedPath!);
                     return p.equals(directory, _folder) ||
                         (atRoot && !p.isWithin(root, score.savedPath!));
@@ -209,6 +218,9 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                             ? (atRoot && !p.isWithin(root, score.savedPath!)
                                   ? p.dirname(score.savedPath!)
                                   : null)
+                            : score.remoteTransaction != null &&
+                                  !score.remoteTransaction!.conflict
+                            ? '暂存 · 等待重试保存'
                             : '暂存 · 尚未保存到曲库',
                         metadata: LibraryFileMetadata(
                           entryId: 'import-${score.id}',

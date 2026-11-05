@@ -240,6 +240,7 @@ class LibraryController extends ChangeNotifier {
   List<LibraryEntry> _searchResults = const [];
   int _extraJobs = 0;
   Future<void>? _registryWrites;
+  final _importScanWaiters = <Completer<void>>{};
 
   bool initialized = false;
   String? rootPath;
@@ -1168,7 +1169,55 @@ class LibraryController extends ChangeNotifier {
     await _rescanPrimary(verifyAll: verifyAll);
   }
 
-  Future<void> _rescanPrimary({bool verifyAll = false}) async {
+  /// An explicit host import needs its source's adopted index before replying.
+  /// Use the existing scan queue, including its foreground-read yield policy.
+  Future<void> refreshImportedSource(String sourceId) async {
+    bool sourceScanning() => sourceId == _primaryId
+        ? _scanningEpoch == _epoch || _scanQueued
+        : _added.any(
+            (s) =>
+                s.id == sourceId &&
+                (s.running || s.retry != null || s.verifyQueued),
+          );
+    Future<void> waitForIdle() async {
+      if (!sourceScanning() || _disposed) return;
+      final done = Completer<void>();
+      _importScanWaiters.add(done);
+      void changed() {
+        if ((!sourceScanning() || _disposed) && !done.isCompleted) {
+          done.complete();
+        }
+      }
+
+      addListener(changed);
+      try {
+        changed();
+        await done.future;
+      } finally {
+        _importScanWaiters.remove(done);
+        removeListener(changed);
+      }
+    }
+
+    await waitForIdle();
+    if (_disposed) throw StateError('Library closed.');
+    if (sourceId == _primaryId) {
+      await _rescanPrimary(includeAdded: false);
+    } else {
+      final source = _added.where((s) => s.id == sourceId).firstOrNull;
+      if (source == null) throw StateError('Source removed.');
+      await _refreshAdded(source);
+    }
+    await waitForIdle();
+    if (_disposed || !sources.any((s) => s.id == sourceId && s.online)) {
+      throw StateError('Source unavailable.');
+    }
+  }
+
+  Future<void> _rescanPrimary({
+    bool verifyAll = false,
+    bool includeAdded = true,
+  }) async {
     if (_disposed || rootPath == null || _catalog == null) return;
     if (_scanningEpoch == _epoch) {
       _scanQueued = true;
@@ -1237,12 +1286,16 @@ class LibraryController extends ChangeNotifier {
           final verify = _verifyQueued;
           _scanQueued = false;
           _verifyQueued = false;
-          unawaited(_rescanPrimary(verifyAll: verify));
+          unawaited(
+            _rescanPrimary(verifyAll: verify, includeAdded: includeAdded),
+          );
         }
       }
     }
-    for (final source in _added.toList()) {
-      await _refreshAdded(source);
+    if (includeAdded) {
+      for (final source in _added.toList()) {
+        await _refreshAdded(source);
+      }
     }
   }
 
@@ -1265,6 +1318,9 @@ class LibraryController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    for (final waiter in _importScanWaiters) {
+      if (!waiter.isCompleted) waiter.complete();
+    }
     _epoch++;
     _debounce?.cancel();
     unawaited(_watcher?.cancel());

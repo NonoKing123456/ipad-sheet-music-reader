@@ -15,6 +15,7 @@ import 'signing_status.dart';
 import 'page_metadata.dart';
 import 'background_transfer.dart';
 import 'small_file_batch.dart';
+import 'score_import.dart';
 
 class _SmallBatchPlan {
   _SmallBatchPlan(this.peerId, this.items, this.metadataBytes)
@@ -310,6 +311,9 @@ class SyncServer {
       onSigningStatus;
   Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)?
       onPageMetadata;
+  Future<ScoreImportReceipt> Function(
+          String peerId, ScoreImportRequest metadata, Stream<List<int>> bytes)?
+      onScoreImport;
   Set<String> get authenticatedPeerIds => _peerIds(_state);
   static Set<String> _peerIds(Map<String, dynamic> state) => {
         for (final entry in asMap(state['peers']).entries)
@@ -465,6 +469,21 @@ class SyncServer {
       final peerId = _authenticate(request);
       final collection = collectionSource;
       if (request.method == 'POST' &&
+          path == '/v2/score-import' &&
+          onScoreImport != null) {
+        final header = request.headers.value('x-score-import');
+        if (header == null || header.length > 12288) {
+          throw const SyncProtocolException('Invalid import metadata.', 400);
+        }
+        final metadata = ScoreImportRequest.fromJson(asMap(jsonDecode(
+            utf8.decode(base64Url.decode(base64Url.normalize(header))))));
+        if (request.contentLength != metadata.length) {
+          throw const ScoreImportFailure('import_integrity', 422);
+        }
+        final receipt =
+            await onScoreImport!(peerId, metadata, request.timeout(ioTimeout));
+        await _reply(request.response, receipt.toJson());
+      } else if (request.method == 'POST' &&
           path == '/device-status/signing' &&
           onSigningStatus != null) {
         if (request.contentLength > 1024) {
@@ -610,15 +629,18 @@ class SyncServer {
                   ? 'Source library is not ready for sync.'
                   : 'Sync operation failed.',
               if (error is LibrarySourceNotReady) 'code': 'source_not_ready',
+              if (error is ScoreImportFailure) 'code': error.code,
               if (error is SyncProtocolException &&
                   error.code == 'reader_upgrade_required')
                 'code': 'reader_upgrade_required',
             },
             status: error is LibrarySourceNotReady
                 ? 503
-                : error is SyncProtocolException
-                    ? error.status ?? 400
-                    : 400);
+                : error is ScoreImportFailure
+                    ? error.status
+                    : error is SyncProtocolException
+                        ? error.status ?? 400
+                        : 400);
       } catch (_) {
         await request.response.close().catchError((Object _) {});
       }
@@ -886,6 +908,56 @@ class SyncClient {
   String get _transferNamespace =>
       sha256.convert(utf8.encode('$baseUri/$peerId')).toString();
   String get backgroundTransferNamespace => _transferNamespace;
+
+  /// Explicit paired-device upload; it never touches the background download queue.
+  Future<ScoreImportReceipt> importScore(ScoreImportRequest metadata, File file,
+      {SyncCancellation? cancellation}) async {
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    void cancel() => http.close(force: true);
+    cancellation?.addListener(cancel);
+    try {
+      cancellation?.check();
+      final request = await http
+          .postUrl(baseUri.resolve('/v2/score-import'))
+          .timeout(ioTimeout);
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+      request.headers.set('x-score-import',
+          base64Url.encode(utf8.encode(jsonEncode(metadata.toJson()))));
+      request.headers.contentType = ContentType.binary;
+      request.contentLength = metadata.length;
+      await request.addStream(file.openRead().timeout(ioTimeout));
+      final response = await request.close().timeout(ioTimeout);
+      final body = await _readBody(response, ioTimeout, 64 * 1024);
+      if (response.statusCode != 200) {
+        final code = body['code'];
+        throw SyncProtocolException(
+            'Computer did not confirm score import.',
+            response.statusCode,
+            const {
+              'import_destination_exists',
+              'import_operation_conflict',
+              'import_source_unavailable',
+              'import_integrity'
+            }.contains(code)
+                ? code as String
+                : null);
+      }
+      final receipt = ScoreImportReceipt.fromJson(body);
+      if (receipt.operationId != metadata.operationId ||
+          receipt.item.sourceId != metadata.sourceId ||
+          receipt.item.relativePath != metadata.relativePath ||
+          receipt.item.hash != metadata.hash ||
+          receipt.item.length != metadata.length) {
+        throw const FormatException(
+            'Computer returned another imported score.');
+      }
+      return receipt;
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+    }
+  }
 
   /// Metadata only: never starts, replaces, or pauses a selected transfer batch.
   Future<void> refreshCollectionIndex(ReplicaCollectionView replica,

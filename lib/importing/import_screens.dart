@@ -14,6 +14,8 @@ import '../theme/tokens.dart';
 import 'external_import_store.dart';
 export 'import_library_screen.dart';
 import 'import_annotation_mirror.dart';
+import 'import_computer_dialog.dart';
+export 'import_computer_dialog.dart';
 
 class ImportDestination {
   const ImportDestination(this.label, this.directory);
@@ -22,6 +24,12 @@ class ImportDestination {
 }
 
 typedef ImportCatalogIdentity = Future<(String, String)?> Function(String path);
+
+class ImportLocalSelection {
+  const ImportLocalSelection(this.directory, this.basename);
+  final Directory directory;
+  final String basename;
+}
 
 class ImportReaderScreen extends StatefulWidget {
   const ImportReaderScreen({
@@ -34,6 +42,10 @@ class ImportReaderScreen extends StatefulWidget {
     this.catalogIdentity,
     this.initialPageNumber,
     this.loader,
+    this.computerDestinations,
+    this.computerDestinationProvider,
+    this.saveToComputer,
+    this.syncImportedReaderState,
   });
   final ExternalImportStore store;
   final String scoreId;
@@ -43,6 +55,10 @@ class ImportReaderScreen extends StatefulWidget {
   final ImportCatalogIdentity? catalogIdentity;
   final int? initialPageNumber;
   final ScoreLoader? loader;
+  final List<ImportComputerDestination>? computerDestinations;
+  final List<ImportComputerDestination> Function()? computerDestinationProvider;
+  final ImportRemoteWriter? saveToComputer;
+  final Future<void> Function()? syncImportedReaderState;
   @override
   State<ImportReaderScreen> createState() => _ImportReaderScreenState();
 }
@@ -69,7 +85,15 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
 
   Future<void> _save() async {
     if (_saving || !_loaded) return;
-    final destination = await showDialog<Directory>(
+    final score = _score!;
+    final computerDestinations =
+        widget.computerDestinationProvider?.call() ??
+        widget.computerDestinations;
+    if (computerDestinations != null) {
+      await _saveComputer(score, computerDestinations);
+      return;
+    }
+    final destination = await showDialog<ImportLocalSelection>(
       context: context,
       builder: (_) => ImportFolderDialog(
         roots: [
@@ -77,6 +101,9 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
           ...widget.destinations,
         ],
         allowOtherDirectories: widget.allowOtherDirectories,
+        fileName: score.localSaveBasename == null
+            ? score.name
+            : '${score.localSaveBasename}${score.extension}',
       ),
     );
     if (destination == null || !mounted) return;
@@ -84,16 +111,65 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
     try {
       await widget.workspace.waitForAnnotationWrites();
       if (widget.workspace.unsavedCount != 0) throw StateError('批注尚未保存');
-      await widget.store.save(
+      final saved = await widget.store.save(
         widget.scoreId,
-        destination,
+        destination.directory,
+        basename: destination.basename,
         catalogIdentity: widget.catalogIdentity,
         beforeCleanup: _mirror,
       );
-      if (mounted) _message('已保存到 ${p.basename(destination.path)}');
+      if (mounted) _message('已保存：${saved.name}');
     } catch (failure) {
       debugPrint('IMPORT save_failed: $failure');
       if (mounted) _message('保存失败，曲谱和批注已留在本机暂存，请重试。');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _saveComputer(
+    ImportedScore score,
+    List<ImportComputerDestination> destinations,
+  ) async {
+    final previous = score.remoteTransaction;
+    ImportComputerSelection? selection;
+    if (previous == null || previous.conflict) {
+      selection = await showDialog<ImportComputerSelection>(
+        context: context,
+        builder: (_) => ImportComputerFolderDialog(
+          sources: destinations,
+          fileName: score.name,
+          previous: previous,
+        ),
+      );
+      if (selection == null || !mounted) return;
+    }
+    setState(() => _saving = true);
+    try {
+      await widget.workspace.waitForAnnotationWrites();
+      if (widget.workspace.unsavedCount != 0) throw StateError('批注尚未保存');
+      final saved = await widget.store.saveToComputer(
+        score.id,
+        sourceId: selection?.source.id ?? previous!.sourceId,
+        sourceName: selection?.source.name ?? previous!.sourceName,
+        relativeFolder: selection?.folder ?? previous!.relativeFolder,
+        basename:
+            selection?.basename ??
+            p.basenameWithoutExtension(previous!.fileName),
+        upload: widget.saveToComputer!,
+        beforeSaved: (registered) async {
+          await _mirror(registered);
+          await widget.syncImportedReaderState!();
+        },
+      );
+      if (mounted) _message('已保存到电脑谱库：${saved.name}');
+    } on ImportSaveConflict {
+      if (mounted) _message('已有同名曲谱，请修改文件名后保存。');
+    } on ImportSaveBusy {
+      if (mounted) _message('正在同步曲谱，请先暂停同步再重试保存。');
+    } catch (failure) {
+      debugPrint('IMPORT computer_save_pending: $failure');
+      if (mounted) _message('保存尚未完成，曲谱和批注已保留。连接电脑后重试。');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -106,6 +182,13 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
     if (score.saved) {
       try {
         await _mirror(score);
+        if (score.remoteTransaction != null) {
+          try {
+            await widget.syncImportedReaderState?.call();
+          } catch (_) {
+            if (mounted) _message('批注已保存在本机，连接电脑后可继续同步。');
+          }
+        }
         await widget.store.completeMirror(score.id);
         await widget.store.cleanupSavedPayload(score.id);
         return true;
@@ -115,11 +198,17 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
       }
     }
     _confirming = true;
+    final pending =
+        score.remoteTransaction != null && !score.remoteTransaction!.conflict;
     final action = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('尚未保存到曲库'),
-        content: const Text('可保留在本机暂存，稍后从“本机导入”继续阅读和整理。'),
+        content: Text(
+          pending
+              ? '电脑可能已收到这份曲谱。可保留暂存重试；只删除本机暂存，不删除电脑文件。'
+              : '可保留在本机暂存，稍后继续阅读和保存。',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, 'read'),
@@ -128,7 +217,7 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
           TextButton(
             onPressed: () => Navigator.pop(context, 'delete'),
             child: Text(
-              '删除临时曲谱',
+              pending ? '删除本机暂存' : '删除临时曲谱',
               style: TextStyle(color: ScoreTokens.of(context).dangerInk),
             ),
           ),
@@ -145,7 +234,7 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
       if (action == 'keep') {
         await widget.store.retain(score.id);
       } else {
-        await widget.store.remove(score.id);
+        await widget.store.remove(score.id, allowPendingRemote: pending);
       }
       return true;
     } catch (_) {
@@ -173,6 +262,9 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             ? '保存中…'
             : _score?.saved == true
             ? '已保存'
+            : _score?.remoteTransaction != null &&
+                  _score?.remoteTransaction?.conflict != true
+            ? '重试保存'
             : '保存到…',
       ),
     ),
@@ -188,6 +280,10 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             catalogIdentity: widget.catalogIdentity,
             initialPageNumber: page,
             loader: widget.loader,
+            computerDestinations: widget.computerDestinations,
+            computerDestinationProvider: widget.computerDestinationProvider,
+            saveToComputer: widget.saveToComputer,
+            syncImportedReaderState: widget.syncImportedReaderState,
           ),
   );
 }
@@ -197,9 +293,11 @@ class ImportFolderDialog extends StatefulWidget {
     super.key,
     required this.roots,
     this.allowOtherDirectories = false,
+    this.fileName,
   });
   final List<ImportDestination> roots;
   final bool allowOtherDirectories;
+  final String? fileName;
   @override
   State<ImportFolderDialog> createState() => _ImportFolderDialogState();
 }
@@ -209,6 +307,33 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
   Directory? _folder;
   List<Directory> _children = [];
   String? _error;
+  late final _name = TextEditingController(
+    text: widget.fileName == null
+        ? ''
+        : p.basenameWithoutExtension(widget.fileName!),
+  );
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _choose(Directory directory) {
+    if (widget.fileName == null) {
+      Navigator.pop(context, directory);
+      return;
+    }
+    final error = importNameError(
+      _name.text,
+      p.extension(widget.fileName!).toLowerCase(),
+    );
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    Navigator.pop(context, ImportLocalSelection(directory, _name.text));
+  }
+
   Future<void> _navigate(ImportDestination root, Directory folder) async {
     try {
       final actualRoot = await root.directory.resolveSymbolicLinks();
@@ -242,6 +367,7 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
       builder: (context) => AlertDialog(
         title: const Text('新建文件夹'),
         content: TextField(
+          key: const ValueKey('import-new-folder-name'),
           controller: input,
           autofocus: true,
           decoration: const InputDecoration(labelText: '文件夹名称'),
@@ -349,7 +475,10 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
                                   confirmButtonText: '保存到这里',
                                 );
                                 if (path != null && context.mounted) {
-                                  Navigator.pop(context, Directory(path));
+                                  await _navigate(
+                                    ImportDestination('所选文件夹', Directory(path)),
+                                    Directory(path),
+                                  );
                                 }
                               } catch (_) {
                                 if (mounted) {
@@ -369,6 +498,21 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
                       ],
               ),
             ),
+            if (widget.fileName != null) ...[
+              const SizedBox(height: ScoreSpace.md),
+              TextField(
+                key: const ValueKey('import-local-basename'),
+                controller: _name,
+                style: ScoreText.body.copyWith(color: t.ink900),
+                decoration: InputDecoration(
+                  labelText: '文件名',
+                  suffixText: p.extension(widget.fileName!).toLowerCase(),
+                ),
+                onChanged: (_) {
+                  if (_error != null) setState(() => _error = null);
+                },
+              ),
+            ],
             if (_error != null)
               Text(
                 _error!,
@@ -383,9 +527,7 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: folder == null
-              ? null
-              : () => Navigator.pop(context, folder),
+          onPressed: folder == null ? null : () => _choose(folder),
           child: const Text('保存到这里'),
         ),
       ],
