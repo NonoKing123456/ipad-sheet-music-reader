@@ -131,7 +131,9 @@ class ReaderStage extends StatefulWidget {
 class _ReaderStageState extends State<ReaderStage>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late bool _tools = !isMobileReader;
-  late bool _reserveTools = _tools;
+  double _statusTopInset = 0;
+  double? _lastNativeTopInset;
+  Size? _safeAreaSize;
   bool? _lastCompact;
   Size? _viewport;
   final _topKey = GlobalKey();
@@ -139,7 +141,8 @@ class _ReaderStageState extends State<ReaderStage>
   EdgeInsets? _reportedPanInsets;
   bool _measurementScheduled = false;
   late final AnimationController _animation;
-  late final Animation<double> _curve;
+  late final Animation<double> _eased;
+  late Animation<double> _curve;
   bool _reduceMotion = false;
   final _wakeToken = 'reader-${++_readerWakeSerial}';
   ModalRoute<dynamic>? _route;
@@ -195,41 +198,56 @@ class _ReaderStageState extends State<ReaderStage>
 
   void _toggle() => _show(!_tools);
   Future<void> _show(bool show) async {
+    if (show == _tools) return;
     if (!show &&
         widget.beforeHideTools != null &&
         !await widget.beforeHideTools!()) {
       return;
     }
     if (!mounted) return;
+    final from = _curve.value;
     setState(() {
       _tools = show;
-      if (show) _reserveTools = true;
+      _curve = Tween<double>(begin: from, end: show ? 1 : 0).animate(_eased);
     });
     widget.onToolsVisibilityChanged?.call(show);
     _updateSystemUi();
+    _animation.value = 0;
     if (_reduceMotion) {
-      _animation.value = show ? 1 : 0;
+      _animation.value = 1;
     } else {
-      show ? _animation.forward() : _animation.reverse();
+      _animation.forward();
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final media = MediaQuery.of(context);
+    // A hidden iOS status bar reports zero later than our UI request. Keep the
+    // last real inset through that hide/show round trip, but never carry it
+    // across rotation or split-view geometry. First-use and changed insets are
+    // retargeted by the compositor from its actual currently painted rectangle.
+    if (_safeAreaSize != media.size ||
+        media.viewPadding.top > 0 ||
+        (_tools && _lastNativeTopInset != media.viewPadding.top)) {
+      _statusTopInset = media.viewPadding.top;
+    }
+    _lastNativeTopInset = media.viewPadding.top;
+    _safeAreaSize = media.size;
     final compact = DeviceLayoutScope.isCompact(context);
     if (_lastCompact != compact) {
       final initialLayout = _lastCompact == null;
       _lastCompact = compact;
       _tools = widget.initiallyShowTools ?? !compact;
-      _reserveTools = _tools;
-      _animation.value = _tools ? 1 : 0;
+      _curve = AlwaysStoppedAnimation(_tools ? 1 : 0);
+      _animation.value = 1;
       if (!initialLayout) widget.onToolsVisibilityChanged?.call(_tools);
     }
     _route = ModalRoute.of(context);
     _updateWake();
     _reduceMotion = MediaQuery.disableAnimationsOf(context);
-    if (_reduceMotion) _animation.value = _tools ? 1 : 0;
+    if (_reduceMotion) _animation.value = 1;
   }
 
   @override
@@ -240,13 +258,10 @@ class _ReaderStageState extends State<ReaderStage>
     _animation = AnimationController(
       vsync: this,
       duration: ScoreMotion.panel,
-      value: _tools ? 1 : 0,
+      value: 1,
     );
-    _curve = CurvedAnimation(
-      parent: _animation,
-      curve: Curves.easeOutCubic,
-      reverseCurve: Curves.easeInCubic,
-    );
+    _eased = CurvedAnimation(parent: _animation, curve: Curves.easeOutCubic);
+    _curve = AlwaysStoppedAnimation(_tools ? 1 : 0);
     _animation.addListener(_measureObstruction);
     _animation.addStatusListener(_toolsAnimationStatus);
     WidgetsBinding.instance.addObserver(this);
@@ -255,13 +270,7 @@ class _ReaderStageState extends State<ReaderStage>
   }
 
   void _toolsAnimationStatus(AnimationStatus status) {
-    if (status != AnimationStatus.completed &&
-        status != AnimationStatus.dismissed) {
-      return;
-    }
-    if (status == AnimationStatus.dismissed && _reserveTools) {
-      setState(() => _reserveTools = false);
-    }
+    if (status != AnimationStatus.completed) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) widget.onToolsLayoutSettled?.call();
     });
@@ -417,7 +426,7 @@ class _ReaderStageState extends State<ReaderStage>
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       final aspectFor = widget.fitAspectFor;
       var paperCoversTop = false;
-      if (widget.hasReadablePage && !_reserveTools && aspectFor != null) {
+      if (widget.hasReadablePage && !_tools && aspectFor != null) {
         final paper = applyBoxFit(
           BoxFit.contain,
           Size(aspectFor(size), 1),
@@ -472,10 +481,17 @@ class _ReaderStageState extends State<ReaderStage>
               children: [
                 Column(
                   children: [
-                    ClipRect(
-                      child: Align(
-                        heightFactor: _reserveTools ? 1 : 0,
+                    Align(
+                      alignment: Alignment.topCenter,
+                      heightFactor: _tools ? 1 : 0,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          top: defaultTargetPlatform == TargetPlatform.iOS
+                              ? _statusTopInset
+                              : MediaQuery.paddingOf(context).top,
+                        ),
                         child: SafeArea(
+                          top: false,
                           bottom: false,
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -497,6 +513,8 @@ class _ReaderStageState extends State<ReaderStage>
                           topInset: constraints.maxHeight - available.maxHeight,
                           fitAspectFor: widget.fitAspectFor,
                           pagePadding: readerPagePadding(context),
+                          transition: _curve,
+                          transitionTarget: _tools ? 1 : 0,
                           child: content,
                         ),
                       ),
@@ -578,7 +596,8 @@ class _ReaderStageState extends State<ReaderStage>
 
 /// Lay the real reader out once at its destination size, then paint the same
 /// paper, annotations and handles through one compositor-only transition.
-/// The clip is the destination content viewport, never the toolbar's area.
+/// Chrome and paper share one clock. A late native inset or a reversed gesture
+/// starts from the rectangle already on screen, rather than restarting a fit.
 class ReaderChromeViewport extends StatefulWidget {
   const ReaderChromeViewport({
     super.key,
@@ -586,34 +605,97 @@ class ReaderChromeViewport extends StatefulWidget {
     required this.child,
     this.fitAspectFor,
     this.pagePadding = const EdgeInsets.all(ScoreLayout.pageGutter),
+    this.transition,
+    this.transitionTarget,
   });
   final double topInset;
   final Widget child;
   final double Function(Size viewport)? fitAspectFor;
   final EdgeInsets pagePadding;
+  final Animation<double>? transition;
+  final double? transitionTarget;
   @override
   State<ReaderChromeViewport> createState() => _ReaderChromeViewportState();
 }
 
 class _ReaderChromeViewportState extends State<ReaderChromeViewport>
     with SingleTickerProviderStateMixin {
-  late double _fromInset = widget.topInset;
   late final AnimationController _animation = AnimationController(
     vsync: this,
     value: 1,
     duration: ScoreMotion.panel,
   );
-  @override
-  void didUpdateWidget(covariant ReaderChromeViewport oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.topInset == widget.topInset) return;
-    final progress = Curves.easeOutCubic.transform(_animation.value);
-    _fromInset = _fromInset + (oldWidget.topInset - _fromInset) * progress;
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _fromInset = widget.topInset;
+  Size? _layoutSize;
+  double _fromInset = 0, _toInset = 0;
+  Rect? _fromPaper, _toPaper;
+  bool _externalClock = false;
+  double _clockStart = 0, _clockEnd = 1;
+
+  double get _progress {
+    if (!_externalClock) {
+      return Curves.easeOutCubic.transform(_animation.value);
+    }
+    final distance = _clockEnd - _clockStart;
+    if (distance.abs() < precisionErrorTolerance) return 1;
+    return ((widget.transition!.value - _clockStart) / distance).clamp(0, 1);
+  }
+
+  Rect _paperRect(Size viewport) {
+    final aspect = widget.fitAspectFor;
+    if (aspect == null) {
+      // Continuous paper keeps its width and scroll anchor. Only its origin
+      // moves; fitting the entire scrolling document would change its zoom.
+      return Rect.fromLTWH(0, widget.topInset, viewport.width, 1);
+    }
+    final inner = Size(
+      (viewport.width - widget.pagePadding.horizontal).clamp(
+        1,
+        double.infinity,
+      ),
+      (viewport.height - widget.pagePadding.vertical).clamp(1, double.infinity),
+    );
+    final fitted = Alignment.center.inscribe(
+      applyBoxFit(BoxFit.contain, Size(aspect(inner), 1), inner).destination,
+      Offset.zero & inner,
+    );
+    return fitted.shift(
+      Offset(widget.pagePadding.left, widget.topInset + widget.pagePadding.top),
+    );
+  }
+
+  void _layout(Size size, bool reduceMotion) {
+    final paper = _paperRect(size);
+    if (_layoutSize == null) {
+      _fromPaper = _toPaper = paper;
+      _fromInset = _toInset = widget.topInset;
+    } else if (_layoutSize != size || _toInset != widget.topInset) {
+      final progress = _progress;
+      _fromPaper = Rect.lerp(_fromPaper, _toPaper, progress)!;
+      _fromInset += (_toInset - _fromInset) * progress;
+      _toPaper = paper;
+      _toInset = widget.topInset;
+      final clock = widget.transition, target = widget.transitionTarget;
+      _externalClock =
+          clock != null &&
+          target != null &&
+          (clock.value - target).abs() > precisionErrorTolerance;
+      if (_externalClock) {
+        _clockStart = clock!.value;
+        _clockEnd = target!;
+      } else {
+        _animation.forward(from: 0);
+      }
+    } else if (_toPaper != paper) {
+      // Document/page presentation owns changes to paper aspect. A toolbar
+      // transition must not introduce an additional page-change animation.
+      _fromPaper = _toPaper = paper;
+    }
+    _layoutSize = size;
+    if (reduceMotion) {
+      _externalClock = false;
       _animation.value = 1;
-    } else {
-      _animation.forward(from: 0);
+      _fromPaper = _toPaper;
+      _fromInset = _toInset;
     }
   }
 
@@ -626,71 +708,52 @@ class _ReaderChromeViewportState extends State<ReaderChromeViewport>
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final before = Size(
-        constraints.maxWidth,
-        (constraints.maxHeight + widget.topInset - _fromInset).clamp(
-          1.0,
-          double.infinity,
-        ),
-      );
-      final after = constraints.biggest;
-      var fromScale = 1.0;
-      var fromOffset = Offset(0, _fromInset - widget.topInset);
-      final aspectFor = widget.fitAspectFor;
-      if (aspectFor != null) {
-        Size inner(Size size) => Size(
-          (size.width - widget.pagePadding.horizontal).clamp(
-            1.0,
-            double.infinity,
-          ),
-          (size.height - widget.pagePadding.vertical).clamp(
-            1.0,
-            double.infinity,
-          ),
-        );
-        final a = inner(before), b = inner(after);
-        final oldPaper = applyBoxFit(
-          BoxFit.contain,
-          Size(aspectFor(a), 1),
-          a,
-        ).destination;
-        final newPaper = applyBoxFit(
-          BoxFit.contain,
-          Size(aspectFor(b), 1),
-          b,
-        ).destination;
-        fromScale = oldPaper.height / newPaper.height;
-        fromOffset =
-            before.center(Offset.zero) +
-            Offset(0, _fromInset - widget.topInset) -
-            after.center(Offset.zero) * fromScale;
-      }
-      return ClipRect(
-        child: AnimatedBuilder(
-          animation: _animation,
-          child: widget.child,
-          builder: (context, child) {
-            final remainder =
-                1 - Curves.easeOutCubic.transform(_animation.value);
-            return Transform(
+      final size = constraints.biggest;
+      _layout(size, MediaQuery.disableAnimationsOf(context));
+      return AnimatedBuilder(
+        animation: Listenable.merge([_animation, widget.transition]),
+        child: widget.child,
+        builder: (context, child) {
+          final progress = _progress;
+          final visual = Rect.lerp(_fromPaper, _toPaper, progress)!;
+          final destination = _toPaper!;
+          final scale = visual.height / destination.height;
+          final offset =
+              visual.topLeft -
+              Offset(0, widget.topInset) -
+              (destination.topLeft - Offset(0, widget.topInset)) * scale;
+          final inset = _fromInset + (_toInset - _fromInset) * progress;
+          return ClipRect(
+            clipper: _ReaderChromeClip(
+              Rect.fromLTRB(
+                0,
+                inset - widget.topInset,
+                size.width,
+                size.height,
+              ),
+            ),
+            child: Transform(
               key: const ValueKey('reader-chrome-compositor'),
-              transform:
-                  Matrix4.diagonal3Values(
-                    1 + (fromScale - 1) * remainder,
-                    1 + (fromScale - 1) * remainder,
-                    1,
-                  )..setTranslationRaw(
-                    fromOffset.dx * remainder,
-                    fromOffset.dy * remainder,
-                    0,
-                  ),
+              transform: progress == 1
+                  ? Matrix4.identity()
+                  : (Matrix4.diagonal3Values(scale, scale, 1)
+                      ..setTranslationRaw(offset.dx, offset.dy, 0)),
               child: child,
-            );
-          },
-        ),
+            ),
+          );
+        },
       );
     },
   );
+}
+
+class _ReaderChromeClip extends CustomClipper<Rect> {
+  const _ReaderChromeClip(this.rect);
+  final Rect rect;
+  @override
+  Rect getClip(Size size) => rect;
+  @override
+  bool shouldReclip(_ReaderChromeClip oldClipper) => rect != oldClipper.rect;
 }
 
 /// A persistent, small entry keeps recoverable problems discoverable without

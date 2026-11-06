@@ -18,14 +18,6 @@ import 'sync_controller.dart';
 import 'source_history_dialog.dart';
 import 'qr_scanner.dart';
 
-String _contentSize(int bytes) => bytes >= 1024 * 1024 * 1024
-    ? '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB'
-    : bytes >= 1024 * 1024
-    ? '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB'
-    : bytes >= 1024
-    ? '${(bytes / 1024).toStringAsFixed(1)} KB'
-    : '$bytes B';
-
 Future<void> showDeviceSyncPanel(
   BuildContext context, {
   required SyncController controller,
@@ -540,12 +532,16 @@ class _SyncScreenState extends State<SyncScreen> {
                     ? null
                     : () => unawaited(sync.synchronize()),
                 icon: const ReaderIcon(ReaderGlyph.downloadList),
-                label: const Text('下载所选'),
+                label: const Text('立即同步'),
               ),
           ],
         ),
         _caption(
-          '已选择 ${sync.selectedDownloadTotals.$1} 份 · ${_contentSize(sync.selectedDownloadTotals.$2)}',
+          sync.uploadsForPreviousComputer > 0
+              ? '${sync.uploadsForPreviousComputer} 份待传需确认原电脑与谱库'
+              : sync.pendingComputerUploads > 0
+              ? '${sync.pendingComputerUploads} 份本机可读 · 待传电脑'
+              : '前台连接可达时自动同步，已下载内容只传新增与更新。',
         ),
         if (sync.backgroundPendingObjects > 0 ||
             (sync.busy && !_catalogUpdating)) ...[

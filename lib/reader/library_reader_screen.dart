@@ -1805,20 +1805,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             translation: next.center(Offset.zero) - anchor * scale,
             pageAspect: _readerFitAspect(next),
           );
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted &&
-                _paperViewportSize == next &&
-                _paperViewportPage == _visiblePage &&
-                _transform.value == matrix) {
-              _projectingViewport = true;
-              try {
-                _transform.value = Matrix4.diagonal3Values(scale, scale, 1)
-                  ..setTranslationRaw(translation.dx, translation.dy, 0);
-              } finally {
-                _projectingViewport = false;
-              }
-            }
-          });
+          // This LayoutBuilder owns the transformed reader below it. Publish
+          // the reprojected anchor before those descendants build/paint, so
+          // the compositor never shows one frame with the old viewport matrix.
+          _projectingViewport = true;
+          try {
+            _transform.value = Matrix4.diagonal3Values(scale, scale, 1)
+              ..setTranslationRaw(translation.dx, translation.dy, 0);
+          } finally {
+            _projectingViewport = false;
+          }
         }
         return child;
       },

@@ -46,6 +46,10 @@ class ImportReaderScreen extends StatefulWidget {
     this.computerDestinationProvider,
     this.saveToComputer,
     this.syncImportedReaderState,
+    this.queueComputerSaves = false,
+    this.onComputerSaveQueued,
+    this.computerTargetMatches,
+    this.confirmComputerDirectory,
   });
   final ExternalImportStore store;
   final String scoreId;
@@ -59,6 +63,10 @@ class ImportReaderScreen extends StatefulWidget {
   final List<ImportComputerDestination> Function()? computerDestinationProvider;
   final ImportRemoteWriter? saveToComputer;
   final Future<void> Function()? syncImportedReaderState;
+  final bool queueComputerSaves;
+  final ValueChanged<String>? onComputerSaveQueued;
+  final bool Function(ImportRemoteTransaction)? computerTargetMatches;
+  final Future<bool> Function(bool requireRemote)? confirmComputerDirectory;
   @override
   State<ImportReaderScreen> createState() => _ImportReaderScreenState();
 }
@@ -69,6 +77,22 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
   );
   bool _saving = false, _loaded = false, _confirming = false;
   ImportedScore? get _score => widget.store.byId(widget.scoreId);
+  @override
+  void initState() {
+    super.initState();
+    widget.store.addListener(_storeChanged);
+  }
+
+  void _storeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_storeChanged);
+    super.dispose();
+  }
+
   void _message(String text) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   Future<void> _mirror(ImportedScore score) async {
@@ -132,8 +156,43 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
     List<ImportComputerDestination> destinations,
   ) async {
     final previous = score.remoteTransaction;
+    final needsConfirmation =
+        previous != null &&
+        !previous.conflict &&
+        widget.queueComputerSaves &&
+        widget.computerTargetMatches?.call(previous) != true;
+    if (widget.confirmComputerDirectory != null) {
+      final confirmed = await widget.confirmComputerDirectory!(
+        needsConfirmation,
+      );
+      if (!mounted) return;
+      if (!confirmed) {
+        _message('请连接原配对电脑并确认原谱库后继续，曲谱与待传记录已保留。');
+        return;
+      }
+    }
+    if (needsConfirmation) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('确认待传目标'),
+          content: const Text('原电脑可能已收到这份曲谱。请确认原电脑曲库与目录，已有保存会先查询回执后继续。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('选择目标'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true || !mounted) return;
+    }
     ImportComputerSelection? selection;
-    if (previous == null || previous.conflict) {
+    if (previous == null || previous.conflict || needsConfirmation) {
       selection = await showDialog<ImportComputerSelection>(
         context: context,
         builder: (_) => ImportComputerFolderDialog(
@@ -161,8 +220,19 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
           await _mirror(registered);
           await widget.syncImportedReaderState!();
         },
+        queueOnly: widget.queueComputerSaves,
+        targetComputerKey:
+            selection?.source.computerKey ?? previous?.targetComputerKey,
+        targetCollectionId:
+            selection?.source.collectionId ?? previous?.targetCollectionId,
+        confirmComputerTarget: needsConfirmation,
       );
-      if (mounted) _message('已保存到电脑谱库：${saved.name}');
+      if (mounted) {
+        _message(
+          saved.saved ? '已保存到电脑谱库：${saved.name}' : '已保存在本机，待传电脑。连接后会自动继续。',
+        );
+      }
+      if (!saved.saved) widget.onComputerSaveQueued?.call(saved.id);
     } on ImportSaveConflict {
       if (mounted) _message('已有同名曲谱，请修改文件名后保存。');
     } on ImportSaveBusy {
@@ -179,6 +249,7 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
     if (_saving || _confirming) return false;
     final score = _score;
     if (score == null) return true;
+    if (widget.queueComputerSaves && score.pendingComputer) return true;
     if (score.saved) {
       try {
         await _mirror(score);
@@ -264,7 +335,14 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             ? '已保存'
             : _score?.remoteTransaction != null &&
                   _score?.remoteTransaction?.conflict != true
-            ? '重试保存'
+            ? (widget.queueComputerSaves
+                  ? (widget.computerTargetMatches?.call(
+                              _score!.remoteTransaction!,
+                            ) ==
+                            true
+                        ? '待传电脑'
+                        : '确认待传目标')
+                  : '重试保存')
             : '保存到…',
       ),
     ),
@@ -284,6 +362,10 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             computerDestinationProvider: widget.computerDestinationProvider,
             saveToComputer: widget.saveToComputer,
             syncImportedReaderState: widget.syncImportedReaderState,
+            queueComputerSaves: widget.queueComputerSaves,
+            onComputerSaveQueued: widget.onComputerSaveQueued,
+            computerTargetMatches: widget.computerTargetMatches,
+            confirmComputerDirectory: widget.confirmComputerDirectory,
           ),
   );
 }

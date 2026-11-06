@@ -14,9 +14,12 @@ class ImportComputerDestination {
     required this.id,
     required this.name,
     required this.folders,
+    this.computerKey,
+    this.collectionId,
   });
   final String id, name;
   final List<String> folders;
+  final String? computerKey, collectionId;
 }
 
 class ImportComputerSelection {

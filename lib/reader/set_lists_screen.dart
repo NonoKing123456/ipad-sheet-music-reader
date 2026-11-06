@@ -82,6 +82,7 @@ class SetListsScreen extends StatelessWidget {
     this.onSelectionChanged,
     this.onBack,
     this.pageCounts,
+    this.onReaderActive,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -97,6 +98,7 @@ class SetListsScreen extends StatelessWidget {
   final ValueChanged<String?>? onSelectionChanged;
   final VoidCallback? onBack;
   final PageCountService? pageCounts;
+  final ValueChanged<bool>? onReaderActive;
 
   Future<void> _create(BuildContext context) async {
     final name = await _nameDialog(context);
@@ -191,6 +193,7 @@ class SetListsScreen extends StatelessWidget {
                                 preparationLabel: preparationLabel,
                                 preparationNotice: preparationNotice,
                                 pageCounts: pageCounts,
+                                onReaderActive: onReaderActive,
                               ),
                             ),
                           );
@@ -428,6 +431,7 @@ class _SetListsEntryState extends State<_SetListsEntry> {
           embedded: screen.embedded,
           onBack: screen.embedded ? screen.onBack ?? () => _select(null) : null,
           pageCounts: screen.pageCounts,
+          onReaderActive: screen.onReaderActive,
         );
       }
       return screen._overview(
@@ -453,6 +457,7 @@ class _SetListDetail extends StatelessWidget {
     this.embedded = false,
     this.onBack,
     this.pageCounts,
+    this.onReaderActive,
   });
   final ReaderWorkspace workspace;
   final String listId;
@@ -466,6 +471,7 @@ class _SetListDetail extends StatelessWidget {
   final bool embedded;
   final VoidCallback? onBack;
   final PageCountService? pageCounts;
+  final ValueChanged<bool>? onReaderActive;
   List<ScoreCatalogEntry> _catalogEntries() =>
       catalog?.call() ?? targets().map(ScoreCatalogEntry.fromTarget).toList();
 
@@ -559,20 +565,25 @@ class _SetListDetail extends StatelessWidget {
       return;
     }
     final ready = target;
-    await Navigator.push(
-      context,
-      MaterialPageRoute<void>(
-        builder: (_) => LibraryReaderScreen(
-          workspace: workspace,
-          locate: locate,
-          initialTarget: ready,
-          setListId: listId,
-          itemId: item.id,
-          sourceChanges: sourceChanges,
-          loader: loader,
+    onReaderActive?.call(true);
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) => LibraryReaderScreen(
+            workspace: workspace,
+            locate: locate,
+            initialTarget: ready,
+            setListId: listId,
+            itemId: item.id,
+            sourceChanges: sourceChanges,
+            loader: loader,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      onReaderActive?.call(false);
+    }
   }
 
   @override

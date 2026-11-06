@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 import 'manifest.dart';
+import 'collection_delta.dart';
 
 /// Additive v2 metadata. A known file can have no hash and no downloaded bytes.
 class LibrarySourceInfo {
@@ -184,6 +186,42 @@ class CollectionDirectoryIndex {
   (int, int, int, int) folderStatus(String source, String folder) =>
       _counts[(source, folder)] ?? (0, 0, 0, 0);
 
+  void remove(String id) {
+    final descriptor = _descriptors.remove(id);
+    if (descriptor == null) return;
+    availableIds.remove(id); missingIds.remove(id); searchText.remove(id);
+    final folderPath = p.posix.dirname(descriptor.$2);
+    _byFolder[(descriptor.$1, folderPath == '.' ? '' : folderPath)]?.remove(id);
+    final prior = _contributions.remove(id);
+    if (prior != null) {
+      readableCount -= prior.$2 ? 1 : 0;
+      var folder = folderPath == '.' ? '' : folderPath;
+      while (true) {
+        final key = (descriptor.$1, folder), before = _counts[(descriptor.$1, folder)]!;
+        _counts[key] = (before.$1 - 1, before.$2 - (prior.$1 ? 1 : 0),
+          before.$3 - (prior.$2 ? 1 : 0), before.$4 - (prior.$3 ? 1 : 0));
+        if (folder.isEmpty) break;
+        final slash = folder.lastIndexOf('/');
+        folder = slash < 0 ? '' : folder.substring(0, slash);
+      }
+    }
+    contentRevision++;
+  }
+
+  void replace(CatalogItem item, CatalogItem? readable, Set<String> ready) {
+    final descriptor = (item.sourceId, item.relativePath, item.missing);
+    if (_descriptors[item.entryId] != descriptor) {
+      remove(item.entryId);
+      _descriptors[item.entryId] = descriptor;
+      if (item.missing) { missingIds.add(item.entryId); return; }
+      availableIds.add(item.entryId);
+      final folder = p.posix.dirname(item.relativePath);
+      (_byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= []).add(item.entryId);
+      searchText[item.entryId] = '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}'.toLowerCase();
+    }
+    update(item, readable, ready);
+  }
+
   bool update(CatalogItem item, CatalogItem? old, Set<String> ready) {
     if (_descriptors[item.entryId] !=
         (item.sourceId, item.relativePath, item.missing)) return false;
@@ -318,7 +356,8 @@ class CatalogCollectionSource
     implements
         CollectionLibrarySource,
         CollectionObjectLookup,
-        CollectionBatchPreparation {
+        CollectionBatchPreparation,
+        CollectionVersionSource {
   const CatalogCollectionSource(
       {required this.id,
       required this.bindings,
@@ -350,6 +389,14 @@ class CatalogCollectionSource
           format:
               p.posix.extension(entry.relativePath).substring(1).toLowerCase(),
           missing: entry.status == EntryStatus.missing);
+
+  @override
+  String get catalogVersion => jsonEncode([
+    id, legacyLibraryId,
+    for (final s in bindings()) [s.id, s.name, s.online,
+      s.catalog.rootPath, s.catalog.statePath, s.catalog.snapshot.generation,
+      s.catalog.snapshot.savedUtc.microsecondsSinceEpoch]
+  ]);
 
   @override
   Future<CollectionIndex> index() async {

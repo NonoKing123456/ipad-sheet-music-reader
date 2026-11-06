@@ -24,10 +24,15 @@ class ImportRemoteTransaction {
     required this.fileName,
     this.conflict = false,
     this.receipt,
+    this.targetComputerKey,
+    this.targetCollectionId,
+    this.previous,
   });
   final String operationId, sourceId, sourceName, relativeFolder, fileName;
   final bool conflict;
   final Map<String, dynamic>? receipt;
+  final String? targetComputerKey, targetCollectionId;
+  final ImportRemoteTransaction? previous;
   ImportRemoteTransaction withReceipt(Map<String, dynamic> value) =>
       ImportRemoteTransaction(
         operationId: operationId,
@@ -36,6 +41,9 @@ class ImportRemoteTransaction {
         relativeFolder: relativeFolder,
         fileName: fileName,
         receipt: value,
+        targetComputerKey: targetComputerKey,
+        targetCollectionId: targetCollectionId,
+        previous: previous,
       );
   ImportRemoteTransaction withConflict() => ImportRemoteTransaction(
     operationId: operationId,
@@ -44,7 +52,23 @@ class ImportRemoteTransaction {
     relativeFolder: relativeFolder,
     fileName: fileName,
     conflict: true,
+    targetComputerKey: targetComputerKey,
+    targetCollectionId: targetCollectionId,
+    previous: previous,
   );
+  ImportRemoteTransaction withTarget(String computer, String collection) =>
+      ImportRemoteTransaction(
+        operationId: operationId,
+        sourceId: sourceId,
+        sourceName: sourceName,
+        relativeFolder: relativeFolder,
+        fileName: fileName,
+        conflict: conflict,
+        receipt: receipt,
+        targetComputerKey: computer,
+        targetCollectionId: collection,
+        previous: previous,
+      );
   Map<String, Object?> toJson() => {
     'operationId': operationId,
     'sourceId': sourceId,
@@ -53,6 +77,9 @@ class ImportRemoteTransaction {
     'fileName': fileName,
     'conflict': conflict,
     'receipt': receipt,
+    'targetComputerKey': targetComputerKey,
+    'targetCollectionId': targetCollectionId,
+    'previous': previous?.toJson(),
   };
   factory ImportRemoteTransaction.fromJson(Map<String, dynamic> value) =>
       ImportRemoteTransaction(
@@ -63,6 +90,13 @@ class ImportRemoteTransaction {
         fileName: value['fileName'] as String,
         conflict: value['conflict'] == true,
         receipt: value['receipt'] as Map<String, dynamic>?,
+        targetComputerKey: value['targetComputerKey'] as String?,
+        targetCollectionId: value['targetCollectionId'] as String?,
+        previous: value['previous'] == null
+            ? null
+            : ImportRemoteTransaction.fromJson(
+                Map<String, dynamic>.from(value['previous'] as Map),
+              ),
       );
 }
 
@@ -138,6 +172,8 @@ class ImportedScore {
   final ImportRemoteTransaction? remoteTransaction;
   final String? localSaveBasename;
   bool get saved => disposition == ImportDisposition.saved;
+  bool get pendingComputer =>
+      !saved && remoteTransaction != null && !remoteTransaction!.conflict;
   ImportedScore changed({
     String? name,
     ImportDisposition? disposition,
@@ -250,7 +286,8 @@ class ExternalImportStore extends ChangeNotifier {
     filePath: score.saved ? pathFor(score) : draftPath(score),
     displayPath: score.name,
     contentHash: score.hash,
-    parentFolderLabel: score.saved && score.remoteTransaction != null
+    parentFolderLabel:
+        score.remoteTransaction != null && !score.remoteTransaction!.conflict
         ? '${score.remoteTransaction!.sourceName} · ${score.remoteTransaction!.relativeFolder.isEmpty ? '根目录' : score.remoteTransaction!.relativeFolder}'
         : score.saved
         ? '本机导入 · ${p.basename(p.dirname(score.savedPath!))}'
@@ -478,6 +515,10 @@ class ExternalImportStore extends ChangeNotifier {
     required String basename,
     required ImportRemoteWriter upload,
     required Future<void> Function(ImportedScore score) beforeSaved,
+    bool queueOnly = false,
+    String? targetComputerKey,
+    String? targetCollectionId,
+    bool confirmComputerTarget = false,
   }) => _serial(() async {
     var score = _records[id]!;
     if (score.saved) return score;
@@ -494,14 +535,46 @@ class ExternalImportStore extends ChangeNotifier {
     }
     var transaction = score.remoteTransaction;
     final fileName = '$basename${score.extension}';
-    if (transaction != null &&
-        !transaction.conflict &&
+    final destinationChanged =
+        transaction != null &&
         (transaction.sourceId != sourceId ||
             transaction.relativeFolder != relativeFolder ||
-            transaction.fileName != fileName)) {
+            transaction.fileName != fileName);
+    if (transaction != null &&
+        !transaction.conflict &&
+        destinationChanged &&
+        !confirmComputerTarget) {
       throw StateError('上次保存尚未确认，请先重试。');
     }
-    if (transaction == null || transaction.conflict) {
+    var replaceConfirmed = false;
+    if (confirmComputerTarget && transaction != null && !transaction.conflict) {
+      if (targetComputerKey == null || targetCollectionId == null) {
+        throw StateError('请先配对并更新目标电脑的谱库目录。');
+      }
+      final unboundSameTarget =
+          transaction.targetComputerKey == null &&
+          transaction.targetCollectionId == null &&
+          !destinationChanged &&
+          (transaction.receipt == null ||
+              transaction.receipt!['collectionId'] == targetCollectionId);
+      if (unboundSameTarget) {
+        // An explicit confirmation upgrades an old journal without changing its
+        // operation ID, allowing the original uncertain receipt to be queried.
+        transaction = transaction.withTarget(
+          targetComputerKey,
+          targetCollectionId,
+        );
+        score = score.changed(remoteTransaction: transaction);
+        await _persist(score);
+      } else {
+        replaceConfirmed =
+            destinationChanged ||
+            transaction.targetComputerKey != targetComputerKey ||
+            transaction.targetCollectionId != targetCollectionId;
+      }
+    }
+    if (transaction == null || transaction.conflict || replaceConfirmed) {
+      final previous = transaction;
       transaction = ImportRemoteTransaction(
         operationId: List.generate(
           16,
@@ -511,13 +584,25 @@ class ExternalImportStore extends ChangeNotifier {
         sourceName: sourceName,
         relativeFolder: relativeFolder,
         fileName: fileName,
+        targetComputerKey: targetComputerKey,
+        targetCollectionId: targetCollectionId,
+        previous: previous,
       );
-      score = score.changed(
+      score = ImportedScore(
+        id: score.id,
+        name: fileName,
+        extension: score.extension,
+        hash: score.hash,
+        receivedAt: score.receivedAt,
+        originId: score.originId,
         disposition: ImportDisposition.retained,
         remoteTransaction: transaction,
       );
       await _persist(score);
     }
+    // A confirmed folder/name is a durable upload intent. Plain drafts never
+    // enter this queue; the draft bytes stay readable until PC confirmation.
+    if (queueOnly) return score;
     try {
       final result = await upload(transaction, score, draftPath(score));
       // Receipt and official identity are durable before annotation migration.

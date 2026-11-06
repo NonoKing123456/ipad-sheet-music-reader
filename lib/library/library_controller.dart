@@ -70,8 +70,8 @@ class _ScanJob {
   }
 }
 
-Future<void> _scanWorker((String, String, bool, bool, SendPort) request) async {
-  final (root, state, verify, metadata, reply) = request;
+Future<void> _scanWorker((String, String, bool, bool, Set<String>?, SendPort) request) async {
+  final (root, state, verify, metadata, dirtyPaths, reply) = request;
   final commands = ReceivePort();
   var yieldRequested = false;
   final subscription = commands.listen((_) => yieldRequested = true);
@@ -83,6 +83,7 @@ Future<void> _scanWorker((String, String, bool, bool, SendPort) request) async {
     final result = await catalog.rescan(
       verifyAll: verify,
       metadataOnly: metadata,
+      dirtyPaths: dirtyPaths,
       shouldYield: () => yieldRequested,
     );
     catalog.snapshot.entryById('');
@@ -108,7 +109,7 @@ Future<LibraryScanPacket> _cooperativeScan(
   String root,
   String state,
   bool verify,
-  bool metadata,
+  bool metadata, [Set<String>? dirtyPaths]
 ) async {
   // A foreground job that was already queued runs before a new idle scan.
   final key = _catalogJobKey(state);
@@ -131,7 +132,7 @@ Future<LibraryScanPacket> _cooperativeScan(
   try {
     await Isolate.spawn(
       _scanWorker,
-      (root, state, verify, metadata, replies.sendPort),
+      (root, state, verify, metadata, dirtyPaths, replies.sendPort),
       onError: replies.sendPort,
       onExit: replies.sendPort,
     );
@@ -197,7 +198,8 @@ class _AddedSource {
   final String id, name, root;
   LibraryCatalog catalog;
   bool online = true, running = false;
-  bool verifyQueued = false;
+  bool verifyQueued = false, refreshQueued = false, fullScanQueued = false;
+  final dirtyQueued = <String>{};
   Timer? retry;
   StreamSubscription<FileSystemEvent>? watcher;
 }
@@ -223,7 +225,9 @@ class LibraryController extends ChangeNotifier {
   bool _disposed = false;
   int _epoch = 0;
   int? _scanningEpoch;
-  bool _scanQueued = false;
+  bool _scanQueued = false, _queuedFullScan = false;
+  final _queuedDirtyPaths = <String>{};
+  final _watchDirty = <String, Set<String>?>{};
   bool _verifyQueued = false;
   final _added = <_AddedSource>[];
   String _primaryId = 'legacy';
@@ -943,6 +947,7 @@ class LibraryController extends ChangeNotifier {
     storageWarnings = const [];
     _scanQueued = false;
     _verifyQueued = false;
+    _queuedFullScan = false; _queuedDirtyPaths.clear(); _watchDirty.clear();
     notifyListeners();
     try {
       if (persist) await _saveRegistry();
@@ -1064,7 +1069,7 @@ class LibraryController extends ChangeNotifier {
       source.watcher = Directory(source.root)
           .watch(recursive: true)
           .listen(
-            (_) => scheduleRescan(),
+            (event) => _watchEvent(source.id, source.root, event),
             onError: (Object _) {
               source.online = false;
               if (!_disposed) notifyListeners();
@@ -1078,22 +1083,29 @@ class LibraryController extends ChangeNotifier {
   Future<void> _refreshAdded(
     _AddedSource source, {
     bool verifyAll = false,
+    Set<String>? dirtyPaths,
   }) async {
     if (_disposed) return;
-    if (source.running) {
+    void retain() {
+      source.refreshQueued = true;
       source.verifyQueued = source.verifyQueued || verifyAll;
-      return;
+      if (dirtyPaths == null) { source.fullScanQueued = true; }
+      else { source.dirtyQueued.addAll(dirtyPaths); }
     }
+    if (source.running) { retain(); return; }
     source.running = true;
     source.retry?.cancel();
     source.retry = null;
     source.verifyQueued = false;
+    source.refreshQueued = false; source.fullScanQueued = false; source.dirtyQueued.clear();
     _extraJobs++;
     notifyListeners();
     try {
       source.online = await Directory(source.root).exists();
-      if (!source.online) return;
-      final packet = verifyAll
+      if (!source.online) { retain(); return; }
+      final packet = dirtyPaths != null && !verifyAll
+          ? await _cooperativeScan(source.root, source.catalog.statePath, false, true, dirtyPaths)
+          : verifyAll
           ? await _scanInWorker(
               source.catalog.rootPath,
               source.catalog.statePath,
@@ -1106,24 +1118,27 @@ class LibraryController extends ChangeNotifier {
       if (_disposed) return;
       await _adoptCatalog(source.id, packet.catalog!);
     } on CatalogScanYielded {
-      source.verifyQueued = source.verifyQueued || verifyAll;
+      retain();
       if (!_disposed) {
         source.retry = Timer(
           const Duration(milliseconds: 250),
           () =>
-              unawaited(_refreshAdded(source, verifyAll: source.verifyQueued)),
+              unawaited(_refreshAdded(source, verifyAll: source.verifyQueued,
+                dirtyPaths: source.fullScanQueued ? null : Set.of(source.dirtyQueued))),
         );
       }
     } catch (failure) {
+      retain();
       debugPrint('LIBRARY added_scan_failed: $failure');
       error = '有谱库无法刷新，请检查连接后重试。';
     } finally {
       source.running = false;
       _extraJobs--;
       if (!_disposed) notifyListeners();
-      if (source.verifyQueued && source.retry == null && !_disposed) {
-        source.verifyQueued = false;
-        unawaited(_refreshAdded(source, verifyAll: true));
+      if (source.refreshQueued && source.retry == null && !_disposed) {
+        source.retry = Timer(const Duration(milliseconds: 650), () => unawaited(
+          _refreshAdded(source, verifyAll: source.verifyQueued,
+            dirtyPaths: source.fullScanQueued ? null : Set.of(source.dirtyQueued))));
       }
     }
   }
@@ -1134,7 +1149,7 @@ class LibraryController extends ChangeNotifier {
       _watcher = Directory(rootPath!)
           .watch(recursive: true)
           .listen(
-            (_) => scheduleRescan(),
+            (event) => _watchEvent(_primaryId, rootPath!, event),
             onError: (Object failure) {
               if (_disposed) return;
               debugPrint('LIBRARY watch_failed: $failure');
@@ -1148,12 +1163,52 @@ class LibraryController extends ChangeNotifier {
     }
   }
 
+  void _watchEvent(String sourceId, String root, FileSystemEvent event) {
+    if (_disposed) return;
+    Set<String>? paths;
+    String? relative(String absolute) {
+      final actual = p.normalize(p.absolute(absolute));
+      if (!p.isWithin(root, actual) && !p.equals(root, actual)) return null;
+      return p.relative(actual, from: root).split(p.separator).join('/').replaceFirst(RegExp(r'^\.$'), '');
+    }
+    final first = relative(event.path);
+    if (first != null) {
+      paths = {first};
+      if (event is FileSystemMoveEvent) {
+        final destination = event.destination;
+        final target = destination == null ? null : relative(destination);
+        if (target == null) { paths = null; } else { paths.add(target); }
+      }
+    }
+    if (_watchDirty.containsKey(sourceId)) {
+      final prior = _watchDirty[sourceId];
+      paths = prior == null || paths == null ? null : {...prior, ...paths};
+    }
+    if (paths != null && paths.length > 256) paths = null;
+    _watchDirty[sourceId] = paths;
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 650), () => unawaited(_drainWatchChanges()));
+  }
+
+  Future<void> _drainWatchChanges() async {
+    final changes = Map<String, Set<String>?>.of(_watchDirty); _watchDirty.clear();
+    for (final change in changes.entries) {
+      if (_disposed) return;
+      if (change.key == _primaryId) {
+        await _rescanPrimary(includeAdded: false, dirtyPaths: change.value);
+      } else {
+        final source = _added.where((s) => s.id == change.key).firstOrNull;
+        if (source != null) await _refreshAdded(source, dirtyPaths: change.value);
+      }
+    }
+  }
+
   void scheduleRescan() {
     if (_disposed || rootPath == null) return;
     _debounce?.cancel();
     _debounce = Timer(
       const Duration(milliseconds: 650),
-      () => unawaited(rescan()),
+      () { _watchDirty.clear(); unawaited(rescan()); },
     );
   }
 
@@ -1171,7 +1226,7 @@ class LibraryController extends ChangeNotifier {
 
   /// An explicit host import needs its source's adopted index before replying.
   /// Use the existing scan queue, including its foreground-read yield policy.
-  Future<void> refreshImportedSource(String sourceId) async {
+  Future<void> refreshImportedSource(String sourceId, {String? relativePath}) async {
     bool sourceScanning() => sourceId == _primaryId
         ? _scanningEpoch == _epoch || _scanQueued
         : _added.any(
@@ -1202,11 +1257,11 @@ class LibraryController extends ChangeNotifier {
     await waitForIdle();
     if (_disposed) throw StateError('Library closed.');
     if (sourceId == _primaryId) {
-      await _rescanPrimary(includeAdded: false);
+      await _rescanPrimary(includeAdded: false, dirtyPaths: relativePath == null ? null : {relativePath});
     } else {
       final source = _added.where((s) => s.id == sourceId).firstOrNull;
       if (source == null) throw StateError('Source removed.');
-      await _refreshAdded(source);
+      await _refreshAdded(source, dirtyPaths: relativePath == null ? null : {relativePath});
     }
     await waitForIdle();
     if (_disposed || !sources.any((s) => s.id == sourceId && s.online)) {
@@ -1217,13 +1272,15 @@ class LibraryController extends ChangeNotifier {
   Future<void> _rescanPrimary({
     bool verifyAll = false,
     bool includeAdded = true,
+    Set<String>? dirtyPaths,
   }) async {
     if (_disposed || rootPath == null || _catalog == null) return;
-    if (_scanningEpoch == _epoch) {
-      _scanQueued = true;
-      _verifyQueued = _verifyQueued || verifyAll;
-      return;
+    void retain() {
+      _scanQueued = true; _verifyQueued = _verifyQueued || verifyAll;
+      if (dirtyPaths == null) { _queuedFullScan = true; }
+      else { _queuedDirtyPaths.addAll(dirtyPaths); }
     }
+    if (_scanningEpoch == _epoch) { retain(); return; }
     final epoch = _epoch;
     final root = _catalog!.rootPath;
     final state = _catalog!.statePath;
@@ -1233,13 +1290,20 @@ class LibraryController extends ChangeNotifier {
     try {
       _primaryOnline = await Directory(root).exists();
       if (!_primaryOnline) {
+        if (dirtyPaths != null) {
+          if (!_watchDirty.containsKey(_primaryId) || _watchDirty[_primaryId] != null) {
+            _watchDirty[_primaryId] = {...?_watchDirty[_primaryId], ...dirtyPaths};
+          }
+        }
         for (final source in _added.toList()) {
           await _refreshAdded(source);
         }
         return;
       }
       final LibraryScanPacket packet;
-      if (_primaryMetadataOnly && !verifyAll) {
+      if (dirtyPaths != null && !verifyAll) {
+        packet = await _cooperativeScan(root, state, false, true, dirtyPaths);
+      } else if (_primaryMetadataOnly && !verifyAll) {
         packet = await _scanMetadata(root, state);
       } else {
         packet = await _scanRunner(root, state, verifyAll);
@@ -1271,9 +1335,15 @@ class LibraryController extends ChangeNotifier {
         'LIBRARY scanned files=$totalCount folders=${folders.length - 1} elapsed_ms=${packet.elapsed.inMilliseconds} issues=${packet.result.issues.length}',
       );
     } on CatalogScanYielded {
-      _scanQueued = true;
-      _verifyQueued = _verifyQueued || verifyAll;
+      retain();
     } catch (failure) {
+      if (dirtyPaths != null) {
+        if (!_watchDirty.containsKey(_primaryId) || _watchDirty[_primaryId] != null) {
+          _watchDirty[_primaryId] = {...?_watchDirty[_primaryId], ...dirtyPaths};
+        }
+        _debounce?.cancel();
+        _debounce = Timer(const Duration(seconds: 1), () => unawaited(_drainWatchChanges()));
+      }
       debugPrint('LIBRARY scan_failed: $failure');
       if (!_disposed && epoch == _epoch) {
         error = '刷新失败，请检查连接后重试。';
@@ -1284,11 +1354,9 @@ class LibraryController extends ChangeNotifier {
         notifyListeners();
         if (_scanQueued) {
           final verify = _verifyQueued;
-          _scanQueued = false;
-          _verifyQueued = false;
-          unawaited(
-            _rescanPrimary(verifyAll: verify, includeAdded: includeAdded),
-          );
+          final queued = _queuedFullScan ? null : Set<String>.of(_queuedDirtyPaths);
+          _scanQueued = false; _verifyQueued = false; _queuedFullScan = false; _queuedDirtyPaths.clear();
+          unawaited(_rescanPrimary(verifyAll: verify, includeAdded: includeAdded, dirtyPaths: queued));
         }
       }
     }

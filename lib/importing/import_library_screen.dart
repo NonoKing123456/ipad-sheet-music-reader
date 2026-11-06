@@ -147,11 +147,19 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                   ),
                   TextButton(
                     onPressed: () => setState(() => _drafts = true),
-                    child: Text(
-                      '暂存',
-                      style: ScoreText.caption.copyWith(
-                        color: _drafts ? t.pine : t.ink500,
-                      ),
+                    child: AnimatedBuilder(
+                      animation: widget.store,
+                      builder: (context, _) {
+                        final pending = widget.store.records
+                            .where((score) => score.pendingComputer)
+                            .length;
+                        return Text(
+                          pending == 0 ? '暂存' : '暂存 · $pending 待传',
+                          style: ScoreText.caption.copyWith(
+                            color: _drafts ? t.pine : t.ink500,
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ],
@@ -220,7 +228,7 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                                   : null)
                             : score.remoteTransaction != null &&
                                   !score.remoteTransaction!.conflict
-                            ? '暂存 · 等待重试保存'
+                            ? '本机可读 · 待传电脑 · ${score.remoteTransaction!.sourceName}'
                             : '暂存 · 尚未保存到曲库',
                         metadata: LibraryFileMetadata(
                           entryId: 'import-${score.id}',

@@ -6,7 +6,7 @@ import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
 import 'package:library_sync/library_sync.dart'
-    show PageMetadataKey, CatalogSourceBinding, SyncProtocolException;
+    show PageMetadataKey, CatalogSourceBinding;
 
 import 'dart:async';
 import 'dart:io';
@@ -466,40 +466,18 @@ class _LibraryScreenState extends State<LibraryScreen>
                   ImportComputerDestination(
                     id: source.id,
                     name: source.name,
+                    computerKey: sync.importComputerKey,
+                    collectionId: sync.activeCollection?.index?.id,
                     folders:
                         sync.activeCollection!.index!.folders[source.id] ??
                         const [],
                   ),
               ],
-        saveToComputer: sync == null
-            ? null
-            : (transaction, score, filePath) async {
-                try {
-                  if (sync.busy) throw const ImportSaveBusy();
-                  final receipt = await sync.importScoreToComputer(
-                    operationId: transaction.operationId,
-                    sourceId: transaction.sourceId,
-                    relativeFolder: transaction.relativeFolder,
-                    fileName: transaction.fileName,
-                    filePath: filePath,
-                    hash: score.hash,
-                  );
-                  final target = sync.locateOffline(receipt.item.entryId);
-                  if (target == null) throw StateError('保存的曲谱尚未进入离线谱库');
-                  return ImportRemoteResult(
-                    entryId: target.entryId,
-                    revisionId: target.revisionId,
-                    localPath: target.filePath,
-                    receipt: Map<String, dynamic>.from(receipt.toJson()),
-                  );
-                } on SyncProtocolException catch (failure) {
-                  if (failure.status == 409 &&
-                      failure.code == 'import_destination_exists') {
-                    throw const ImportSaveConflict();
-                  }
-                  rethrow;
-                }
-              },
+        saveToComputer: sync?.writeImportedScore,
+        queueComputerSaves: sync != null,
+        onComputerSaveQueued: sync?.requestComputerUpload,
+        computerTargetMatches: sync?.matchesImportComputer,
+        confirmComputerDirectory: sync?.confirmImportDirectory,
         syncImportedReaderState: sync == null
             ? null
             : () async {
@@ -509,10 +487,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       ),
     );
     _importReaderOpen = true;
+    sync?.setReaderActive(true);
     try {
       await Navigator.of(context).push(route);
       await route.completed;
     } finally {
+      sync?.setReaderActive(false);
       _importReaderOpen = false;
       if (!_showingImport) unawaited(_showIncomingImports());
     }
@@ -594,6 +574,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         return;
       }
       opened = true;
+      _sync?.setReaderActive(true);
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => LibraryReaderScreen(
@@ -609,6 +590,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       debugPrint('READER workspace_failed: $failure\n$stack');
       if (mounted) _message('无法打开批注数据，请检查应用存储。');
     } finally {
+      if (opened) _sync?.setReaderActive(false);
       _openingReader = false;
       if (mounted && opened && savedQuery != null) {
         setState(() {
@@ -783,6 +765,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       initialListId: _setListId,
       initialCreate: _setListCreate,
       pageCounts: (sync ?? _sync)?.pageCounts,
+      onReaderActive: (sync ?? _sync)?.setReaderActive,
       onBack: _leaveSetLists,
       onSelectionChanged: (id) {
         _setListId = id;
@@ -813,6 +796,9 @@ class _LibraryScreenState extends State<LibraryScreen>
         throw StateError('Library disposed');
       }
       _sync = sync;
+      if (_imports != null && !_canProvideLibrary) {
+        sync.attachExternalImports(_imports!);
+      }
       sync.addListener(_changed);
       setState(() {});
       return sync;

@@ -12,3 +12,5 @@ export 'src/signing_status.dart';
 export 'src/page_metadata.dart';
 export 'src/background_transfer.dart';
 export 'src/score_import.dart';
+
+export 'src/collection_delta.dart' show CollectionVersionSource, CollectionDelta, CollectionRefreshResult;

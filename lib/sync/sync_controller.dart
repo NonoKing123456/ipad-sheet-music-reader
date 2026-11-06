@@ -11,6 +11,7 @@ import 'package:flutter/widgets.dart'
     show WidgetsBinding, WidgetsBindingObserver, AppLifecycleState;
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
+import 'package:reader_state/reader_state.dart' show DocumentKey;
 import 'package:path/path.dart' as p;
 
 import '../library/library_controller.dart';
@@ -18,6 +19,8 @@ import '../library/score_path_label.dart';
 import '../library/page_count_service.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
+import '../importing/external_import_store.dart';
+import '../importing/import_annotation_mirror.dart';
 import 'pairing_qr.dart';
 import 'ios_background_transfer.dart';
 import 'host_score_import.dart';
@@ -109,6 +112,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     this.bindAddress,
     this.signingDirectoryWatch,
     this.backgroundTransferFactory,
+    this.autoSyncInterval = const Duration(seconds: 30),
+    this.autoRetryInitial = const Duration(seconds: 5),
   }) {
     library.addListener(_libraryChanged);
     workspace.addListener(_workspaceChanged);
@@ -116,6 +121,393 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   final LibraryController library;
   final ReaderWorkspace workspace;
   final Duration ioTimeout;
+  final Duration autoSyncInterval, autoRetryInitial;
+  Timer? _dailyTimer;
+  bool _dailyDue = false, _dailyRunning = false, _dailyPaused = false;
+  bool _selectionNeedsSync = false;
+  int _activeReaders = 0;
+  bool get _readerActive => _activeReaders > 0;
+  int _dailyFailures = 0;
+  ExternalImportStore? _imports;
+  final _explicitImports = <String>{};
+  bool _explicitScheduled = false;
+  Completer<void>? _queuedManual;
+  Set<String>? _queuedManualScope;
+  int _readerSyncedGeneration = -1;
+  String? _readerRemoteVersion;
+  int get pendingComputerUploads =>
+      _imports?.records.where((score) => score.pendingComputer).length ?? 0;
+  String? get importComputerKey => _client?.backgroundTransferNamespace;
+  bool get _trustedImportDirectory =>
+      importComputerKey != null &&
+      (collection?.deltaOwner == importComputerKey ||
+          (_settings['importDirectoryComputer'] == importComputerKey &&
+              _settings['importDirectoryCollection'] == collection?.index?.id));
+
+  Future<void> _rememberImportDirectory() async {
+    if (_disposed ||
+        _client == null ||
+        collection?.index == null ||
+        (_settings['importDirectoryComputer'] == importComputerKey &&
+            _settings['importDirectoryCollection'] == collection!.index!.id)) {
+      return;
+    }
+    await _saveSettings({
+      ..._settings,
+      'importDirectoryComputer': importComputerKey,
+      'importDirectoryCollection': collection!.index!.id,
+    });
+  }
+
+  /// Cached confirmed folders remain selectable offline. Upgrading an old
+  /// unbound intent explicitly verifies the remote collection before binding.
+  Future<bool> confirmImportDirectory([bool requireRemote = false]) async {
+    final client = _client, view = collection;
+    if (_disposed || client == null || view?.index == null) return false;
+    if (!requireRemote && _trustedImportDirectory) return true;
+    try {
+      var remoteId = await client.collectionIdentity();
+      if (remoteId == null) {
+        await client.refreshCollectionDelta(view!, allowLegacyRefresh: true);
+        remoteId = view.index?.id;
+      }
+      if (_disposed ||
+          !identical(client, _client) ||
+          !identical(view, collection) ||
+          remoteId != view!.index!.id) {
+        return false;
+      }
+      await _rememberImportDirectory();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool matchesImportComputer(ImportRemoteTransaction transaction) =>
+      transaction.targetComputerKey != null &&
+      transaction.targetComputerKey == importComputerKey &&
+      transaction.targetCollectionId != null &&
+      transaction.targetCollectionId == collection?.index?.id;
+  int get uploadsForPreviousComputer =>
+      _imports?.records
+          .where(
+            (score) =>
+                score.pendingComputer &&
+                !matchesImportComputer(score.remoteTransaction!),
+          )
+          .length ??
+      0;
+
+  /// The route owner yields new foreground work while a score is being read.
+  /// Existing system transfers keep their durable queue and completed bytes.
+  void setReaderActive(bool value) {
+    if (value) {
+      _activeReaders++;
+    } else if (_activeReaders > 0) {
+      _activeReaders--;
+    }
+    if (_readerActive) {
+      _dailyTimer?.cancel();
+      _dailyTimer = null;
+      _recoveryTimer?.cancel();
+      _recoveryTimer = null;
+      _recoveryCancellation?.cancel();
+      if (_dailyRunning) _cancellation?.cancel();
+      _scheduleDaily();
+    } else {
+      _scheduleObjectRecovery();
+      _scheduleDaily(delay: const Duration(milliseconds: 500));
+    }
+  }
+
+  void attachExternalImports(ExternalImportStore store) {
+    _imports?.removeListener(_importsChanged);
+    _imports = store;
+    store.addListener(_importsChanged);
+    _importsChanged();
+  }
+
+  void _importsChanged() {
+    if (pendingComputerUploads > 0) {
+      _scheduleDaily(delay: const Duration(milliseconds: 500));
+    }
+    _changed();
+  }
+
+  /// A user's save may send while the reader remains open. Recovery work still
+  /// yields to reading; every request uses the same single transfer guard.
+  void requestComputerUpload(String id) {
+    _explicitImports.add(id);
+    _dailyPaused = false;
+    _drainExplicitImports();
+  }
+
+  void _drainExplicitImports() {
+    if (_disposed ||
+        busy ||
+        _dailyRunning ||
+        _explicitScheduled ||
+        _syncTask != null ||
+        !_recoveryForeground ||
+        _explicitImports.isEmpty ||
+        _client == null) {
+      return;
+    }
+    _explicitScheduled = true;
+    scheduleMicrotask(() {
+      _explicitScheduled = false;
+      if (busy ||
+          _dailyRunning ||
+          _syncTask != null ||
+          _explicitImports.isEmpty) {
+        return;
+      }
+      final id = _explicitImports.first;
+      _explicitImports.remove(id);
+      unawaited(_runDaily(explicitImportId: id));
+    });
+  }
+
+  void _scheduleDaily({Duration? delay}) {
+    if (_disposed ||
+        !initialized ||
+        _client == null ||
+        !_recoveryForeground ||
+        _readerActive ||
+        _dailyPaused ||
+        _dailyRunning) {
+      return;
+    }
+    if (busy || _syncTask != null) {
+      _dailyDue = true;
+      return;
+    }
+    // At most one wakeup; local notifications cannot postpone a pending retry.
+    if (_dailyTimer != null) return;
+    _dailyTimer = Timer(delay ?? autoSyncInterval, () {
+      _dailyTimer = null;
+      unawaited(_runDaily());
+    });
+  }
+
+  Future<void> _runDaily({String? explicitImportId}) async {
+    final explicit = explicitImportId != null;
+    if (_disposed ||
+        !_recoveryForeground ||
+        _dailyPaused ||
+        _dailyRunning ||
+        _client == null) {
+      return;
+    }
+    if (busy || _syncTask != null) {
+      _dailyDue = true;
+      return;
+    }
+    _dailyRunning = true;
+    var failed = false;
+    try {
+      if (_readerActive && !explicit) {
+        return;
+      }
+      failed = !await _uploadConfirmedImports(
+        allowReading: explicit,
+        onlyId: explicitImportId,
+      );
+      if (!_readerActive &&
+          _recoveryForeground &&
+          !_dailyPaused &&
+          !busy &&
+          !failed) {
+        failed = !await _autoSynchronize();
+      }
+    } catch (_) {
+      failed = true;
+    } finally {
+      _dailyRunning = false;
+      _dailyDue = false;
+      _dailyFailures = failed ? (_dailyFailures + 1).clamp(0, 6) : 0;
+      final retry = autoRetryInitial * (1 << (_dailyFailures - 1).clamp(0, 5));
+      _scheduleDaily(
+        delay: failed
+            ? (retry > const Duration(minutes: 5)
+                  ? const Duration(minutes: 5)
+                  : retry)
+            : autoSyncInterval,
+      );
+      _drainExplicitImports();
+      _drainManualSync();
+    }
+  }
+
+  Future<bool> _uploadConfirmedImports({
+    bool allowReading = false,
+    String? onlyId,
+  }) async {
+    final imports = _imports;
+    if (imports == null) return true;
+    for (final score in imports.records.where(
+      (s) => s.pendingComputer && (onlyId == null || s.id == onlyId),
+    )) {
+      if ((_readerActive && !allowReading) ||
+          !_recoveryForeground ||
+          _dailyPaused ||
+          busy) {
+        break;
+      }
+      final transaction = score.remoteTransaction!;
+      if (!matchesImportComputer(transaction)) continue;
+      try {
+        final saved = await imports.saveToComputer(
+          score.id,
+          sourceId: transaction.sourceId,
+          sourceName: transaction.sourceName,
+          relativeFolder: transaction.relativeFolder,
+          basename: p.basenameWithoutExtension(transaction.fileName),
+          upload: (transaction, score, path) => writeImportedScore(
+            transaction,
+            score,
+            path,
+            allowReading: allowReading,
+          ),
+          targetComputerKey: transaction.targetComputerKey,
+          targetCollectionId: transaction.targetCollectionId,
+          beforeSaved: (registered) => mirrorImportAnnotations(
+            workspace,
+            DocumentKey(entryId: 'import-${score.id}', revisionId: score.hash),
+            DocumentKey(
+              entryId: registered.catalogEntryId!,
+              revisionId: registered.catalogRevisionId!,
+            ),
+          ),
+        );
+        await imports.completeMirror(saved.id);
+      } on ImportSaveConflict {
+        // This item needs a new name; other confirmed intents may continue.
+      } catch (_) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<bool> _probeReaderState() async {
+    if (busy ||
+        _client == null ||
+        hasUnsavedEdits ||
+        _readerActive ||
+        !_recoveryForeground) {
+      return true;
+    }
+    busy = true;
+    _recoveryCancellation?.cancel();
+    final cancellation = SyncCancellation();
+    _cancellation = cancellation;
+    var changed = false;
+    try {
+      changed = await _syncSavedReaderState(cancellation, showActivity: true);
+      if (changed) {
+        phase = SyncPhase.complete;
+        message = '已保存的批注和曲单已同步。';
+      }
+      return true;
+    } on SyncCancelled {
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      busy = false;
+      _cancellation = null;
+      if (changed || phase == SyncPhase.merging) {
+        if (!changed) {
+          phase = SyncPhase.partial;
+          message = '已保存的批注仍在本机，连接后会自动继续。';
+        }
+        _changed();
+      }
+    }
+  }
+
+  Future<bool> _autoSynchronize() async {
+    final client = _client, view = collection;
+    if (busy || client == null || view == null) return true;
+    // An unchanged head probe does not publish busy or completion to the UI.
+    busy = true;
+    _recoveryCancellation?.cancel();
+    final cancellation = SyncCancellation();
+    _cancellation = cancellation;
+    bool needsContent;
+    try {
+      final delta = await client.refreshCollectionDelta(
+        view,
+        cancellation: cancellation,
+      );
+      needsContent =
+          !delta.unchanged ||
+          view.pendingDeltaEntryIds.isNotEmpty ||
+          _selectionNeedsSync;
+    } on SyncCancelled {
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      busy = false;
+      _cancellation = null;
+    }
+    if (_readerActive || !_recoveryForeground || _dailyPaused) return true;
+    if (!needsContent) return _probeReaderState();
+    await _synchronize(
+      automatic: true,
+      changedOnly: !_selectionNeedsSync,
+      refreshIndex: false,
+    );
+    return phase != SyncPhase.partial && phase != SyncPhase.failed;
+  }
+
+  Future<ImportRemoteResult> writeImportedScore(
+    ImportRemoteTransaction transaction,
+    ImportedScore score,
+    String filePath, {
+    bool allowReading = true,
+  }) async {
+    if (!matchesImportComputer(transaction)) {
+      throw StateError('待传目标属于先前配对电脑，曲谱已保留；请先确认原电脑与谱库。');
+    }
+    if (transaction.receipt == null && !await confirmImportDirectory(true)) {
+      throw StateError('请连接原配对电脑并确认原谱库后继续。');
+    }
+    if (!allowReading &&
+        (_readerActive || !_recoveryForeground || _dailyPaused)) {
+      throw const SyncCancelled();
+    }
+    try {
+      final receipt = await importScoreToComputer(
+        operationId: transaction.operationId,
+        sourceId: transaction.sourceId,
+        relativeFolder: transaction.relativeFolder,
+        fileName: transaction.fileName,
+        filePath: filePath,
+        hash: score.hash,
+        confirmedReceipt: transaction.receipt == null
+            ? null
+            : ScoreImportReceipt.fromJson(transaction.receipt!),
+      );
+      final target = locateOffline(receipt.item.entryId);
+      if (target == null) throw StateError('保存的曲谱尚未进入离线谱库');
+      return ImportRemoteResult(
+        entryId: target.entryId,
+        revisionId: target.revisionId,
+        localPath: target.filePath,
+        receipt: Map<String, dynamic>.from(receipt.toJson()),
+      );
+    } on SyncProtocolException catch (failure) {
+      if (failure.status == 409 &&
+          failure.code == 'import_destination_exists') {
+        throw const ImportSaveConflict();
+      }
+      rethrow;
+    }
+  }
 
   /// Tests may restrict the listener to loopback; production binds IPv4 LAN.
   final InternetAddress? bindAddress;
@@ -540,7 +932,11 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _recoveryForeground = state == AppLifecycleState.resumed;
     if (_recoveryForeground) {
       _scheduleObjectRecovery();
+      _scheduleDaily(delay: const Duration(milliseconds: 500));
     } else {
+      _dailyTimer?.cancel();
+      _dailyTimer = null;
+      if (_dailyRunning) _cancellation?.cancel();
       _recoveryTimer?.cancel();
       _recoveryTimer = null;
       _recoveryCancellation?.cancel();
@@ -993,6 +1389,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       await _syncTask;
     }
     await collection?.select(rule);
+    _selectionNeedsSync = true;
+    _scheduleDaily(delay: const Duration(milliseconds: 500));
     _changed();
   }
 
@@ -1097,6 +1495,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         _backgroundRecoveryPending = false;
         scheduleMicrotask(() => unawaited(_backgroundChanged()));
       }
+      if (initialized && !busy && _dailyDue && !_dailyRunning) {
+        _dailyDue = false;
+        _scheduleDaily(delay: const Duration(milliseconds: 500));
+      }
+      if (initialized && !busy && !_dailyRunning) _drainExplicitImports();
+      if (initialized && !busy && !_dailyRunning) _drainManualSync();
     }
   }
 
@@ -1179,6 +1583,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _scheduleObjectRecovery();
     if (_backgroundTransfer != null) unawaited(_backgroundChanged());
     _maybeAutoStart();
+    _scheduleDaily();
   }
 
   void _scheduleObjectRecovery({
@@ -1187,6 +1592,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     if (_disposed ||
         !initialized ||
         !_recoveryForeground ||
+        _readerActive ||
         _recoveringObjects ||
         _recoveryTimer != null) {
       return;
@@ -1204,7 +1610,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _recoverObjectBatch() async {
-    if (_disposed || !_recoveryForeground) return;
+    if (_disposed || !_recoveryForeground || _readerActive) return;
     if (busy) {
       _scheduleObjectRecovery();
       return;
@@ -1365,6 +1771,16 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     if (serving && workspace.unsavedCount > 0) {
       unawaited(stopServer(reason: '有笔迹未保存，无线服务已关闭。请重试保存后重新开启。'));
     }
+    if (_client != null &&
+        !hasUnsavedEdits &&
+        workspace.store.snapshot.generation != _readerSyncedGeneration &&
+        !busy &&
+        !_dailyRunning &&
+        _dailyFailures == 0) {
+      _dailyTimer?.cancel();
+      _dailyTimer = null;
+      _scheduleDaily(delay: const Duration(milliseconds: 750));
+    }
   }
 
   void _tick() {
@@ -1465,6 +1881,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           collectionId: identity['id'] as String,
         );
         started.onScoreImport = imports.receive;
+        started.onScoreImportReceipt = imports.lookup;
       }
       if (_disposed || library.rootPath != root) {
         await started.close();
@@ -1701,8 +2118,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       _configureBackgroundClient();
       pageCounts.connectionChanged();
       _retrySigningReport();
+      _readerRemoteVersion = null;
+      _readerSyncedGeneration = -1;
+      _dailyPaused = false;
+      _scheduleDaily(delay: const Duration(milliseconds: 500));
       phase = SyncPhase.idle;
-      message = '已记住这台电脑，以后点击“立即同步”即可。';
+      message = '已记住这台电脑，前台连接可达时会自动同步。';
       return true;
     } on SyncProtocolException catch (failure) {
       phase = SyncPhase.failed;
@@ -1719,9 +2140,64 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     return false;
   }
 
-  Future<void> synchronize({Set<String>? onlyEntryIds}) =>
-      _syncTask ??= _synchronize(onlyEntryIds: onlyEntryIds)
-          .whenComplete(() => _syncTask = null);
+  Future<void> synchronize({Set<String>? onlyEntryIds}) {
+    _dailyPaused = false;
+    _dailyTimer?.cancel();
+    _dailyTimer = null;
+    if (_syncTask != null) return _syncTask!;
+    if (busy || _dailyRunning) {
+      _queuedManualScope = _queuedManual == null
+          ? onlyEntryIds
+          : _queuedManualScope == null || onlyEntryIds == null
+          ? null
+          : {..._queuedManualScope!, ...onlyEntryIds};
+      return (_queuedManual ??= Completer<void>()).future;
+    }
+    return _syncTask ??= _manualSynchronize(onlyEntryIds: onlyEntryIds)
+        .whenComplete(() {
+          _syncTask = null;
+          _scheduleDaily();
+          _drainExplicitImports();
+        });
+  }
+
+  void _drainManualSync() {
+    if (_disposed ||
+        busy ||
+        _dailyRunning ||
+        _syncTask != null ||
+        _queuedManual == null) {
+      return;
+    }
+    final completion = _queuedManual!, scope = _queuedManualScope;
+    _queuedManual = null;
+    _queuedManualScope = null;
+    unawaited(
+      synchronize(onlyEntryIds: scope)
+          .then(completion.complete, onError: completion.completeError),
+    );
+  }
+
+  Future<void> _manualSynchronize({Set<String>? onlyEntryIds}) async {
+    if (busy || _dailyRunning || _client == null) return;
+    final uploaded = await _uploadConfirmedImports(allowReading: true);
+    if (!uploaded) {
+      phase = SyncPhase.partial;
+      message = '曲谱已保存在本机并待传电脑，连接后会自动继续。';
+      _changed();
+      return;
+    }
+    if (!_dailyPaused) {
+      await _synchronize(
+        onlyEntryIds: onlyEntryIds,
+        changedOnly: onlyEntryIds == null && !_selectionNeedsSync,
+      );
+    }
+    if (uploadsForPreviousComputer > 0) {
+      message = '$uploadsForPreviousComputer 份待传曲谱属于先前配对电脑，已保留；请确认原电脑与谱库。';
+      _changed();
+    }
+  }
 
   /// Refresh the directory without altering the system's selected download
   /// queue or exchanging reader state. Safe while native transfers are active.
@@ -1765,6 +2241,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     required String fileName,
     required String filePath,
     required String hash,
+    ScoreImportReceipt? confirmedReceipt,
   }) async {
     final client = _client, view = collection;
     if (client == null || view == null) throw StateError('请先连接已配对电脑。');
@@ -1783,11 +2260,18 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         length: await file.length(),
         hash: hash,
       );
-      final receipt = await client.importScore(
-        request,
-        file,
-        cancellation: cancellation,
-      );
+      final receipt =
+          confirmedReceipt ??
+          await client.importScore(request, file, cancellation: cancellation);
+      if (receipt.operationId != operationId ||
+          receipt.item.sourceId != sourceId ||
+          receipt.item.hash != hash ||
+          receipt.item.relativePath !=
+              (relativeFolder.isEmpty
+                  ? fileName
+                  : '$relativeFolder/$fileName')) {
+        throw StateError('保存凭据与本机曲谱不一致。');
+      }
       if (!identical(client, _client) || !identical(view, collection)) {
         throw StateError('配对电脑已改变，请重试。');
       }
@@ -1862,11 +2346,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _cancellation = cancellation;
     _changed();
     try {
-      await client.syncReaderState(
-        workspace.store,
-        cancellation: cancellation,
-        afterMerge: () async => workspace.refreshFromStore(force: true),
-      );
+      await _syncSavedReaderState(cancellation);
     } finally {
       _cancellation = null;
       busy = false;
@@ -1875,7 +2355,43 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _synchronize({Set<String>? onlyEntryIds}) async {
+  Future<bool> _syncSavedReaderState(
+    SyncCancellation cancellation, {
+    bool showActivity = false,
+  }) async {
+    final client = _client!;
+    final remoteVersion = await client.readerStateVersion(
+      cancellation: cancellation,
+    );
+    if (remoteVersion != null &&
+        remoteVersion == _readerRemoteVersion &&
+        _readerSyncedGeneration == workspace.store.snapshot.generation) {
+      return false;
+    }
+    if (showActivity) {
+      if (_readerActive || !_recoveryForeground) return false;
+      phase = SyncPhase.merging;
+      message = '正在同步已保存的批注和曲单…';
+      _changed();
+    }
+    await client.syncReaderState(
+      workspace.store,
+      cancellation: cancellation,
+      afterMerge: () async => workspace.refreshFromStore(force: true),
+    );
+    // The receipt version belongs to this merged response, so our own merge
+    // generation is acknowledged without hiding a concurrent later PC edit.
+    _readerRemoteVersion = client.lastReaderStateVersion ?? remoteVersion;
+    _readerSyncedGeneration = workspace.store.snapshot.generation;
+    return true;
+  }
+
+  Future<void> _synchronize({
+    Set<String>? onlyEntryIds,
+    bool automatic = false,
+    bool changedOnly = false,
+    bool refreshIndex = true,
+  }) async {
     if (busy || _client == null || replica == null) return;
     if (hasUnsavedEdits) {
       message = '批注未保存，请先重试保存。';
@@ -1897,6 +2413,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       final result = await _client!.syncCollection(
         collection!,
         onlyEntryIds: onlyEntryIds,
+        changedOnly: changedOnly,
+        refreshIndex: refreshIndex,
         cancellation: cancellation,
         onProgress: (progress) {
           processedObjects = progress.processed;
@@ -1905,6 +2423,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           _changed();
         },
       );
+      if (result.status == LibrarySyncStatus.complete) {
+        _selectionNeedsSync = false;
+        await _rememberImportDirectory();
+      }
       if (result.status != LibrarySyncStatus.complete) {
         phase = result.status == LibrarySyncStatus.cancelled
             ? SyncPhase.cancelled
@@ -1913,6 +2435,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
             onlyEntryIds != null &&
                 result.error == 'Scoped preparation requires a v2 computer'
             ? '请先更新电脑端，再按曲单准备。'
+            : automatic && result.failure == LibrarySyncFailure.connection
+            ? '电脑暂不可达，已保存内容仍可阅读；连接后会自动继续。'
             : _libraryFailureMessage(result.failure);
         if (result.status == LibrarySyncStatus.cancelled ||
             (onlyEntryIds != null &&
@@ -1934,13 +2458,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       final contentPartial = result.status != LibrarySyncStatus.complete;
       message = '正在交换已保存的批注和曲单…';
       _changed();
-      await _client!.syncReaderState(
-        workspace.store,
-        cancellation: cancellation,
-        afterMerge: () async {
-          workspace.refreshFromStore(force: true);
-        },
-      );
+      await _syncSavedReaderState(cancellation);
       cancellation.check();
       if (hasUnsavedEdits) {
         phase = SyncPhase.partial;
@@ -1951,15 +2469,18 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       message = contentPartial
           ? '部分曲谱未下载，请重试。'
           : workspace.store.snapshot.conflicts.isEmpty
-          ? '已更新。'
+          ? (totalObjects == 0
+                ? '已是最新，本次没有新增或更新。'
+                : '本次已同步 $totalObjects 份新增或更新曲谱。')
           : '有不同版本，请查看。';
     } catch (failure) {
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
           : SyncPhase.partial;
-      message =
-          failure is SyncProtocolException &&
-              failure.code == 'reader_upgrade_required'
+      message = automatic && !cancellation.isCancelled
+          ? '电脑暂不可达，已保存内容仍可阅读；连接后会自动继续。'
+          : failure is SyncProtocolException &&
+                failure.code == 'reader_upgrade_required'
           ? '请更新电脑和 iPad 后再同步批注。'
           : cancellation.isCancelled
           ? '同步已取消。'
@@ -1994,6 +2515,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       };
 
   void cancel() {
+    _dailyPaused = true;
+    _dailyTimer?.cancel();
+    _dailyTimer = null;
+    _queuedManual?.complete();
+    _queuedManual = null;
+    _queuedManualScope = null;
     _cancellation?.cancel();
     if (backgroundPendingObjects > 0) unawaited(pauseBackgroundDownloads());
   }
@@ -2105,6 +2632,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     final signingStore = _signingStore;
     if (signingStore != null) unawaited(signingStore.close());
     _timer?.cancel();
+    _dailyTimer?.cancel();
+    _queuedManual?.complete();
+    _queuedManual = null;
+    _imports?.removeListener(_importsChanged);
     _recoveryTimer?.cancel();
     _recoveryCancellation?.cancel();
     _cancellation?.cancel();

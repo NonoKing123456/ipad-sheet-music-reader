@@ -163,7 +163,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   Future<void> _refresh() async {
     final sync = widget.controller;
     if (sync.hasSyncActivity || !sync.paired) return;
-    await sync.refreshCatalog();
+    await sync.synchronize();
   }
 
   void _selectSource(String id) => setState(() {
@@ -319,6 +319,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       }
       final readable = target;
       opened = true;
+      widget.controller.setReaderActive(true);
       await Navigator.push(
         context,
         MaterialPageRoute<void>(
@@ -338,6 +339,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
         ),
       );
     } finally {
+      if (opened) widget.controller.setReaderActive(false);
       _opening = false;
       if (mounted && opened && savedQuery != null) {
         setState(() {
@@ -410,6 +412,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     initialListId: _setListId,
     initialCreate: _setListCreate,
     pageCounts: widget.controller.pageCounts,
+    onReaderActive: widget.controller.setReaderActive,
     onBack: () => setState(() {
       _setListsOpen = false;
       _setListId = null;
@@ -1189,7 +1192,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             );
           case LibraryNavKind.refresh:
             return LibraryNavigationItem(
-              label: '更新目录',
+              label: '立即同步',
               glyph: ReaderGlyph.sync,
               onTap: () => unawaited(_refresh()),
             );

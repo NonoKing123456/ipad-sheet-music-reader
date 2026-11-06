@@ -158,6 +158,28 @@ class HostScoreImportStore {
     return (source, root, target);
   }
 
+  /// A durable receipt is sufficient to acknowledge a retried operation. No
+  /// upload bytes, existing score hash or source catalogue scan is needed.
+  Future<ScoreImportReceipt?> lookup(String peerId, ScoreImportRequest request) async {
+    final (_, root, _) = await _destination(request);
+    final key = sha256.convert(utf8.encode('$peerId/${request.operationId}')).toString();
+    final recordPath = p.join(directory, '$key.json');
+    assertSafePath(directory, recordPath);
+    final record = await readJson(recordPath);
+    if (record == null) return null;
+    final fingerprint = sha256.convert(utf8.encode(jsonEncode(request.toJson()))).toString();
+    if (record['fingerprint'] != fingerprint ||
+        record['root'] != (Platform.isWindows ? root.toLowerCase() : root) ||
+        record['collectionId'] != collectionId) {
+      throw const ScoreImportFailure('import_operation_conflict', 409);
+    }
+    if (record['receipt'] != null) return ScoreImportReceipt.fromJson(asMap(record['receipt']));
+    // The copy was durable but indexing/receipt was interrupted. Finish from
+    // the host file through the existing integrity and identity checks.
+    if (record['state'] == 'created') return receive(peerId, request, const Stream.empty());
+    return null;
+  }
+
   Future<ScoreImportReceipt> receive(String peerId, ScoreImportRequest request,
       Stream<List<int>> bytes) async {
     final (source, root, target) = await _destination(request);
@@ -182,18 +204,20 @@ class HostScoreImportStore {
     final sink = staged.openWrite();
     var length = 0;
     try {
-      await for (final chunk in bytes) {
-        length += chunk.length;
-        if (length > request.length)
+      if (record?['state'] != 'created') {
+        await for (final chunk in bytes) {
+          length += chunk.length;
+          if (length > request.length)
+            throw const ScoreImportFailure('import_integrity', 422);
+          sink.add(chunk);
+          await sink.flush();
+        }
+        await sink.close();
+        if (length != request.length ||
+            (await sha256.bind(staged.openRead()).first).toString() !=
+                request.hash) {
           throw const ScoreImportFailure('import_integrity', 422);
-        sink.add(chunk);
-        await sink.flush();
-      }
-      await sink.close();
-      if (length != request.length ||
-          (await sha256.bind(staged.openRead()).first).toString() !=
-              request.hash) {
-        throw const ScoreImportFailure('import_integrity', 422);
+        }
       }
       if (record?['receipt'] != null) {
         return ScoreImportReceipt.fromJson(asMap(record!['receipt']));

@@ -178,6 +178,11 @@ class ReplicaLibraryView {
   Map<String, Object?> exportVerificationCache() => {
         for (final e in _verified.entries) e.key: e.value.toJson(),
       };
+  Map<String, Object?> exportSelectedVerificationCache(Iterable<ManifestEntry> entries) => {
+    for (final entry in entries)
+      if (_verified[_verificationKey(entry)] case final record?)
+        _verificationKey(entry): record.toJson(),
+  };
   void restoreVerificationCache(Map<String, dynamic> records) {
     for (final e in records.entries) {
       try {

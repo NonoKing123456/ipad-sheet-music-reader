@@ -27,7 +27,7 @@ HostScoreImportStore createHostScoreImportStore({
     }
   },
   register: (sourceId, relativePath) async {
-    await library.refreshImportedSource(sourceId);
+    await library.refreshImportedSource(sourceId, relativePath: relativePath);
     final source = library.sources.where((s) => s.id == sourceId).first;
     final folder = p.posix.dirname(relativePath);
     final entry = source.catalog
