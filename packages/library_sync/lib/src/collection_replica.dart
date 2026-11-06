@@ -49,6 +49,16 @@ class _CollectionDirectoryRequest {
       CollectionDirectoryIndex(sources, items, readable, ready);
 }
 
+class _CachedCollectionOpenRequest {
+  const _CachedCollectionOpenRequest(this.rootDirectory);
+  final String rootDirectory;
+  Future<ReplicaCollectionView> call() async {
+    final objects = await ReplicaLibraryView.open(
+        rootDirectory: rootDirectory, deferVerification: true);
+    return ReplicaCollectionView.open(objects, deferVerification: true);
+  }
+}
+
 /// The v1 complete-manifest contract stays unchanged. This additive index can
 /// commit metadata while only a selected subset has verified local objects.
 class ReplicaCollectionView {
@@ -64,6 +74,11 @@ class ReplicaCollectionView {
   CollectionDirectoryIndex? _directory;
   final _displayEntries = <String, LibraryEntry>{};
   int contentRevision = 0;
+  List<CatalogItem> _pendingVerification = const [];
+  int _verificationCursor = 0, _verificationEpoch = 0;
+  bool get backgroundVerificationPending =>
+      _verificationCursor < _pendingVerification.length;
+  bool get hasPendingPersistence => _dirty;
   CollectionDirectoryIndex get directory =>
       _directory ??= _directoryRequest().call();
   _CollectionDirectoryRequest _directoryRequest() =>
@@ -97,7 +112,15 @@ class ReplicaCollectionView {
     }
   }
 
-  static Future<ReplicaCollectionView> open(ReplicaLibraryView objects) async {
+  /// Restore the last durable directory and verified identities in a worker.
+  /// No object leaf is inspected before publication. Unknown files stay deferred,
+  /// and validateForRead remains mandatory even for restored ready entries.
+  static Future<ReplicaCollectionView> restoreCached(
+          {required String rootDirectory}) =>
+      Isolate.run(_CachedCollectionOpenRequest(rootDirectory).call);
+
+  static Future<ReplicaCollectionView> open(ReplicaLibraryView objects,
+      {bool deferVerification = false}) async {
     final view = ReplicaCollectionView._(objects);
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
     try {
@@ -144,10 +167,23 @@ class ReplicaCollectionView {
             });
         view.selection = OfflineSelection(
             [OfflineRule(sourceId: 'legacy', folder: '', selected: true)]);
+        if (deferVerification) {
+          for (final item in view.index!.entries) {
+            if (!item.missing && objects.hasCachedVerification(item.object)) {
+              view._readable[item.entryId] = item;
+            }
+          }
+        }
       }
       await view._replayJournal();
-      await view.refreshReady();
-      if (view.index != null && view._dirty) {
+      if (deferVerification) {
+        view._restoreCachedReady();
+        view._directory = view._directoryRequest().call();
+        view.index?.entry(''); // Transfer the lookup with the worker result.
+      } else {
+        await view.refreshReady();
+      }
+      if (!deferVerification && view.index != null && view._dirty) {
         try {
           await view._persist();
         } on FileSystemException {
@@ -160,7 +196,110 @@ class ReplicaCollectionView {
     }
   }
 
+  void _restoreCachedReady() {
+    final prior = Map<String, CatalogItem>.from(_readable);
+    _readable.clear();
+    final pending = <CatalogItem>[];
+    for (final current in currentItems) {
+      final old = prior[current.entryId];
+      if (current.missing) {
+        if (old != null) _readable[current.entryId] = old;
+        continue;
+      }
+      if (current.hash != null) pending.add(current);
+      if (old != null &&
+          old.sourceId == current.sourceId &&
+          old.hash != null &&
+          !(old.revisionId == current.revisionId &&
+              old.hash == current.hash &&
+              (old.length != current.length || old.format != current.format)) &&
+          objects.hasCachedVerification(old.object)) {
+        _readable[current.entryId] = old;
+        _ready.add(_readyKey(old));
+      } else if (old != null) {
+        _dirty = true;
+      }
+    }
+    _pendingVerification = pending;
+  }
+
+  String _readyKey(CatalogItem item) =>
+      '${item.entryId}/${item.revisionId}/${item.hash}';
+
+  void _cancelPendingVerification() {
+    _verificationEpoch++;
+    _pendingVerification = const [];
+    _verificationCursor = 0;
+  }
+
+  /// At most [limit] current objects plus their previous-readable fallbacks.
+  /// This does not hold a metadata lease across I/O: a foreground sync may start
+  /// at any await. Its identity epoch invalidates the entire stale batch before
+  /// publication. Fingerprints are keyed by immutable object identity.
+  /// Only changed rows update directory counters; persistence is coalesced by
+  /// the owner after the recovery pass, never once per batch.
+  Future<bool> verifyNextBatch(
+      {int limit = 32, SyncCancellation? cancellation}) async {
+    if (limit < 1 || limit > 64) throw ArgumentError.value(limit, 'limit');
+    cancellation?.check();
+    if (!backgroundVerificationPending) return false;
+    final epoch = _verificationEpoch;
+    final end =
+        (_verificationCursor + limit).clamp(0, _pendingVerification.length);
+    final candidates = _pendingVerification.sublist(_verificationCursor, end);
+    final verificationBefore = objects.verificationRevision;
+    try {
+      final verified = await objects.verifyObjects(
+          [for (final item in candidates) item.object],
+          cancellation: cancellation, preserveOnIoError: true);
+      if (epoch != _verificationEpoch) return false;
+      cancellation?.check();
+      final fallbacks = <CatalogItem>[];
+      for (var i = 0; i < candidates.length; i++) {
+        final item = candidates[i];
+        final old = _readable[item.entryId];
+        if (!verified[i] && old != null && !_sameItem(old, item)) {
+          fallbacks.add(old);
+        }
+      }
+      final fallbackVerified = await objects.verifyObjects(
+          [for (final item in fallbacks) item.object],
+          cancellation: cancellation, preserveOnIoError: true);
+      if (epoch != _verificationEpoch) return false;
+      cancellation?.check();
+      final fallbackById = {
+        for (var i = 0; i < fallbacks.length; i++)
+          if (fallbackVerified[i]) fallbacks[i].entryId: fallbacks[i]
+      };
+      for (var i = 0; i < candidates.length; i++) {
+        final item = candidates[i];
+        if (!_sameItem(itemFor(item.entryId), item)) continue;
+        final before = _readable[item.entryId];
+        final next = verified[i] ? item : fallbackById[item.entryId];
+        if (next == null ? before == null : _sameItem(before, next)) continue;
+        if (before != null) _ready.remove(_readyKey(before));
+        if (next == null) {
+          _readable.remove(item.entryId);
+        } else {
+          _readable[item.entryId] = next;
+          _ready.add(_readyKey(next));
+        }
+        _dirty = true;
+        // A cached full snapshot is invalidated once, not cloned for every row.
+        _snapshot = null;
+        _contentChanged(item);
+      }
+      _verificationCursor = end;
+      return backgroundVerificationPending;
+    } finally {
+      // Earlier objects may have refreshed fingerprints before a later read
+      // failed or foreground work cancelled this uncommitted batch.
+      if (objects.verificationRevision != verificationBefore) _dirty = true;
+    }
+  }
+
   Future<void> refreshReady() async {
+    _cancelPendingVerification();
     final verificationBefore = objects.verificationRevision;
     _ready.clear();
     final prior = Map<String, CatalogItem>.from(_readable);
@@ -308,6 +447,7 @@ class ReplicaCollectionView {
     } finally {
       await file.close();
     }
+    _cancelPendingVerification();
     for (final item in items) {
       _durableResolutions[item.entryId] = _resolutionKey(item);
       _resolved[item.entryId] = item;
@@ -357,6 +497,7 @@ class ReplicaCollectionView {
   }
 
   void rememberResolved(CatalogItem item) {
+    _cancelPendingVerification();
     _dirty = true;
     _resolved[item.entryId] = item;
     _ready.add('${item.entryId}/${item.revisionId}/${item.hash}');
@@ -534,6 +675,7 @@ class ReplicaCollectionView {
       throw StateError('Selected download revision is unavailable.');
     }
     if (!await objects.hasVerifiedObject(item.object)) {
+      _dirty = true;
       _ready.remove('${item.entryId}/${item.revisionId}/${item.hash}');
       _readable.remove(id);
       final current = itemFor(id);

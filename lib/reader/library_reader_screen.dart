@@ -22,6 +22,7 @@ import 'reader_tool_button.dart';
 import 'reader_spreads.dart';
 import 'desktop_reader.dart';
 import 'reader_continuous.dart';
+import 'reader_view_capabilities.dart';
 import '../library/desktop_navigation_history.dart';
 import '../theme/app_theme.dart';
 import '../theme/device_layout.dart';
@@ -74,6 +75,8 @@ class LibraryReaderScreen extends StatefulWidget {
 
 class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   bool get _isCompact => DeviceLayoutScope.isCompact(context);
+  ReaderViewCapabilities get _capabilities =>
+      ReaderViewCapabilities.of(context);
   late final ReaderSession _session;
   final TransformationController _transform = TransformationController();
   final GlobalKey _viewportKey = GlobalKey();
@@ -100,8 +103,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   bool _editing = false;
   bool _initialLoading = true;
   final _stageControls = ReaderStageController();
-  DesktopReaderPreferences? _desktopPreferences;
-  ReaderViewMode _desktopMode = ReaderViewMode.single;
+  DesktopReaderPreferences? _viewPreferences;
+  ReaderViewMode _viewMode = ReaderViewMode.single;
   FirstPageArrangement _externalArrangement = FirstPageArrangement.paired;
   final _continuous = ReaderContinuousController();
   ReaderScrollAnchor? _continuousRestore;
@@ -157,6 +160,25 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (!_capabilities.supports(_viewMode)) {
+      // Rotation changes this reading session only. Keep the user's stored
+      // layout/grouping preferences intact and never rewind to the first page.
+      _viewMode = ReaderViewMode.single;
+      _direction = 0;
+      _inputGeneration++;
+      _cancelPick();
+      _transform.value = Matrix4.identity();
+      final focus = _annotationPage ?? _visiblePage;
+      if (focus != null && focus != _session.pageKey) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              _effectiveViewMode == ReaderViewMode.single &&
+              _session.current?.target.key == focus.document) {
+            unawaited(_session.seek(focus.pageNumber, gesture: Object()));
+          }
+        });
+      }
+    }
     final route = ModalRoute.of(context);
     if (route == null) return;
     DesktopHistoryScope.of(context)?.reader(route, _leaveSafely, () {
@@ -295,17 +317,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Future<void> _openInitial() async {
     try {
-      if (!isMobileReader) {
+      // Layout capabilities are inherited; initState starts this operation
+      // before those dependencies can be read.
+      await Future<void>.value();
+      if (mounted) {
         final preferences = await DesktopReaderPreferences.open(
           p.join(
             p.dirname(widget.workspace.store.statePath),
-            'desktop-reader-view.json',
+            _isCompact ? 'tablet-reader-view.json' : 'desktop-reader-view.json',
           ),
         );
         if (!mounted) return;
         setState(() {
-          _desktopPreferences = preferences;
-          _desktopMode = preferences.mode;
+          _viewPreferences = preferences;
+          _viewMode = _capabilities.resolve(preferences.mode);
         });
       }
       if (!mounted) return;
@@ -338,7 +363,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       widget.onLoaded?.call(document);
     }
     if (_shownPage != _session.pageKey) {
-      if (!_followingContinuous && !_isCompact) _continuousNavigation++;
+      if (!_followingContinuous) _continuousNavigation++;
       _inputGeneration++;
       _cancelPick();
       _prewarmEpoch++;
@@ -359,7 +384,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _pageWatch = Stopwatch()..start();
         _presented = false;
       }
-      if (_isCompact || _effectiveDesktopMode == ReaderViewMode.continuous) {
+      if ((_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
+          _effectiveViewMode == ReaderViewMode.continuous) {
         _transform.value = Matrix4.identity();
       }
     }
@@ -665,7 +691,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         ReaderStage(
           controller: _stageControls,
           initiallyShowTools: widget.initiallyShowToolbar ? true : null,
-          fitAspectFor: _readerFitAspect,
+          fitAspectFor: _effectiveViewMode == ReaderViewMode.continuous
+              ? null
+              : _readerFitAspect,
           hasReadablePage: _visiblePage != null,
           statusLabel: workspace.unsavedCount > 0
               ? '${workspace.unsavedCount} 项未保存'
@@ -749,6 +777,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                           child: const Text('重新打开'),
                         ),
                 )
+              : _effectiveViewMode != ReaderViewMode.single
+              ? _modeContent(current, page, toggleTools)
               : _paperViewport(
                   ReaderInput(
                     onPrevious: () => _navigate(NavigationDirection.backward),
@@ -813,14 +843,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
-  ReaderViewMode get _effectiveDesktopMode =>
-      _editing && _desktopMode == ReaderViewMode.continuous
+  ReaderViewMode get _effectiveViewMode =>
+      _editing && _viewMode == ReaderViewMode.continuous
       ? ReaderViewMode.single
-      : _desktopMode;
+      : _viewMode;
   FirstPageArrangement _arrangementFor(String entryId) =>
       widget.allowAnnotations
-      ? _desktopPreferences?.arrangementFor(entryId) ??
-            FirstPageArrangement.paired
+      ? _viewPreferences?.arrangementFor(entryId) ?? FirstPageArrangement.paired
       : _externalArrangement;
 
   void _savePreference(Future<void>? operation) {
@@ -833,8 +862,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _changeView(ReaderViewMode mode) {
-    if (_writing || _editing || mode == _desktopMode) return;
-    if (_desktopMode == ReaderViewMode.continuous) {
+    if (_writing ||
+        _editing ||
+        mode == _viewMode ||
+        !_capabilities.supports(mode)) {
+      return;
+    }
+    if (_viewMode == ReaderViewMode.continuous) {
       _continuousRestore = _continuous.anchor;
       _continuousAnchorFocus = _visiblePage;
     } else if (mode == ReaderViewMode.continuous &&
@@ -842,13 +876,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _continuousRestore = null;
     }
     setState(() {
-      _desktopMode = mode;
+      _viewMode = mode;
       _direction = 0;
       _inputGeneration++;
       _cancelPick();
       _transform.value = Matrix4.identity();
     });
-    _savePreference(_desktopPreferences?.setMode(mode));
+    _savePreference(_viewPreferences?.setMode(mode));
   }
 
   void _changeArrangement(FirstPageArrangement value) {
@@ -861,7 +895,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _transform.value = Matrix4.identity();
     });
     if (widget.allowAnnotations) {
-      _savePreference(_desktopPreferences?.setArrangement(id, value));
+      _savePreference(_viewPreferences?.setArrangement(id, value));
     }
   }
 
@@ -879,7 +913,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return;
     }
     final selected = visible.pageNumber;
-    if (!_isCompact && _desktopMode == ReaderViewMode.continuous) {
+    if (_viewMode == ReaderViewMode.continuous) {
       _continuousRestore = _continuous.anchor;
       _continuousEditStart = visible;
       _continuousAnchorFocus = visible;
@@ -896,8 +930,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     if (_writing || !_editing || !await _textControls.finish() || !mounted) {
       return;
     }
-    if (!_isCompact &&
-        _desktopMode == ReaderViewMode.continuous &&
+    if (_viewMode == ReaderViewMode.continuous &&
         _session.pageKey != _continuousEditStart) {
       _continuousRestore = null;
     }
@@ -1000,7 +1033,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final focus = _visiblePage?.pageNumber ?? _session.page;
     final grouping = ReaderSpreads(
       pageCount: document?.pageCount ?? 1,
-      doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
+      doublePage: _effectiveViewMode == ReaderViewMode.spread,
       arrangement: _arrangementFor(
         document?.target.entryId ?? widget.initialTarget.entryId,
       ),
@@ -1021,7 +1054,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onNext: () => _navigate(NavigationDirection.forward),
           blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
           contentBuilder: (_) => DesktopReaderShell(
-            fitAspectFor: _effectiveDesktopMode == ReaderViewMode.continuous
+            fitAspectFor: _effectiveViewMode == ReaderViewMode.continuous
                 ? null
                 : _readerFitAspect,
             documentMenu: [
@@ -1068,7 +1101,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             },
             title: p.basename(title),
             pageLabel: pageLabel,
-            mode: _effectiveDesktopMode,
+            mode: _effectiveViewMode,
             arrangement: grouping.arrangement,
             onMenuChanged: (open) {
               if (mounted && _desktopMenuOpen != open) {
@@ -1082,7 +1115,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             onBack: () => unawaited(_back()),
             onZoom: _zoom,
             onFit: () {
-              if (_effectiveDesktopMode == ReaderViewMode.continuous) {
+              if (_effectiveViewMode == ReaderViewMode.continuous) {
                 _continuous.fit();
               } else {
                 _transform.value = Matrix4.identity();
@@ -1110,252 +1143,221 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 : '阅读状态',
             loading:
                 (_initialLoading || _session.loading) && _visiblePage != null,
-            contentBuilder: (toggleBar) {
-              if (current == null || page == null) {
-                return Center(
-                  child: _initialLoading || _session.loading
-                      ? const CircularProgressIndicator()
-                      : FilledButton(
-                          onPressed: _retryOpen,
-                          child: const Text('重新打开'),
-                        ),
-                );
-              }
-              if (_effectiveDesktopMode == ReaderViewMode.continuous) {
-                return ReaderContinuousView(
-                  key: ValueKey(current.target.key),
-                  documentKey: current.target.key,
-                  pageCount: current.pageCount,
-                  aspectFor: current.aspectFor,
-                  controller: _continuous,
-                  requestedPage: _session.page,
-                  navigationToken: _continuousNavigation,
-                  initialAnchor: _continuousRestore,
-                  controlKey: _seekRegionKey,
-                  viewportKey: _viewportKey,
-                  retainDocument: current.retain,
-                  releaseDocument: current.release,
-                  onCenterTap: toggleBar,
-                  onPrevious: () => _navigate(NavigationDirection.backward),
-                  onNext: () => _navigate(NavigationDirection.forward),
-                  pageBuilder: (number, active, ready, failed) =>
-                      _surface(current, number, active, ready, failed),
-                  previewPageBuilder: (number, pixels, ready, failed) =>
-                      _surface(
-                        current,
-                        number,
-                        false,
-                        ready,
-                        failed,
-                        previewPixels: pixels,
-                      ),
-                  onPresented: (number) {
-                    if (_effectiveDesktopMode != ReaderViewMode.continuous ||
-                        _session.current?.target.key != current.target.key) {
-                      return;
-                    }
-                    _followingContinuous = true;
-                    try {
-                      _session.followPresentedPage(
-                        PageKey(
-                          entryId: current.target.entryId,
-                          revisionId: current.target.revisionId,
-                          pageNumber: number,
-                        ),
-                      );
-                    } finally {
-                      _followingContinuous = false;
-                    }
-                    _markPresented(current, number);
-                  },
-                );
-              }
-              return LayoutBuilder(
-                builder: (context, paperConstraints) {
-                  final paperSize = Size(
-                    paperConstraints.maxWidth - 2 * ScoreLayout.pageGutter,
-                    paperConstraints.maxHeight - 2 * ScoreLayout.pageGutter,
-                  );
-                  final groups = ReaderSpreads(
-                    pageCount: current.pageCount,
-                    doublePage: _effectiveDesktopMode == ReaderViewMode.spread,
-                    arrangement: _arrangementFor(current.target.entryId),
-                  );
-                  final mode = _effectiveDesktopMode;
-                  final viewKey = (
-                    current.target.key,
-                    mode,
-                    groups.arrangement,
-                  );
-                  double aspect(int index) {
-                    final group = groups.at(index);
-                    if (!groups.doublePage) {
-                      return current.aspectFor(group.first);
-                    }
-                    return readerSpreadAspect(
-                      paperSize,
-                      group,
-                      current.aspectFor,
-                    );
-                  }
-
-                  ReaderPrewarmPage? warm;
-                  final next = _terminalVisiblePage == null
-                      ? null
-                      : _prewarmScore;
-                  if (next != null) {
-                    final nextGroups = ReaderSpreads(
-                      pageCount: next.pageCount,
-                      doublePage: groups.doublePage,
-                      arrangement: _arrangementFor(next.target.entryId),
-                    );
-                    final first = nextGroups.at(1);
-                    warm = ReaderPrewarmPage(
-                      documentKey: (
-                        next.target.key,
-                        mode,
-                        nextGroups.arrangement,
-                      ),
-                      aspect: !nextGroups.doublePage
-                          ? next.aspectFor(first.first)
-                          : readerSpreadAspect(
-                              paperSize,
-                              first,
-                              next.aspectFor,
-                            ),
-                      retainDocument: next.retain,
-                      releaseDocument: next.release,
-                      pageBuilder: (_, active, ready, failed) =>
-                          ReaderSpreadSurface(
-                            spread: first,
-                            aspectFor: next.aspectFor,
-                            onReady: ready,
-                            onError: failed,
-                            pageBuilder: (number, pageReady, pageFailed) =>
-                                _surface(
-                                  next,
-                                  number,
-                                  active,
-                                  pageReady,
-                                  pageFailed,
-                                ),
-                          ),
-                    );
-                  }
-
-                  return _paperViewport(
-                    ReaderInput(
-                      onPrevious: () => _navigate(NavigationDirection.backward),
-                      onNext: () => _navigate(NavigationDirection.forward),
-                      onCenterTap: _tool != null || _textTool || _picking
-                          ? null
-                          : toggleBar,
-                      allowPointerPageTurns:
-                          _tool == null &&
-                          !_textTool &&
-                          !_picking &&
-                          _scale <= 1.01,
-                      pageAspect: aspect(
-                        groups
-                            .forPage(
-                              _visiblePage?.document == current.target.key
-                                  ? _visiblePage!.pageNumber
-                                  : _session.page,
-                            )
-                            .index,
-                      ),
-                      mouseInk: _editing && _tool != null,
-                      touchInk: _editing && _tool != null,
-                      mouseWheel: true,
-                      panInsets: _panInsets,
-                      editing: _editing,
-                      gestureGeneration: _inputGeneration,
-                      transform: _transform,
-                      viewportKey: _viewportKey,
-                      touchControlKey: _seekRegionKey,
-                      textTool: _textTool,
-                      textSelectionKey: _textSelectionKey,
-                      textControls: _picking ? null : _textControls,
-                      ignorePointerGestures:
-                          _desktopMenuOpen || _quickPageMenu.isOpen,
-                      onTransformGestureChanged: (active) =>
-                          setState(() => _touchTransforming = active),
-                      child: ReaderPageWindow(
-                        documentKey: viewKey,
-                        pageNumber: groups.forPage(_session.page).index,
-                        pageCount: groups.count,
-                        aspectFor: aspect,
-                        direction: _direction,
-                        requestedAt: _requestedAt,
-                        presentationClock: widget.presentationClock,
-                        forwardWindowOnly: true,
-                        paperWidthTransition: true,
-                        shortPageTransition: true,
-                        onWillPresent: () =>
-                            _transform.value = Matrix4.identity(),
-                        prewarm: warm,
-                        surfaceBackground: Colors.transparent,
-                        retainDocument: current.retain,
-                        releaseDocument: current.release,
-                        holdPresentation: _writing,
-                        onSelected: (key, index) {
-                          if (key != viewKey ||
-                              _effectiveDesktopMode != mode ||
-                              _session.current?.target.key !=
-                                  current.target.key ||
-                              _arrangementFor(current.target.entryId) !=
-                                  groups.arrangement) {
-                            return;
-                          }
-                          final group = groups.at(index);
-                          _selectVisible(
-                            current,
-                            group.contains(_session.page)
-                                ? _session.page
-                                : group.first,
-                          );
-                        },
-                        onPresented: (key, index) {
-                          if (key != viewKey ||
-                              _effectiveDesktopMode != mode ||
-                              _session.current?.target.key !=
-                                  current.target.key ||
-                              _arrangementFor(current.target.entryId) !=
-                                  groups.arrangement) {
-                            return;
-                          }
-                          final group = groups.at(index);
-                          _markPresented(
-                            current,
-                            group.contains(_session.page)
-                                ? _session.page
-                                : group.first,
-                          );
-                        },
-                        readyPageBuilder: (index, active, ready, failed) =>
-                            ReaderSpreadSurface(
-                              spread: groups.at(index),
-                              aspectFor: current.aspectFor,
-                              onReady: ready,
-                              onError: failed,
-                              pageBuilder: (number, pageReady, pageFailed) =>
-                                  _surface(
-                                    current,
-                                    number,
-                                    active,
-                                    pageReady,
-                                    pageFailed,
-                                  ),
-                            ),
-                      ),
-                    ),
-                  );
-                },
-              );
-            },
+            contentBuilder: (toggleBar) =>
+                _modeContent(current, page, toggleBar),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _modeContent(
+    LoadedScore? current,
+    PageKey? page,
+    VoidCallback toggleBar,
+  ) {
+    if (current == null || page == null) {
+      return Center(
+        child: _initialLoading || _session.loading
+            ? const CircularProgressIndicator()
+            : FilledButton(onPressed: _retryOpen, child: const Text('重新打开')),
+      );
+    }
+    if (_effectiveViewMode == ReaderViewMode.continuous) {
+      return ReaderContinuousView(
+        key: ValueKey(current.target.key),
+        documentKey: current.target.key,
+        pageCount: current.pageCount,
+        aspectFor: current.aspectFor,
+        controller: _continuous,
+        rasterPageLimit: _isCompact ? 2 : 4,
+        touchPanHorizontal: _isCompact,
+        edgeToEdge: _isCompact,
+        requestedPage: _session.page,
+        navigationToken: _continuousNavigation,
+        initialAnchor: _continuousRestore,
+        controlKey: _seekRegionKey,
+        viewportKey: _viewportKey,
+        retainDocument: current.retain,
+        releaseDocument: current.release,
+        onCenterTap: toggleBar,
+        onPrevious: () => _navigate(NavigationDirection.backward),
+        onNext: () => _navigate(NavigationDirection.forward),
+        pageBuilder: (number, active, ready, failed) =>
+            _surface(current, number, active, ready, failed),
+        previewPageBuilder: (number, pixels, ready, failed) => _surface(
+          current,
+          number,
+          false,
+          ready,
+          failed,
+          previewPixels: pixels,
+        ),
+        onPresented: (number) {
+          if (_effectiveViewMode != ReaderViewMode.continuous ||
+              _session.current?.target.key != current.target.key) {
+            return;
+          }
+          _followingContinuous = true;
+          try {
+            _session.followPresentedPage(
+              PageKey(
+                entryId: current.target.entryId,
+                revisionId: current.target.revisionId,
+                pageNumber: number,
+              ),
+            );
+          } finally {
+            _followingContinuous = false;
+          }
+          _markPresented(current, number);
+        },
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, paperConstraints) {
+        final paperSize = Size(
+          paperConstraints.maxWidth - readerPagePadding(context).horizontal,
+          paperConstraints.maxHeight - readerPagePadding(context).vertical,
+        );
+        final groups = ReaderSpreads(
+          pageCount: current.pageCount,
+          doublePage: _effectiveViewMode == ReaderViewMode.spread,
+          arrangement: _arrangementFor(current.target.entryId),
+        );
+        final mode = _effectiveViewMode;
+        final viewKey = (current.target.key, mode, groups.arrangement);
+        double aspect(int index) {
+          final group = groups.at(index);
+          if (!groups.doublePage) {
+            return current.aspectFor(group.first);
+          }
+          return readerSpreadAspect(paperSize, group, current.aspectFor);
+        }
+
+        ReaderPrewarmPage? warm;
+        final next = _terminalVisiblePage == null ? null : _prewarmScore;
+        if (next != null) {
+          final nextGroups = ReaderSpreads(
+            pageCount: next.pageCount,
+            doublePage: groups.doublePage,
+            arrangement: _arrangementFor(next.target.entryId),
+          );
+          final first = nextGroups.at(1);
+          warm = ReaderPrewarmPage(
+            documentKey: (next.target.key, mode, nextGroups.arrangement),
+            aspect: !nextGroups.doublePage
+                ? next.aspectFor(first.first)
+                : readerSpreadAspect(paperSize, first, next.aspectFor),
+            retainDocument: next.retain,
+            releaseDocument: next.release,
+            pageBuilder: (_, active, ready, failed) => ReaderSpreadSurface(
+              spread: first,
+              aspectFor: next.aspectFor,
+              onReady: ready,
+              onError: failed,
+              pageBuilder: (number, pageReady, pageFailed) =>
+                  _surface(next, number, active, pageReady, pageFailed),
+            ),
+          );
+        }
+
+        return _paperViewport(
+          ReaderInput(
+            onPrevious: () => _navigate(NavigationDirection.backward),
+            onNext: () => _navigate(NavigationDirection.forward),
+            onCenterTap: _tool != null || _textTool || _picking
+                ? null
+                : toggleBar,
+            allowPointerPageTurns:
+                _tool == null && !_textTool && !_picking && _scale <= 1.01,
+            pageAspect: aspect(
+              groups
+                  .forPage(
+                    _visiblePage?.document == current.target.key
+                        ? _visiblePage!.pageNumber
+                        : _session.page,
+                  )
+                  .index,
+            ),
+            mouseInk: _editing && _tool != null,
+            touchInk: _editing && _tool != null,
+            mouseWheel: !_isCompact,
+            panInsets: _panInsets,
+            editing: _editing,
+            gestureGeneration: _inputGeneration,
+            transform: _transform,
+            viewportKey: _viewportKey,
+            touchControlKey: _seekRegionKey,
+            textTool: _textTool,
+            textSelectionKey: _textSelectionKey,
+            textControls: _picking ? null : _textControls,
+            ignorePointerGestures: _desktopMenuOpen || _quickPageMenu.isOpen,
+            onTransformGestureChanged: (active) =>
+                setState(() => _touchTransforming = active),
+            child: ReaderPageWindow(
+              documentKey: viewKey,
+              pageNumber: groups.forPage(_session.page).index,
+              pageCount: groups.count,
+              aspectFor: aspect,
+              direction: _direction,
+              requestedAt: _requestedAt,
+              presentationClock: widget.presentationClock,
+              forwardWindowOnly: true,
+              paperWidthTransition: true,
+              shortPageTransition: true,
+              onWillPresent: () => _transform.value = Matrix4.identity(),
+              prewarm: warm,
+              surfaceBackground: Colors.transparent,
+              retainDocument: current.retain,
+              releaseDocument: current.release,
+              holdPresentation: _writing,
+              onSelected: (key, index) {
+                if (key != viewKey ||
+                    _effectiveViewMode != mode ||
+                    _session.current?.target.key != current.target.key ||
+                    _arrangementFor(current.target.entryId) !=
+                        groups.arrangement) {
+                  return;
+                }
+                final group = groups.at(index);
+                _selectVisible(
+                  current,
+                  group.contains(_session.page) ? _session.page : group.first,
+                );
+              },
+              onPresented: (key, index) {
+                if (key != viewKey ||
+                    _effectiveViewMode != mode ||
+                    _session.current?.target.key != current.target.key ||
+                    _arrangementFor(current.target.entryId) !=
+                        groups.arrangement) {
+                  return;
+                }
+                final group = groups.at(index);
+                _markPresented(
+                  current,
+                  group.contains(_session.page) ? _session.page : group.first,
+                );
+              },
+              readyPageBuilder: (index, active, ready, failed) =>
+                  ReaderSpreadSurface(
+                    spread: groups.at(index),
+                    aspectFor: current.aspectFor,
+                    onReady: ready,
+                    onError: failed,
+                    pageBuilder: (number, pageReady, pageFailed) => _surface(
+                      current,
+                      number,
+                      active,
+                      pageReady,
+                      pageFailed,
+                    ),
+                  ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1397,7 +1399,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       );
     }
     if (_terminalVisiblePage != null &&
-        (_isCompact || _effectiveDesktopMode != ReaderViewMode.continuous)) {
+        (_effectiveViewMode != ReaderViewMode.continuous)) {
       unawaited(_prewarmNext());
     }
   }
@@ -1416,8 +1418,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       pageNumber: number,
     );
     final editableSpread =
-        !_isCompact &&
-        _effectiveDesktopMode == ReaderViewMode.spread &&
+        _effectiveViewMode == ReaderViewMode.spread &&
         identical(document, _visibleDocument) &&
         _visiblePage != null &&
         _session.current == document &&
@@ -1439,10 +1440,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             page: document.pdf!.pages[number - 1],
             active: active,
             allowDetail:
-                _isCompact ||
-                _effectiveDesktopMode == ReaderViewMode.continuous ||
+                (_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
+                _effectiveViewMode == ReaderViewMode.continuous ||
                 (identical(document, _visibleDocument) &&
-                    (_effectiveDesktopMode == ReaderViewMode.spread
+                    (_effectiveViewMode == ReaderViewMode.spread
                         ? ReaderSpreads(
                             pageCount: document.pageCount,
                             doublePage: true,
@@ -1499,7 +1500,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             enabled:
                 active &&
                 _editing &&
-                (_isCompact ||
+                ((_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
                     editableSpread ||
                     (_editing &&
                         surfacePage == _visiblePage &&
@@ -1551,7 +1552,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _session.pageKey != visible) {
       return null;
     }
-    final last = !_isCompact && _effectiveDesktopMode == ReaderViewMode.spread
+    final last = _effectiveViewMode == ReaderViewMode.spread
         ? ReaderSpreads(
             pageCount: document.pageCount,
             doublePage: true,
@@ -1738,7 +1739,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final document = _visibleDocument ?? _session.current;
     if (document == null) return 1;
     final number = _visiblePage?.pageNumber ?? _session.page;
-    if (!_isCompact && _effectiveDesktopMode == ReaderViewMode.spread) {
+    if (_effectiveViewMode == ReaderViewMode.spread) {
       final spread = ReaderSpreads(
         pageCount: document.pageCount,
         doublePage: true,
@@ -1990,6 +1991,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             widget.headerAction!,
             const SizedBox(width: ScoreSpace.xs),
           ],
+          if (_capabilities.multipleModes) _compactModeMenu(),
           if (document != null)
             TextButton(
               onPressed: _writing ? null : _jumpDialog,
@@ -2036,6 +2038,58 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
+  Widget _compactModeMenu() {
+    final arrangement = _arrangementFor(
+      _session.current?.target.entryId ?? widget.initialTarget.entryId,
+    );
+    return MenuAnchor(
+      onOpen: () => setState(() => _desktopMenuOpen = true),
+      onClose: () => setState(() => _desktopMenuOpen = false),
+      style: const MenuStyle(
+        minimumSize: WidgetStatePropertyAll(Size(ScoreLayout.menuWidth, 0)),
+      ),
+      menuChildren: [
+        for (final mode in ReaderViewMode.values)
+          MenuItemButton(
+            key: ValueKey(('ipad-reader-mode', mode)),
+            onPressed: _writing || _editing || !_capabilities.supports(mode)
+                ? null
+                : () => _changeView(mode),
+            trailingIcon: _effectiveViewMode == mode
+                ? const ReaderIcon(ReaderGlyph.check)
+                : null,
+            child: Text(switch (mode) {
+              ReaderViewMode.single => '单页',
+              ReaderViewMode.spread => '双页',
+              ReaderViewMode.continuous => '连续',
+            }),
+          ),
+        if (_effectiveViewMode == ReaderViewMode.spread)
+          for (final value in FirstPageArrangement.values)
+            MenuItemButton(
+              key: ValueKey(('ipad-reader-arrangement', value)),
+              onPressed: _writing || _editing
+                  ? null
+                  : () => _changeArrangement(value),
+              trailingIcon: arrangement == value
+                  ? const ReaderIcon(ReaderGlyph.check)
+                  : null,
+              child: Text(
+                value == FirstPageArrangement.alone ? '首页单独' : '1、2页并排',
+              ),
+            ),
+      ],
+      builder: (context, controller, _) => ReaderActionButton(
+        key: const ValueKey('ipad-reader-mode-button'),
+        label: '阅读模式',
+        icon: const ReaderIcon(ReaderGlyph.book),
+        onPressed: _writing
+            ? null
+            : () => controller.isOpen ? controller.close() : controller.open(),
+      ),
+    );
+  }
+
   Future<void> _navigate(NavigationDirection direction) async {
     if (!await _textControls.finish() || !mounted) return;
     if (_picking) setState(_cancelPick);
@@ -2048,9 +2102,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return;
     }
     _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
-    if (!_isCompact && _effectiveDesktopMode == ReaderViewMode.spread) {
+    if (_effectiveViewMode == ReaderViewMode.spread) {
       final arrangements =
-          _desktopPreferences?.arrangements ??
+          _viewPreferences?.arrangements ??
           const <String, FirstPageArrangement>{};
       final external = _externalArrangement;
       unawaited(
@@ -2078,7 +2132,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Widget _footer() {
-    if ((!_isCompact && _effectiveDesktopMode == ReaderViewMode.continuous) ||
+    if ((_effectiveViewMode == ReaderViewMode.continuous) ||
         _dotsSuppressed ||
         _writing ||
         _textDraftActive ||
@@ -2117,7 +2171,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _zoom(double factor) {
-    if (!_isCompact && _effectiveDesktopMode == ReaderViewMode.continuous) {
+    if (_effectiveViewMode == ReaderViewMode.continuous) {
       _continuous.zoom(factor);
       return;
     }

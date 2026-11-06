@@ -15,6 +15,7 @@ import 'package:library_sync/library_sync.dart' show OfflineRule;
 
 import '../reader/annotation_canvas.dart';
 import 'sync_controller.dart';
+import 'source_history_dialog.dart';
 import 'qr_scanner.dart';
 
 String _contentSize(int bytes) => bytes >= 1024 * 1024 * 1024
@@ -263,6 +264,24 @@ class _SyncScreenState extends State<SyncScreen> {
                                     ? '${sync.offlineCount} 份曲谱可离线阅读'
                                     : '更新目录后选择需要下载的曲谱',
                               ),
+                              if (sync.offlineMissingEntries.isNotEmpty)
+                                TextButton(
+                                  key: const ValueKey('source-history-entry'),
+                                  onPressed: () => unawaited(
+                                    showSourceHistoryDialog(
+                                      context,
+                                      controller: sync,
+                                    ),
+                                  ),
+                                  child: Text(
+                                    '历史源记录 · ${sync.offlineMissingEntries.length}',
+                                    style: const TextStyle(
+                                      fontFeatures: [
+                                        FontFeature.tabularFigures(),
+                                      ],
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                         ),

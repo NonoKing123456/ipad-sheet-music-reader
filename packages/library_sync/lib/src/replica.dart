@@ -104,12 +104,15 @@ class ReplicaVerificationStats {
       required this.localHashBytesRead,
       required this.downloadObjectsVerified,
       required this.downloadBytesReceived,
-      required this.cachedObjectsReused});
+      required this.cachedObjectsReused,
+      required this.objectTypeChecks,
+      required this.objectStatChecks});
   final int localHashOperations;
   final int localHashBytesRead;
   final int downloadObjectsVerified;
   final int downloadBytesReceived;
   final int cachedObjectsReused;
+  final int objectTypeChecks, objectStatChecks;
 }
 
 class _VerifiedObject {
@@ -162,12 +165,15 @@ class ReplicaLibraryView {
   int _localHashOperations = 0, _localHashBytesRead = 0;
   int _downloadObjectsVerified = 0, _downloadBytesReceived = 0;
   int _cachedObjectsReused = 0;
+  int _objectTypeChecks = 0, _objectStatChecks = 0;
   ReplicaVerificationStats get verificationStats => ReplicaVerificationStats(
       localHashOperations: _localHashOperations,
       localHashBytesRead: _localHashBytesRead,
       downloadObjectsVerified: _downloadObjectsVerified,
       downloadBytesReceived: _downloadBytesReceived,
-      cachedObjectsReused: _cachedObjectsReused);
+      cachedObjectsReused: _cachedObjectsReused,
+      objectTypeChecks: _objectTypeChecks,
+      objectStatChecks: _objectStatChecks);
   SyncManifest? get manifest => _manifest;
   Map<String, Object?> exportVerificationCache() => {
         for (final e in _verified.entries) e.key: e.value.toJson(),
@@ -187,11 +193,17 @@ class ReplicaLibraryView {
 
   String get _indexPath => p.join(rootDirectory, 'manifest.json');
   static Future<ReplicaLibraryView> open(
-      {required String rootDirectory, bool verifyAll = false}) async {
+      {required String rootDirectory,
+      bool verifyAll = false,
+      bool deferVerification = false}) async {
+    if (verifyAll && deferVerification) {
+      throw ArgumentError('A full check cannot be deferred.');
+    }
     final result = ReplicaLibraryView._(p.normalize(p.absolute(rootDirectory)));
     final lease = await DirectoryLease.acquire(result.rootDirectory);
     try {
-      await result._reloadAndVerify(verifyAll: verifyAll);
+      await result._reloadAndVerify(
+          verifyAll: verifyAll, deferVerification: deferVerification);
       return result;
     } finally {
       await lease.close();
@@ -211,7 +223,8 @@ class ReplicaLibraryView {
     }
   }
 
-  Future<void> _reloadAndVerify({required bool verifyAll}) async {
+  Future<void> _reloadAndVerify(
+      {required bool verifyAll, bool deferVerification = false}) async {
     _presentation = null;
     final json = await readJson(_indexPath);
     _ready.clear();
@@ -235,11 +248,13 @@ class ReplicaLibraryView {
         _verificationDirty = true;
       }
       final entries = _manifest!.entries.where((e) => !e.missing).toList();
-      final verified = await verifyObjects(entries, verifyAll: verifyAll);
+      final verified = deferVerification
+          ? [for (final entry in entries) hasCachedVerification(entry)]
+          : await verifyObjects(entries, verifyAll: verifyAll);
       for (var i = 0; i < entries.length; i++) {
         if (verified[i]) _ready.add(_objectPath(entries[i]));
       }
-      if (_verificationDirty) {
+      if (_verificationDirty && !deferVerification) {
         await writeJson(
             _indexPath, _indexJson(_manifest!, _generation, _savedUtc));
         _verificationDirty = false;
@@ -266,6 +281,18 @@ class ReplicaLibraryView {
 
   // A metadata key must not repeat the filesystem guard at every cache lookup.
   String _verificationKey(ManifestEntry e) => p.basename(_objectPath(e));
+
+  /// Last durable verification only, without claiming a fresh filesystem check.
+  /// Callers may restore previously readable metadata with this fingerprint;
+  /// every actual read must still call [hasVerifiedObject].
+  bool hasCachedVerification(ManifestEntry entry) {
+    final record = _verified[_verificationKey(entry)];
+    return !entry.missing &&
+        entry.hash != null &&
+        record?.hash == entry.hash &&
+        record?.length == entry.length;
+  }
+
   void _forget(ManifestEntry e) {
     if (_ready.remove(_objectPath(e))) _presentation = null;
     if (_verified.remove(_verificationKey(e)) != null) {
@@ -344,31 +371,47 @@ class ReplicaLibraryView {
   /// checks its stat and hashes changed/uncached bytes. Reading one score uses
   /// [hasVerifiedObject] and repeats the complete path guard independently.
   Future<List<bool>> verifyObjects(List<ManifestEntry> entries,
-      {bool verifyAll = false}) async {
+      {bool verifyAll = false,
+      SyncCancellation? cancellation,
+      bool preserveOnIoError = false}) async {
     if (entries.isEmpty) return const [];
     assertSafePath(rootDirectory, p.join(rootDirectory, 'objects'));
     final results = <bool>[];
     for (final entry in entries) {
+      cancellation?.check();
       results.add(await _hasVerifiedObject(entry,
-          verifyAll: verifyAll, checkParents: false));
+          verifyAll: verifyAll,
+          checkParents: false,
+          preserveOnIoError: preserveOnIoError));
+      cancellation?.check();
     }
     return results;
   }
 
   Future<bool> _hasVerifiedObject(ManifestEntry e,
-      {required bool verifyAll, required bool checkParents}) async {
+      {required bool verifyAll,
+      required bool checkParents,
+      bool preserveOnIoError = false}) async {
     final file = File(checkParents ? objectPath(e) : _objectPath(e));
+    _objectTypeChecks++;
     final type = FileSystemEntity.typeSync(file.path, followLinks: false);
     if (type == FileSystemEntityType.link) {
       throw const FileSystemException(
           'Linked sync/source paths are forbidden.');
     }
     if (type != FileSystemEntityType.file) {
+      if (preserveOnIoError && type == FileSystemEntityType.notFound) {
+        await _confirmAbsent(file);
+      }
       _forget(e);
       return false;
     }
     try {
+      _objectStatChecks++;
       final before = await file.stat();
+      if (preserveOnIoError && before.type == FileSystemEntityType.notFound) {
+        await _confirmAbsent(file);
+      }
       if (before.size != e.length || e.hash == null) {
         _forget(e);
         return false;
@@ -387,6 +430,7 @@ class ReplicaLibraryView {
       }
 
       final hash = (await sha256.bind(countedBytes()).first).toString();
+      _objectStatChecks++;
       final after = await file.stat();
       final stable = _VerifiedObject(e.hash!, before.size,
               before.modified.microsecondsSinceEpoch, before.mode)
@@ -398,9 +442,24 @@ class ReplicaLibraryView {
       _remember(e, after);
       return true;
     } on FileSystemException {
+      if (preserveOnIoError) rethrow;
       _forget(e);
       return false;
     }
+  }
+
+  // getType/stat may report notFound for permission/protected-data errors too.
+  // Only an explicit OS absence may invalidate cached availability in recovery.
+  Future<void> _confirmAbsent(File file) async {
+    try {
+      await file.length();
+    } on FileSystemException catch (failure) {
+      final code = failure.osError?.errorCode;
+      if (code == 2 || (Platform.isWindows && code == 3)) return;
+      rethrow;
+    }
+    throw const FileSystemException(
+        'Object metadata is temporarily unavailable.');
   }
 
   /// Transfer into a private temporary file. A failure never replaces a valid

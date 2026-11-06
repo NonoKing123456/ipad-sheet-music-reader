@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
 import 'reader_page_window.dart';
+import '../theme/tokens.dart';
 
 class ReaderScrollAnchor {
   const ReaderScrollAnchor(this.page, this.fraction, this.horizontalFraction);
@@ -68,6 +69,9 @@ class ReaderContinuousView extends StatefulWidget {
     this.viewportKey,
     this.retainDocument,
     this.releaseDocument,
+    this.rasterPageLimit = 4,
+    this.touchPanHorizontal = false,
+    this.edgeToEdge = false,
   });
   final Object documentKey;
   final int pageCount, requestedPage, navigationToken;
@@ -80,6 +84,12 @@ class ReaderContinuousView extends StatefulWidget {
   final VoidCallback? onCenterTap, onPrevious, onNext;
   final GlobalKey? controlKey, viewportKey;
   final VoidCallback? retainDocument, releaseDocument;
+
+  /// Tablet limits decoded page residency while retaining the same geometry,
+  /// navigation and low-resolution previews for every visible page.
+  final int rasterPageLimit;
+  final bool touchPanHorizontal;
+  final bool edgeToEdge;
   @override
   State<ReaderContinuousView> createState() => _ReaderContinuousViewState();
 }
@@ -92,8 +102,12 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   Set<int> _visible = {};
   Size _viewport = Size.zero;
   double _paperWidth = 0;
+  double get _sideInset => widget.edgeToEdge ? 0 : ScoreSpace.lg;
+  double get _pageTopInset => widget.edgeToEdge ? 0 : ScoreSpace.sm;
+  double _extent(int index) => _prefix[index + 1] - _prefix[index];
   double get _paperLeft =>
-      (math.max(_viewport.width, _paperWidth + 32) - _paperWidth) / 2;
+      (math.max(_viewport.width, _paperWidth + 2 * _sideInset) - _paperWidth) /
+      2;
   int get _previewBudget => math.min(
     256000,
     continuousPreviewPixels ~/ math.max(1, _visible.difference(_window).length),
@@ -173,7 +187,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         : 0.0;
     return ReaderScrollAnchor(
       index + 1,
-      ((_offset - _prefix[index]) / (_heights[index] + 16)).clamp(0.0, 1.0),
+      ((_offset - _prefix[index]) / _extent(index)).clamp(0.0, 1.0),
       horizontal,
     );
   }
@@ -195,7 +209,12 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
       _pendingAnchor = null;
       if (zoom != null) {
         final index = zoom.$1.clamp(0, widget.pageCount - 1);
-        _jump(_prefix[index] + 8 + zoom.$2 * _heights[index] - zoom.$3.dy);
+        _jump(
+          _prefix[index] +
+              _pageTopInset +
+              zoom.$2 * _heights[index] -
+              zoom.$3.dy,
+        );
         if (_horizontal.hasClients) {
           _horizontal.jumpTo(
             (_paperLeft + zoom.$4 * _paperWidth - zoom.$3.dx).clamp(
@@ -206,7 +225,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         }
       } else if (anchor != null) {
         final index = (anchor.page - 1).clamp(0, widget.pageCount - 1);
-        _jump(_prefix[index] + anchor.fraction * (_heights[index] + 16));
+        _jump(_prefix[index] + anchor.fraction * _extent(index));
         if (_horizontal.hasClients) {
           _horizontal.jumpTo(
             (anchor.horizontalFraction * _horizontal.position.maxScrollExtent)
@@ -223,7 +242,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         i < widget.pageCount && _prefix[i] < _offset + _viewport.height;
         i++
       ) {
-        final top = _prefix[i] + 8, bottom = top + _heights[i];
+        final top = _prefix[i] + _pageTopInset, bottom = top + _heights[i];
         visible[i + 1] = math.max(
           0,
           math.min(bottom, _offset + _viewport.height) - math.max(top, _offset),
@@ -240,14 +259,16 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         if (navigationFocus != null && visible.containsKey(navigationFocus))
           navigationFocus,
         ...priority,
-      }.take(4).toSet();
+      }.take(widget.rasterPageLimit).toSet();
       for (
         var distance = 0;
-        nextWindow.length < math.min(4, widget.pageCount);
+        nextWindow.length < math.min(widget.rasterPageLimit, widget.pageCount);
         distance++
       ) {
         for (final page in [primary + distance, primary - distance]) {
-          if (page >= 1 && page <= widget.pageCount && nextWindow.length < 4) {
+          if (page >= 1 &&
+              page <= widget.pageCount &&
+              nextWindow.length < widget.rasterPageLimit) {
             nextWindow.add(page);
           }
         }
@@ -285,10 +306,9 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
     _requestedPresentation = null;
     final index = _indexAt(_offset + focal.dy);
     final fraction =
-        ((_offset + focal.dy - _prefix[index] - 8) / _heights[index]).clamp(
-          0.0,
-          1.0,
-        );
+        ((_offset + focal.dy - _prefix[index] - _pageTopInset) /
+                _heights[index])
+            .clamp(0.0, 1.0);
     final horizontalOffset = _horizontal.hasClients ? _horizontal.offset : 0.0;
     final fractionX = ((horizontalOffset + focal.dx - _paperLeft) / _paperWidth)
         .clamp(0.0, 1.0);
@@ -333,7 +353,8 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final width =
-          math.max(1.0, constraints.maxWidth - 32) * widget.controller.scale;
+          math.max(1.0, constraints.maxWidth - 2 * _sideInset) *
+          widget.controller.scale;
       if (_paperWidth != width || _heights.length != widget.pageCount) {
         if (_heights.isNotEmpty &&
             _pendingAnchor == null &&
@@ -346,13 +367,19 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
         for (var page = 1; page <= widget.pageCount; page++) {
           final height = _paperWidth / widget.aspectFor(page);
           _heights.add(height);
-          _prefix.add(_prefix.last + height + 16);
+          final gap = widget.edgeToEdge && page == widget.pageCount
+              ? 0
+              : ScoreSpace.lg;
+          _prefix.add(_prefix.last + height + gap);
         }
         _layoutPending = true;
         _schedule();
       }
       _viewport = constraints.biggest;
-      final contentWidth = math.max(constraints.maxWidth, _paperWidth + 32);
+      final contentWidth = math.max(
+        constraints.maxWidth,
+        _paperWidth + 2 * _sideInset,
+      );
       return Listener(
         key: widget.viewportKey,
         behavior: HitTestBehavior.opaque,
@@ -390,6 +417,14 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
               );
             } else {
               _jump(_offset - details.focalPointDelta.dy);
+              if (widget.touchPanHorizontal && _horizontal.hasClients) {
+                _horizontal.jumpTo(
+                  (_horizontal.offset - details.focalPointDelta.dx).clamp(
+                    0.0,
+                    _horizontal.position.maxScrollExtent,
+                  ),
+                );
+              }
             }
           },
           child: SingleChildScrollView(
@@ -402,19 +437,23 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
               child: ListView.builder(
                 key: const ValueKey('continuous-page-list'),
                 controller: _vertical,
+                padding: widget.edgeToEdge ? EdgeInsets.zero : null,
                 physics: const NeverScrollableScrollPhysics(),
                 scrollCacheExtent: ScrollCacheExtent.pixels(
                   _viewport.height * .6,
                 ),
                 itemCount: widget.pageCount,
-                itemExtentBuilder: (index, _) => _heights[index] + 16,
+                itemExtentBuilder: (index, _) => _extent(index),
                 itemBuilder: (context, index) {
                   final number = index + 1;
                   final preview =
                       !_window.contains(number) &&
                       _visible.contains(number) &&
                       widget.previewPageBuilder != null;
-                  return Center(
+                  return Align(
+                    alignment: widget.edgeToEdge
+                        ? Alignment.topCenter
+                        : Alignment.center,
                     child: SizedBox(
                       width: _paperWidth,
                       height: _heights[index],

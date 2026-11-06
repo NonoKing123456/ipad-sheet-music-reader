@@ -40,6 +40,8 @@ class ReaderRouteVisibilityObserver extends NavigatorObserver
         .any((next) => next is ModalRoute && next.opaque);
   }
 
+  bool tracks(Route<dynamic>? route) => _routes.contains(route);
+
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     if (previousRoute == null) _routes.clear();
@@ -73,6 +75,7 @@ class ReaderRouteVisibilityObserver extends NavigatorObserver
 final readerRouteVisibility = ReaderRouteVisibilityObserver();
 const _readerActivityChannel = MethodChannel('score_reader/reader_activity');
 int _readerWakeSerial = 0;
+final _readerStages = <_ReaderStageState>[];
 
 class ReaderStageController {
   VoidCallback? _hide;
@@ -164,11 +167,19 @@ class _ReaderStageState extends State<ReaderStage>
     );
   }
 
-  void _updateWake() => _setWake(
-    widget.hasReadablePage &&
-        _foreground &&
-        readerRouteVisibility.isVisible(_route),
-  );
+  bool get _routeVisible => readerRouteVisibility.tracks(_route)
+      ? readerRouteVisibility.isVisible(_route)
+      : (_route?.isCurrent ?? true);
+
+  void _updateWake() {
+    _setWake(widget.hasReadablePage && _foreground && _routeVisible);
+    _updateSystemUi();
+  }
+
+  void _routeVisibilityChanged() {
+    _lastSystemOverlays = null;
+    _updateWake();
+  }
 
   @override
   void didUpdateWidget(covariant ReaderStage oldWidget) {
@@ -195,6 +206,7 @@ class _ReaderStageState extends State<ReaderStage>
       if (show) _reserveTools = true;
     });
     widget.onToolsVisibilityChanged?.call(show);
+    _updateSystemUi();
     if (_reduceMotion) {
       _animation.value = show ? 1 : 0;
     } else {
@@ -223,6 +235,7 @@ class _ReaderStageState extends State<ReaderStage>
   @override
   void initState() {
     super.initState();
+    _readerStages.add(this);
     widget.controller?._hide = _hideFromButton;
     _animation = AnimationController(
       vsync: this,
@@ -237,9 +250,8 @@ class _ReaderStageState extends State<ReaderStage>
     _animation.addListener(_measureObstruction);
     _animation.addStatusListener(_toolsAnimationStatus);
     WidgetsBinding.instance.addObserver(this);
-    readerRouteVisibility.addListener(_updateWake);
+    readerRouteVisibility.addListener(_routeVisibilityChanged);
     FocusManager.instance.addEarlyKeyEventHandler(_pageKey);
-    _immerse();
   }
 
   void _toolsAnimationStatus(AnimationStatus status) {
@@ -310,12 +322,24 @@ class _ReaderStageState extends State<ReaderStage>
     return KeyEventResult.handled;
   }
 
-  void _immerse() {
+  List<SystemUiOverlay>? _lastSystemOverlays;
+  void _updateSystemUi() {
     if (isMobileReader) {
+      final hideStatus =
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          widget.hasReadablePage &&
+          !_tools &&
+          _foreground &&
+          _routeVisible;
+      final overlays = hideStatus
+          ? const [SystemUiOverlay.bottom]
+          : SystemUiOverlay.values;
+      if (listEquals(_lastSystemOverlays, overlays)) return;
+      _lastSystemOverlays = overlays;
       unawaited(
         SystemChrome.setEnabledSystemUIMode(
           SystemUiMode.manual,
-          overlays: SystemUiOverlay.values,
+          overlays: overlays,
         ),
       );
     }
@@ -325,7 +349,12 @@ class _ReaderStageState extends State<ReaderStage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
     _updateWake();
-    if (_foreground) _immerse();
+    // The OS can reset its overlays while backgrounded or presenting a share
+    // sheet. Reassert this reader's current chrome state on resume.
+    if (_foreground) {
+      _lastSystemOverlays = null;
+      _updateSystemUi();
+    }
   }
 
   @override
@@ -334,18 +363,31 @@ class _ReaderStageState extends State<ReaderStage>
       widget.controller?._hide = null;
     }
     _setWake(false);
-    readerRouteVisibility.removeListener(_updateWake);
+    readerRouteVisibility.removeListener(_routeVisibilityChanged);
     WidgetsBinding.instance.removeObserver(this);
     FocusManager.instance.removeEarlyKeyEventHandler(_pageKey);
     _animation.removeStatusListener(_toolsAnimationStatus);
     _animation.dispose();
+    _readerStages.remove(this);
     if (isMobileReader) {
-      unawaited(
-        SystemChrome.setEnabledSystemUIMode(
-          SystemUiMode.manual,
-          overlays: SystemUiOverlay.values,
-        ),
+      // A nested reader may be popped above another fullscreen reader. Its
+      // disposal must restore that visible reader rather than showing status
+      // chrome over it after Navigator's didPop notification already ran.
+      final owners = _readerStages.reversed.where(
+        (stage) => stage.mounted && stage._foreground && stage._routeVisible,
       );
+      if (owners.isNotEmpty) {
+        final owner = owners.first;
+        owner._lastSystemOverlays = null;
+        owner._updateSystemUi();
+      } else {
+        unawaited(
+          SystemChrome.setEnabledSystemUIMode(
+            SystemUiMode.manual,
+            overlays: SystemUiOverlay.values,
+          ),
+        );
+      }
     }
     super.dispose();
   }

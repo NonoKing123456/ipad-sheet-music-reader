@@ -590,14 +590,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                 sync.message,
                                           ),
                                         ),
-                                      if (sync.offlineMissingEntries.isNotEmpty)
-                                        _notice(
-                                          '${sync.offlineMissingEntries.length} 份源曲谱缺失',
-                                          action: TextButton(
-                                            onPressed: _missingDetails,
-                                            child: const Text('查看'),
-                                          ),
-                                        ),
                                       if (sync.workspace.unsavedCount > 0)
                                         _notice(
                                           '${sync.workspace.unsavedCount} 项批注未保存',
@@ -1042,29 +1034,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           ),
         ),
       );
-
-  void _missingDetails() => showDialog<void>(
-    context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('源曲谱缺失'),
-      content: SizedBox(
-        width: 550,
-        child: SingleChildScrollView(
-          child: SelectableText(
-            widget.controller.offlineMissingEntries
-                .map((e) => e.relativePath)
-                .join('\n'),
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('关闭'),
-        ),
-      ],
-    ),
-  );
 
   void _pathDetails(LibraryEntry entry) => showDialog<void>(
     context: context,

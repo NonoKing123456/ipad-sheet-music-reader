@@ -133,6 +133,20 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   SyncClient? _client;
   IosBackgroundTransfer? _backgroundTransfer;
   bool _backgroundObserver = false;
+  bool _observingLifecycle = false, _recoveryForeground = true;
+  Timer? _recoveryTimer;
+  SyncCancellation? _recoveryCancellation;
+  bool _recoveringObjects = false;
+
+  void _observeLifecycle() {
+    if (_observingLifecycle) return;
+    _observingLifecycle = true;
+    _recoveryForeground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
   int backgroundPendingObjects = 0,
       backgroundStagedObjects = 0,
       backgroundFailedObjects = 0,
@@ -182,7 +196,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _client!.backgroundTransfer = transfer;
     transfer.onChanged = () => unawaited(_backgroundChanged());
     if (!_backgroundObserver) {
-      WidgetsBinding.instance.addObserver(this);
+      _observeLifecycle();
       _backgroundObserver = true;
     }
   }
@@ -265,7 +279,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       _signingForeground =
           WidgetsBinding.instance.lifecycleState == null ||
           WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
-      WidgetsBinding.instance.addObserver(this);
+      _observeLifecycle();
     }
     try {
       final store = await SigningStatusStore.open(
@@ -523,6 +537,14 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _recoveryForeground = state == AppLifecycleState.resumed;
+    if (_recoveryForeground) {
+      _scheduleObjectRecovery();
+    } else {
+      _recoveryTimer?.cancel();
+      _recoveryTimer = null;
+      _recoveryCancellation?.cancel();
+    }
     if (_backgroundObserver && state == AppLifecycleState.resumed) {
       unawaited(_backgroundChanged());
     }
@@ -1065,6 +1087,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
 
   void _changed() {
     if (!_disposed) {
+      if (busy) _recoveryCancellation?.cancel();
       pageCounts.refreshVisible();
       notifyListeners();
       // A completion received during metadata refresh/verification is drained
@@ -1078,6 +1101,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> initialize() async {
+    // Local recovery must observe suspension even with no readable peer settings.
+    _observeLifecycle();
     try {
       _canonicalDataDirectory = await prepareTrustedStateRoot(
         library.dataDirectory,
@@ -1123,10 +1148,19 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     await _loadSigningStatus();
     // Offline content must not depend on credentials or settings being readable.
     try {
-      replica = await ReplicaLibraryView.open(
+      final restoreTimer = Stopwatch()..start();
+      collection = await ReplicaCollectionView.restoreCached(
         rootDirectory: p.join(directory.path, 'replica'),
       );
-      collection = await ReplicaCollectionView.open(replica!);
+      replica = collection!.objects;
+      restoreTimer.stop();
+      final stats = replica!.verificationStats;
+      debugPrint(
+        'Offline directory restored in ${restoreTimer.elapsedMilliseconds}ms; '
+        'entries=${collection!.index?.entries.length ?? 0}; '
+        'objectTypeChecks=${stats.objectTypeChecks}; '
+        'objectStatChecks=${stats.objectStatChecks}.',
+      );
       // Native URLSession restoration and staged imports are independent of
       // already verified offline objects. Drain them through the busy-guarded
       // foreground recovery below after publishing this readable index.
@@ -1142,8 +1176,83 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _timer = Timer.periodic(const Duration(milliseconds: 300), (_) => _tick());
     initialized = true;
     _changed();
+    _scheduleObjectRecovery();
     if (_backgroundTransfer != null) unawaited(_backgroundChanged());
     _maybeAutoStart();
+  }
+
+  void _scheduleObjectRecovery({
+    Duration delay = const Duration(milliseconds: 250),
+  }) {
+    if (_disposed ||
+        !initialized ||
+        !_recoveryForeground ||
+        _recoveringObjects ||
+        _recoveryTimer != null) {
+      return;
+    }
+    final selected = activeCollection;
+    if (selected == null ||
+        (!selected.backgroundVerificationPending &&
+            !selected.hasPendingPersistence)) {
+      return;
+    }
+    _recoveryTimer = Timer(delay, () {
+      _recoveryTimer = null;
+      unawaited(_recoverObjectBatch());
+    });
+  }
+
+  Future<void> _recoverObjectBatch() async {
+    if (_disposed || !_recoveryForeground) return;
+    if (busy) {
+      _scheduleObjectRecovery();
+      return;
+    }
+    final selected = activeCollection;
+    if (selected == null) return;
+    final cancellation = SyncCancellation();
+    _recoveryCancellation = cancellation;
+    _recoveringObjects = true;
+    var retryDelay = const Duration(milliseconds: 16);
+    try {
+      final revision = selected.contentRevision;
+      await selected.verifyNextBatch(limit: 32, cancellation: cancellation);
+      cancellation.check();
+      if (_disposed ||
+          !_recoveryForeground ||
+          !identical(selected, activeCollection)) {
+        return;
+      }
+      if (revision != selected.contentRevision) _changed();
+      if (!selected.backgroundVerificationPending &&
+          selected.hasPendingPersistence &&
+          !busy) {
+        // One checkpoint only when verification actually changed durable state.
+        // Use the existing foreground guard while its atomic snapshot is written.
+        busy = true;
+        _recoveryCancellation = null;
+        _changed();
+        try {
+          await selected.flush();
+        } finally {
+          busy = false;
+          _changed();
+        }
+      }
+    } on SyncCancelled {
+      // Foreground work or suspension retries this uncommitted batch later.
+    } on FileSystemException {
+      // Protected data and transient I/O do not revoke the last readable state.
+      retryDelay = const Duration(seconds: 5);
+    } catch (_) {
+      // Preserve local content and the recovery journal if a checkpoint fails.
+      retryDelay = const Duration(seconds: 5);
+    } finally {
+      _recoveryCancellation = null;
+      _recoveringObjects = false;
+      _scheduleObjectRecovery(delay: retryDelay);
+    }
   }
 
   // Stable, path-free diagnostics; never expose file paths, state or credentials.
@@ -1985,7 +2094,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     _disposed = true;
     _signingAuthEpoch++;
-    if (_signingObserver || _backgroundObserver) {
+    if (_observingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);
     }
     _backgroundTransfer?.dispose();
@@ -1996,6 +2105,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     final signingStore = _signingStore;
     if (signingStore != null) unawaited(signingStore.close());
     _timer?.cancel();
+    _recoveryTimer?.cancel();
+    _recoveryCancellation?.cancel();
     _cancellation?.cancel();
     library.removeListener(_libraryChanged);
     workspace.removeListener(_workspaceChanged);

@@ -478,52 +478,54 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             ),
             const SizedBox(width: ScoreSpace.sm),
             if (titleWidth >= ScoreSpace.xxl)
-              SizedBox(
-                width: titleWidth,
-                child: MenuAnchor(
-                  style: const MenuStyle(
-                    minimumSize: WidgetStatePropertyAll(
-                      Size(ScoreLayout.menuWidth, 0),
+              Flexible(
+                child: SizedBox(
+                  width: titleWidth,
+                  child: MenuAnchor(
+                    style: const MenuStyle(
+                      minimumSize: WidgetStatePropertyAll(
+                        Size(ScoreLayout.menuWidth, 0),
+                      ),
                     ),
-                  ),
-                  menuChildren: widget.documentMenu,
-                  onOpen: () => widget.onMenuChanged?.call(true),
-                  onClose: () => widget.onMenuChanged?.call(false),
-                  builder: (context, controller, _) => Semantics(
-                    button: true,
-                    label: '${widget.title}，曲谱操作',
-                    child: Tooltip(
-                      message: widget.title,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: disabled || widget.documentMenu.isEmpty
-                            ? null
-                            : () => controller.isOpen
-                                  ? controller.close()
-                                  : controller.open(),
-                        child: SizedBox(
-                          key: const ValueKey('reader-title-menu'),
-                          height: ScoreLayout.readerTitleMenuHitHeight,
-                          child: Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  widget.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.bodyLarge
-                                      ?.copyWith(
-                                        color: t.ink900,
-                                        fontWeight: FontWeight.w500,
-                                      ),
+                    menuChildren: widget.documentMenu,
+                    onOpen: () => widget.onMenuChanged?.call(true),
+                    onClose: () => widget.onMenuChanged?.call(false),
+                    builder: (context, controller, _) => Semantics(
+                      button: true,
+                      label: '${widget.title}，曲谱操作',
+                      child: Tooltip(
+                        message: widget.title,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: disabled || widget.documentMenu.isEmpty
+                              ? null
+                              : () => controller.isOpen
+                                    ? controller.close()
+                                    : controller.open(),
+                          child: SizedBox(
+                            key: const ValueKey('reader-title-menu'),
+                            height: ScoreLayout.readerTitleMenuHitHeight,
+                            child: Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    widget.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context).textTheme.bodyLarge
+                                        ?.copyWith(
+                                          color: t.ink900,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(width: ScoreSpace.xs),
-                              const ReaderIcon(
-                                ReaderGlyph.chevronDown,
-                                size: ScoreLayout.readerTitleChevron,
-                              ),
-                            ],
+                                const SizedBox(width: ScoreSpace.xs),
+                                const ReaderIcon(
+                                  ReaderGlyph.chevronDown,
+                                  size: ScoreLayout.readerTitleChevron,
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
