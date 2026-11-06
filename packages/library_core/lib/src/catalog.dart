@@ -453,7 +453,7 @@ class LibraryCatalog {
       final text = '$rootName/${entry.relativePath}'.toLowerCase();
       return terms.every(text.contains);
     }).toList();
-    results.sort((a, b) => _comparePaths(a.relativePath, b.relativePath));
+    results.sort((a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
     return List.unmodifiable(results);
   }
 
@@ -475,9 +475,9 @@ class LibraryCatalog {
       for (final key in {...folders.keys, ...entries.keys}) {
         final childFolders = folders[key] ?? [];
         final childEntries = entries[key] ?? [];
-        childFolders.sort(_comparePaths);
+        childFolders.sort(compareLibraryPaths);
         childEntries
-            .sort((a, b) => _comparePaths(a.relativePath, b.relativePath));
+            .sort((a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
         _folderListings[key] =
             FolderListing(folders: childFolders, entries: childEntries);
       }
@@ -838,8 +838,8 @@ class LibraryCatalog {
         ));
       }
     }
-    entries.sort((a, b) => _comparePaths(a.relativePath, b.relativePath));
-    final orderedFolders = folders.toList()..sort(_comparePaths);
+    entries.sort((a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
+    final orderedFolders = folders.toList()..sort(compareLibraryPaths);
     return ScanResult(
       snapshot: LibrarySnapshot(
         rootPath: rootPath,
@@ -1112,11 +1112,6 @@ class LibraryCatalog {
   static String _parentPath(String path) {
     final parent = p.posix.dirname(path);
     return parent == '.' ? '' : parent;
-  }
-
-  static int _comparePaths(String a, String b) {
-    final insensitive = a.toLowerCase().compareTo(b.toLowerCase());
-    return insensitive != 0 ? insensitive : a.compareTo(b);
   }
 
   static String _newId() =>

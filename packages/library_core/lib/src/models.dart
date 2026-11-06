@@ -1,3 +1,9 @@
+/// The library's existing case-insensitive path order, with a stable case tie.
+int compareLibraryPaths(String a, String b) {
+  final insensitive = a.toLowerCase().compareTo(b.toLowerCase());
+  return insensitive != 0 ? insensitive : a.compareTo(b);
+}
+
 enum EntryStatus { available, missing }
 
 enum ContentAvailability { ready, deferred, unreadable }

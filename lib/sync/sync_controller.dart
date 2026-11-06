@@ -1037,7 +1037,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   List<LibraryEntry> _offlineMissing = const [];
   (LibrarySnapshot?, String?, String, String, bool)? _offlineSearchKey;
   List<LibraryEntry> _offlineSearchResults = const [];
-  (CollectionDirectoryIndex, String?, String, String, bool)?
+  (CollectionDirectoryIndex, int, String?, String, String, bool)?
   _directorySearchKey;
   List<String> _directorySearchIds = const [];
   void _indexScoreCatalog() {
@@ -1139,7 +1139,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       if (query.trim().isEmpty) {
         ids = directory.idsInFolder(sourceId, folder);
       } else {
-        final key = (directory, sourceId, folder, query, withinFolder);
+        final key = (
+          directory, directory.structureRevision, sourceId, folder, query,
+          withinFolder,
+        );
         if (key != _directorySearchKey) {
           final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
           _directorySearchIds = [

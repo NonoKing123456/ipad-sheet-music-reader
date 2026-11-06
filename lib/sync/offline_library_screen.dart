@@ -1097,7 +1097,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   void _ensureHierarchy(List<String> folders) {
     final key = (
-      widget.controller.activeCollection?.directory ?? folders,
+      folders,
       _activeSourceId,
     );
     if (key != _treeStructure) {

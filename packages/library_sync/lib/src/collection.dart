@@ -152,7 +152,10 @@ class CollectionDirectoryIndex {
       List<CatalogItem> items,
       Map<String, CatalogItem> readable,
       Set<String> ready)
-      : sourceNames = {for (final s in sources) s.id: s.name} {
+      : sourceNames = {for (final s in sources) s.id: s.name},
+        _sourceOrder = {
+          for (var i = 0; i < sources.length; i++) sources[i].id: i
+        } {
     for (final item in items) {
       _descriptors[item.entryId] =
           (item.sourceId, item.relativePath, item.missing);
@@ -169,8 +172,14 @@ class CollectionDirectoryIndex {
               .toLowerCase();
       update(item, readable[item.entryId], ready);
     }
+    availableIds.sort(_compareIds);
+    missingIds.sort(_compareIds);
+    for (final ids in _byFolder.values) {
+      ids.sort(_compareIds);
+    }
   }
   final Map<String, String> sourceNames;
+  final Map<String, int> _sourceOrder;
   final availableIds = <String>[];
   final missingIds = <String>[];
   final searchText = <String, String>{};
@@ -179,6 +188,7 @@ class CollectionDirectoryIndex {
   final _contributions = <String, (bool, bool, bool)>{};
   final _counts = <(String, String), (int, int, int, int)>{};
   int contentRevision = 0;
+  int structureRevision = 0;
   int readableCount = 0;
   List<String> idsInFolder(String? source, String folder) =>
       _byFolder[(source, folder)] ?? const [];
@@ -186,9 +196,31 @@ class CollectionDirectoryIndex {
   (int, int, int, int) folderStatus(String source, String folder) =>
       _counts[(source, folder)] ?? (0, 0, 0, 0);
 
+  int _compareIds(String a, String b) {
+    final left = _descriptors[a]!, right = _descriptors[b]!;
+    final source = _sourceOrder[left.$1]!.compareTo(_sourceOrder[right.$1]!);
+    if (source != 0) return source;
+    final path = compareLibraryPaths(left.$2, right.$2);
+    return path != 0 ? path : a.compareTo(b);
+  }
+
+  void _insertOrdered(List<String> ids, String id) {
+    var low = 0, high = ids.length;
+    while (low < high) {
+      final middle = (low + high) ~/ 2;
+      if (_compareIds(ids[middle], id) < 0) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    ids.insert(low, id);
+  }
+
   void remove(String id) {
     final descriptor = _descriptors.remove(id);
     if (descriptor == null) return;
+    structureRevision++;
     availableIds.remove(id); missingIds.remove(id); searchText.remove(id);
     final folderPath = p.posix.dirname(descriptor.$2);
     _byFolder[(descriptor.$1, folderPath == '.' ? '' : folderPath)]?.remove(id);
@@ -213,10 +245,16 @@ class CollectionDirectoryIndex {
     if (_descriptors[item.entryId] != descriptor) {
       remove(item.entryId);
       _descriptors[item.entryId] = descriptor;
-      if (item.missing) { missingIds.add(item.entryId); return; }
-      availableIds.add(item.entryId);
+      structureRevision++;
+      if (item.missing) {
+        _insertOrdered(missingIds, item.entryId);
+        return;
+      }
+      _insertOrdered(availableIds, item.entryId);
       final folder = p.posix.dirname(item.relativePath);
-      (_byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= []).add(item.entryId);
+      _insertOrdered(
+          _byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= [],
+          item.entryId);
       searchText[item.entryId] = '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}'.toLowerCase();
     }
     update(item, readable, ready);
