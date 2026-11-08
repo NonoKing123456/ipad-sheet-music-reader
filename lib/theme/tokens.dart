@@ -85,6 +85,8 @@ class ScoreTokens extends ThemeExtension<ScoreTokens> {
   final Color focusHalo;
   final Color dangerWash;
 
+  Color get readerDirectoryScrim => const Color(0x4D000000);
+
   static const ScoreTokens light = ScoreTokens(
     paper0: Color(0xFFFBFAF6),
     paper1: Color(0xFFF3F2EC),
@@ -396,4 +398,30 @@ abstract final class ScoreLayout {
   static const double treeIndent = 16;
   static const double windowsSidebarMin = 1100;
   static const double ipadSidebarMin = 1000;
+}
+
+/// Geometry approved in songbook-index-r2 (P02–P09).
+abstract final class ReaderNavigationTokens {
+  static const seekHitHeight = 44.0;
+  static const seekTrackHeight = 2.0;
+  static const seekTrackMaxWidth = 1052.0;
+  static const seekTrackHorizontalInset = 64.0;
+  static const seekThumbSize = 8.0;
+  static const seekHaloSize = 30.0;
+  static const seekTooltipWidth = 116.0;
+  static const seekTooltipHeight = 30.0;
+  static const seekTooltipOffset = 47.0;
+  static const seekTooltipRadius = 6.0;
+  static const directorySearchHeight = 48.0;
+  static const directoryButtonWidth = 84.0;
+  static const directoryWidth = 336.0;
+  static const directoryTouchRow = 44.0;
+  static const directoryMouseRow = 36.0;
+  static const directoryPageColumn = 44.0;
+  static const directoryEditorHeight = 214.0;
+  static const directoryPageInputWidth = 92.0;
+  static const progressHeight = 2.0;
+  static const pagePopoverElevation = 4.0;
+  static const pagePopoverWidth = 136.0;
+  static const pagePopoverHeight = 56.0;
 }

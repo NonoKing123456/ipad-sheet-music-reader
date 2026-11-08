@@ -312,6 +312,7 @@ class SyncServer {
       onSigningStatus;
   Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)?
       onPageMetadata;
+  Future<Map<String, Object?>> Function(Map<String, dynamic>)? onSongbookMetadata;
   Future<ScoreImportReceipt> Function(
           String peerId, ScoreImportRequest metadata, Stream<List<int>> bytes)?
       onScoreImport;
@@ -510,6 +511,10 @@ class SyncServer {
       } else if (request.method == 'GET' && path == '/state-capabilities') {
         await _reply(request.response,
             {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
+      } else if (request.method == 'POST' &&
+          path == '/collection/songbook-index' && onSongbookMetadata != null) {
+        final body = await _readBody(request, ioTimeout, 4 * 1024 * 1024);
+        await _reply(request.response, await onSongbookMetadata!(body));
       } else if (request.method == 'POST' &&
           path == '/collection/page-metadata' &&
           onPageMetadata != null) {
@@ -1336,6 +1341,20 @@ class SyncClient {
       return body['accepted'] == true;
     } on SyncProtocolException catch (error) {
       if (error.status == 404) return false;
+      rethrow;
+    } finally {
+      http.close(force: true);
+    }
+  }
+
+  /// Optional authenticated index metadata; a legacy peer's 404 is unsupported.
+  Future<Map<String, dynamic>?> songbookMetadata(Map<String, Object?> page) async {
+    final http = HttpClient()..connectionTimeout = ioTimeout;
+    try {
+      final response = await _request(http, 'POST', '/collection/songbook-index', body: page);
+      return await _readBody(response, ioTimeout, 4 * 1024 * 1024);
+    } on SyncProtocolException catch (error) {
+      if (error.status == 404) return null;
       rethrow;
     } finally {
       http.close(force: true);

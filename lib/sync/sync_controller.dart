@@ -17,6 +17,7 @@ import 'package:path/path.dart' as p;
 import '../library/library_controller.dart';
 import '../library/score_path_label.dart';
 import '../library/page_count_service.dart';
+import '../songbook/songbook_service.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import '../importing/external_import_store.dart';
@@ -405,6 +406,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     _cancellation = cancellation;
     var changed = false;
     try {
+      await _syncSongbooks(cancellation);
       changed = await _syncSavedReaderState(cancellation, showActivity: true);
       if (changed) {
         phase = SyncPhase.complete;
@@ -634,6 +636,47 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     },
     remote: (keys) async => await _client?.pageMetadata(keys) ?? {},
   );
+  late final songbooks = SongbookService(
+    directory: p.join(directory.path, 'songbook-index-v1'),
+    resolve: (key) {
+      final local = library.pageCountFile(key);
+      if (local != null) return local;
+      final target = locateOffline(key.entryId);
+      if (target == null || target.revisionId != key.revisionId) return null;
+      return PageCountFile(target.filePath, p.dirname(target.filePath));
+    },
+    onLocalChange: () {
+      if (!_disposed) _scheduleDaily(delay: const Duration(milliseconds: 500));
+    },
+  );
+
+  bool _songbookKeyAvailable(PageMetadataKey key) {
+    final local = library.snapshot?.entryById(key.entryId);
+    if (local != null && local.currentRevisionId == key.revisionId) return true;
+    final item = collection?.itemFor(key.entryId);
+    return item != null && item.revisionId == key.revisionId;
+  }
+
+  Future<bool> _syncSongbooks(SyncCancellation cancellation) async {
+    final client = _client;
+    if (client == null) return true;
+    try {
+      await songbooks.synchronize(
+        client,
+        allowed: _songbookKeyAvailable,
+        cancellation: cancellation,
+      );
+      return true;
+    } on SyncCancelled {
+      rethrow;
+    } catch (failure) {
+      // Optional directory metadata must never prevent existing saved ink and
+      // setlists from reaching their established reader-state transaction.
+      debugPrint('Songbook metadata exchange deferred (${failure.runtimeType}).');
+      return false;
+    }
+  }
+
   final signingStatus = ValueNotifier<SigningStatusReceipt?>(null);
   final signingUnavailable = ValueNotifier<bool>(false);
   SigningStatusStore? _signingStore;
@@ -1891,6 +1934,15 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       final statusStore = _signingStore;
+      started.onSongbookMetadata = (request) async {
+        if (_disposed || library.rootPath != root) {
+          throw const SyncProtocolException('Server changed.', 409);
+        }
+        return songbooks.exchange(request, allowed: (key) {
+          final entry = library.snapshot?.entryById(key.entryId);
+          return entry != null && entry.currentRevisionId == key.revisionId;
+        });
+      };
       started.onPageMetadata = (keys) async {
         final result = <PageMetadataKey, int>{};
         for (final key in keys) {
@@ -2220,8 +2272,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         collection!,
         cancellation: cancellation,
       );
-      phase = SyncPhase.complete;
-      message = '目录已更新。';
+      final songbooksSynced = await _syncSongbooks(cancellation);
+      phase = songbooksSynced ? SyncPhase.complete : SyncPhase.partial;
+      message = songbooksSynced ? '目录已更新。' : '曲谱目录已更新，谱本索引等待下次同步。';
     } catch (_) {
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
@@ -2458,6 +2511,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       _retrySigningReport();
       phase = SyncPhase.merging;
       pageCounts.connectionChanged();
+      final songbooksSynced = await _syncSongbooks(cancellation);
       final contentPartial = result.status != LibrarySyncStatus.complete;
       message = '正在交换已保存的批注和曲单…';
       _changed();
@@ -2468,9 +2522,11 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         message = '批注正在保存，请稍后同步。';
         return;
       }
-      phase = contentPartial ? SyncPhase.partial : SyncPhase.complete;
+      phase = contentPartial || !songbooksSynced ? SyncPhase.partial : SyncPhase.complete;
       message = contentPartial
           ? '部分曲谱未下载，请重试。'
+          : !songbooksSynced
+          ? '曲谱、批注和曲单已同步；谱本索引仍在本机，连接后会自动重试。'
           : workspace.store.snapshot.conflicts.isEmpty
           ? (totalObjects == 0
                 ? '已是最新，本次没有新增或更新。'
@@ -2631,6 +2687,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(_stopSigningWatches());
     signingUnavailable.dispose();
     pageCounts.dispose();
+    songbooks.dispose();
     signingStatus.dispose();
     final signingStore = _signingStore;
     if (signingStore != null) unawaited(signingStore.close());

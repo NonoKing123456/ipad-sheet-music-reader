@@ -6,7 +6,11 @@ import 'score_file_icon.dart';
 import 'desktop_navigation_history.dart';
 
 import 'package:library_sync/library_sync.dart'
-    show PageMetadataKey, CatalogSourceBinding;
+    show
+        PageMetadataKey,
+        CatalogSourceBinding,
+        SongbookSearchHit,
+        folderContains;
 
 import 'dart:async';
 import 'dart:io';
@@ -21,6 +25,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:reader_state/reader_state.dart';
 
 import '../reader/library_reader_screen.dart';
+import '../songbook/songbook_search_results.dart';
 import '../reader/reader_session.dart';
 import '../reader/reader_workspace.dart';
 import '../reader/set_lists_screen.dart';
@@ -559,7 +564,11 @@ class _LibraryScreenState extends State<LibraryScreen>
     _recordDirectory();
   }
 
-  Future<void> _openEntry(LibraryEntry entry) async {
+  Future<void> _openEntry(
+    LibraryEntry entry, {
+    int? pageNumber,
+    String? expectedRevisionId,
+  }) async {
     if (_openingReader) return;
     _openingReader = true;
     final savedQuery = _searchOpen ? _search.text : null;
@@ -573,6 +582,11 @@ class _LibraryScreenState extends State<LibraryScreen>
         _message('曲谱暂不可读，请刷新谱库。');
         return;
       }
+      if (expectedRevisionId != null &&
+          target.revisionId != expectedRevisionId) {
+        _message('文件已更新，请重新读取目录并核对页码。');
+        return;
+      }
       opened = true;
       _sync?.setReaderActive(true);
       await Navigator.of(context).push(
@@ -583,6 +597,8 @@ class _LibraryScreenState extends State<LibraryScreen>
             initialTarget: target,
             sourceChanges: library,
             loader: _loadLocalTarget,
+            initialPageNumber: pageNumber,
+            songbooks: _sync?.songbooks,
           ),
         ),
       );
@@ -765,6 +781,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       initialListId: _setListId,
       initialCreate: _setListCreate,
       pageCounts: (sync ?? _sync)?.pageCounts,
+      songbooks: (sync ?? _sync)?.songbooks,
       onReaderActive: (sync ?? _sync)?.setReaderActive,
       onBack: _leaveSetLists,
       onSelectionChanged: (id) {
@@ -1411,7 +1428,26 @@ class _LibraryScreenState extends State<LibraryScreen>
     ),
   );
 
-  Widget _entries(LibraryController library) {
+  Widget _entries(LibraryController library) => SongbookSearchBuilder(
+    service: _sync?.songbooks,
+    query: library.searching ? library.query : '',
+    builder: (hits) => _entriesWithSongbooks(
+      library,
+      hits.where((hit) {
+        final entry = library.snapshot?.entryById(hit.key.entryId);
+        return entry != null &&
+            entry.currentRevisionId == hit.key.revisionId &&
+            (!library.searchCurrentFolder ||
+                (library.sourceIdFor(entry) == library.selectedSourceId &&
+                    folderContains(library.currentFolder, entry.relativePath)));
+      }).toList(),
+    ),
+  );
+
+  Widget _entriesWithSongbooks(
+    LibraryController library,
+    List<SongbookSearchHit> hits,
+  ) {
     final entries = library.visibleEntries;
     final subfolders = library.searching ? <String>[] : library.listing.folders;
     final snapshot = library.selectedSource?.catalog.snapshot;
@@ -1438,7 +1474,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         children: [
           const LibraryColumnHeader(),
           Expanded(
-            child: entries.isEmpty && subfolders.isEmpty
+            child: entries.isEmpty && subfolders.isEmpty && hits.isEmpty
                 ? Center(
                     child: Text(
                       library.scanning
@@ -1458,8 +1494,50 @@ class _LibraryScreenState extends State<LibraryScreen>
                       library.query,
                     )),
                     padding: EdgeInsets.zero,
-                    itemCount: subfolders.length + entries.length,
+                    itemCount:
+                        subfolders.length +
+                        entries.length +
+                        (library.searching ? 2 + hits.length : 0),
                     itemBuilder: (context, index) {
+                      if (library.searching) {
+                        if (index == 0) {
+                          return songbookResultHeading(
+                            context,
+                            '独立文件 · ${entries.length}',
+                          );
+                        }
+                        index--;
+                        if (index == entries.length) {
+                          return songbookResultHeading(
+                            context,
+                            '谱本内曲目 · ${hits.length}',
+                          );
+                        }
+                        if (index > entries.length) {
+                          final hit = hits[index - entries.length - 1];
+                          final entry = library.snapshot!.entryById(
+                            hit.key.entryId,
+                          )!;
+                          return SongbookSearchResultRow(
+                            hit: hit,
+                            pathLabel:
+                                '${library.sourceNameFor(entry)} / ${entry.relativePath}',
+                            onOpen: () {
+                              if (!hit.item.canNavigate) {
+                                _message('文件已更新，请打开目录核对 PDF 页码。');
+                                return;
+                              }
+                              unawaited(
+                                _openEntry(
+                                  entry,
+                                  pageNumber: hit.item.pageNumber,
+                                  expectedRevisionId: hit.key.revisionId,
+                                ),
+                              );
+                            },
+                          );
+                        }
+                      }
                       if (index < subfolders.length) {
                         final folder = subfolders[index];
                         return LibraryFileRow(

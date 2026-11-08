@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
@@ -9,8 +8,8 @@ import '../theme/tokens.dart';
 int readerSeekDotCount(int pages, double width) =>
     math.min(pages, (width / ScoreLayout.dotsPitch).ceil());
 
-/// Every actual page owns one 24dp cell. Presentation changes never recenter
-/// the virtual strip during a gesture.
+/// The input range is the whole PDF, independent of the raster/page window.
+/// Short scores retain their existing dots; longer scores use a thin track.
 class ReaderPageSeekBar extends StatefulWidget {
   const ReaderPageSeekBar({
     super.key,
@@ -30,128 +29,116 @@ class ReaderPageSeekBar extends StatefulWidget {
   State<ReaderPageSeekBar> createState() => _ReaderPageSeekBarState();
 }
 
-class _ReaderPageSeekBarState extends State<ReaderPageSeekBar>
-    with SingleTickerProviderStateMixin {
+class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
   int? _pointer, _preview, _lastSent;
   Object? _gesture;
-  double _offset = 0, _width = 0, _pointerX = 0;
-  double _from = 0, _to = 0;
-  Timer? _edgeTimer;
-  late final AnimationController _centering =
-      AnimationController(vsync: this, duration: ScoreMotion.panel)
-        ..addListener(() {
-          setState(
-            () => _offset =
-                _from +
-                (_to - _from) * Curves.easeOutCubic.transform(_centering.value),
-          );
-        });
+  final _contacts = <int>{};
+  double _width = 0;
+  bool _dots = true;
   bool get _enabled => widget.enabled && widget.pageCount > 1;
-  double get _maxOffset =>
-      math.max(0, widget.pageCount * ScoreLayout.dotsPitch - _width);
-  double get _centered =>
-      ((widget.currentPage - .5) * ScoreLayout.dotsPitch - _width / 2).clamp(
-        0.0,
-        _maxOffset,
-      );
 
   void _cancel() {
-    _edgeTimer?.cancel();
-    _edgeTimer = null;
     final gesture = _gesture;
     _pointer = _preview = _lastSent = null;
     _gesture = null;
     if (gesture != null) widget.onCancel?.call(gesture);
   }
 
-  void _center() {
-    if (_pointer != null || _width == 0) return;
-    _from = _offset;
-    _to = _centered;
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _centering.stop();
-      _offset = _to;
-    } else {
-      _centering.forward(from: 0);
-    }
-  }
-
   @override
   void didUpdateWidget(covariant ReaderPageSeekBar oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!_enabled || oldWidget.pageCount != widget.pageCount) _cancel();
-    if (oldWidget.currentPage != widget.currentPage ||
-        oldWidget.pageCount != widget.pageCount) {
-      _center();
-    }
   }
 
   @override
   void dispose() {
     _cancel();
-    _centering.dispose();
     super.dispose();
   }
 
   void _move(double x) {
-    _pointerX = x;
-    final page =
-        ((_offset + x.clamp(0.0, math.max(0, _width - .001))) /
-                ScoreLayout.dotsPitch)
-            .floor()
-            .clamp(0, widget.pageCount - 1) +
-        1;
+    // Dot centres retain one cell per page. Both modes reach every page with
+    // one continuous drag, and clamping lets a captured drag reach either end.
+    final inset = _dots ? ScoreLayout.dotsPitch / 2 : 0.0;
+    final span = _width - 2 * inset;
+    final fraction = span <= 0 ? 0.0 : ((x - inset) / span).clamp(0.0, 1.0);
+    final page = 1 + (fraction * (widget.pageCount - 1)).round();
     if (_preview != page) setState(() => _preview = page);
     final gesture = _gesture;
     if (page != _lastSent && gesture != null && _enabled) {
       _lastSent = page;
       widget.onSeek(page, gesture);
     }
-    final edge = x < 0 || x > _width
-        ? 0
-        : x < ScoreLayout.dotsFadeEdge
-        ? -1
-        : x > _width - ScoreLayout.dotsFadeEdge
-        ? 1
-        : 0;
-    if (edge == 0 || _maxOffset == 0) {
-      _edgeTimer?.cancel();
-      _edgeTimer = null;
-    } else {
-      _edgeTimer ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
-        if (_pointer == null) return;
-        final direction = _pointerX < ScoreLayout.dotsFadeEdge ? -1 : 1;
-        final next = (_offset + direction * 6 * ScoreLayout.dotsPitch * .016)
-            .clamp(0.0, _maxOffset);
-        if (next != _offset) {
-          setState(() => _offset = next);
-          _move(_pointerX);
-        }
-      });
+  }
+
+  void _down(PointerDownEvent event) {
+    _contacts.add(event.pointer);
+    if (_contacts.length > 1) {
+      setState(_cancel);
+      return;
     }
+    if (!_enabled ||
+        (event.kind != PointerDeviceKind.touch &&
+            event.kind != PointerDeviceKind.mouse) ||
+        (event.kind == PointerDeviceKind.mouse &&
+            event.buttons != kPrimaryButton)) {
+      return;
+    }
+    _pointer = event.pointer;
+    _gesture = Object();
+    _lastSent = widget.currentPage;
+    _move(event.localPosition.dx);
+  }
+
+  void _up(PointerEvent event, {bool cancelled = false}) {
+    _contacts.remove(event.pointer);
+    if (_pointer != event.pointer) return;
+    setState(() {
+      if (cancelled) {
+        _cancel();
+      } else {
+        // A completed gesture's accepted target must survive a later pedal.
+        _pointer = _preview = _lastSent = null;
+        _gesture = null;
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final width = math.min(
-        widget.pageCount * ScoreLayout.dotsPitch,
-        math.min(
-          ScoreLayout.dotsMaxWidth,
-          math.max(0.0, constraints.maxWidth - 2 * ScoreSpace.xl),
-        ),
+      final dotWidth = math.min(
+        ScoreLayout.dotsMaxWidth,
+        math.max(0.0, constraints.maxWidth - 2 * ScoreSpace.xl),
       );
-      if (_width != width) {
-        _width = width;
-        _offset = _centered;
-      }
+      _dots = widget.pageCount * ScoreLayout.dotsPitch <= dotWidth;
+      _width = _dots
+          ? widget.pageCount * ScoreLayout.dotsPitch
+          : math.min(
+              ReaderNavigationTokens.seekTrackMaxWidth,
+              math.max(
+                0.0,
+                constraints.maxWidth -
+                    2 * ReaderNavigationTokens.seekTrackHorizontalInset,
+              ),
+            );
       final tokens = ScoreTokens.of(context);
+      final page = _preview ?? widget.currentPage;
+      final fraction = widget.pageCount <= 1
+          ? 0.0
+          : ((page - 1) / (widget.pageCount - 1)).clamp(0.0, 1.0);
+      final tooltipLeft =
+          (fraction * _width - ReaderNavigationTokens.seekTooltipWidth / 2)
+              .clamp(
+                0.0,
+                math.max(0.0, _width - ReaderNavigationTokens.seekTooltipWidth),
+              );
       return Center(
         heightFactor: 1,
         child: SizedBox(
           key: widget.hitRegionKey,
-          width: width,
-          height: ScoreLayout.dotsHeight,
+          width: _width,
+          height: ReaderNavigationTokens.seekHitHeight,
           child: Semantics(
             key: const ValueKey('page-indicator'),
             label: '页码',
@@ -167,79 +154,59 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar>
                 ? null
                 : () => widget.onSeek(widget.currentPage - 1, Object()),
             child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (event) {
-                if (!_enabled ||
-                    (event.kind != PointerDeviceKind.touch &&
-                        event.kind != PointerDeviceKind.mouse)) {
-                  return;
-                }
-                if (_pointer != null) {
-                  setState(_cancel);
-                  return;
-                }
-                _centering.stop();
-                _pointer = event.pointer;
-                _gesture = Object();
-                _lastSent = widget.currentPage;
-                _move(event.localPosition.dx);
-              },
+              // The paper must receive a Pencil's very first point before
+              // the surrounding reader hides this overlay. ReaderInput's
+              // control-region guard excludes touch/mouse from page gestures.
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: _down,
               onPointerMove: (event) {
                 if (_pointer == event.pointer) _move(event.localPosition.dx);
               },
-              onPointerUp: (event) {
-                if (_pointer != event.pointer) return;
-                _edgeTimer?.cancel();
-                _edgeTimer = null;
-                setState(() {
-                  _pointer = _preview = _lastSent = null;
-                  _gesture = null;
-                });
-                _center();
-              },
-              onPointerCancel: (event) {
-                if (_pointer == event.pointer) {
-                  setState(_cancel);
-                  _center();
-                }
-              },
+              onPointerUp: _up,
+              onPointerCancel: (event) => _up(event, cancelled: true),
               child: IgnorePointer(
                 child: Stack(
                   clipBehavior: Clip.none,
                   children: [
                     Positioned.fill(
                       child: CustomPaint(
-                        painter: ReaderPageDotsPainter(
-                          page: _preview ?? widget.currentPage,
-                          pages: widget.pageCount,
-                          offset: _offset,
-                          ink: tokens.ink300,
-                          markerFill: tokens.pineBright,
-                          markerOutline: tokens.pineBright,
-                        ),
+                        painter: _dots
+                            ? ReaderPageDotsPainter(
+                                page: page,
+                                pages: widget.pageCount,
+                                ink: tokens.ink300,
+                                markerFill: tokens.pineBright,
+                                markerOutline: tokens.pineBright,
+                              )
+                            : ReaderPageTrackPainter(
+                                fraction: fraction,
+                                dragging: _preview != null,
+                                ink: tokens.ink300,
+                                marker: tokens.pineBright,
+                              ),
                       ),
                     ),
                     if (_preview != null)
                       Positioned(
-                        top: -ScoreSpace.xl,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: tokens.paper0,
-                              borderRadius: ScoreRadius.controlAll,
+                        top:
+                            ReaderNavigationTokens.seekHitHeight / 2 -
+                            ReaderNavigationTokens.seekTooltipOffset,
+                        left: tooltipLeft.toDouble(),
+                        width: ReaderNavigationTokens.seekTooltipWidth,
+                        height: ReaderNavigationTokens.seekTooltipHeight,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: tokens.paper0,
+                            border: Border.all(color: tokens.paper2),
+                            borderRadius: BorderRadius.circular(
+                              ReaderNavigationTokens.seekTooltipRadius,
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: ScoreSpace.sm,
-                                vertical: ScoreSpace.xs,
-                              ),
-                              child: Text(
-                                '$_preview / ${widget.pageCount}',
-                                style: ScoreText.caption.copyWith(
-                                  color: tokens.ink900,
-                                ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '跳至$_preview页',
+                              style: ScoreText.caption.copyWith(
+                                color: tokens.ink900,
                               ),
                             ),
                           ),
@@ -254,6 +221,48 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar>
       );
     },
   );
+}
+
+class ReaderPageTrackPainter extends CustomPainter {
+  const ReaderPageTrackPainter({
+    required this.fraction,
+    required this.dragging,
+    required this.ink,
+    required this.marker,
+  });
+  final double fraction;
+  final bool dragging;
+  final Color ink, marker;
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(fraction * size.width, size.height / 2);
+    final paint = Paint()
+      ..strokeWidth = ReaderNavigationTokens.seekTrackHeight
+      ..strokeCap = StrokeCap.round
+      ..color = ink.withValues(alpha: .62);
+    canvas.drawLine(Offset(0, center.dy), Offset(size.width, center.dy), paint);
+    paint.color = marker.withValues(alpha: .9);
+    canvas.drawLine(Offset(0, center.dy), center, paint);
+    if (dragging) {
+      canvas.drawCircle(
+        center,
+        ReaderNavigationTokens.seekHaloSize / 2,
+        Paint()..color = marker.withValues(alpha: .12),
+      );
+    }
+    canvas.drawCircle(
+      center,
+      ReaderNavigationTokens.seekThumbSize / 2,
+      Paint()..color = marker,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant ReaderPageTrackPainter old) =>
+      fraction != old.fraction ||
+      dragging != old.dragging ||
+      ink != old.ink ||
+      marker != old.marker;
 }
 
 class ReaderPageDotsPainter extends CustomPainter {
@@ -271,25 +280,13 @@ class ReaderPageDotsPainter extends CustomPainter {
   int get dotCount => pages;
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.save();
-    canvas.clipRect(Offset.zero & size);
-    final first = (offset / ScoreLayout.dotsPitch).floor();
-    final last = math.min(
-      pages - 1,
-      ((offset + size.width) / ScoreLayout.dotsPitch).ceil(),
-    );
-    for (var dot = first; dot <= last; dot++) {
-      final x = (dot + .5) * ScoreLayout.dotsPitch - offset;
-      final edgeAlpha = offset > 0 && x < ScoreLayout.dotsFadeEdge
-          ? (x / ScoreLayout.dotsFadeEdge).clamp(0.0, 1.0)
-          : offset + size.width < pages * ScoreLayout.dotsPitch &&
-                x > size.width - ScoreLayout.dotsFadeEdge
-          ? ((size.width - x) / ScoreLayout.dotsFadeEdge).clamp(0.0, 1.0)
-          : 1.0;
+    for (var dot = 0; dot < pages; dot++) {
+      final center = Offset(
+        (dot + .5) * ScoreLayout.dotsPitch,
+        size.height / 2,
+      );
       final active = dot + 1 == page;
-      final center = Offset(x, size.height / 2);
-      final paint = Paint()
-        ..color = (active ? markerFill : ink).withValues(alpha: edgeAlpha);
+      final paint = Paint()..color = active ? markerFill : ink;
       if (active) {
         canvas.drawRRect(
           RRect.fromRectAndRadius(
@@ -306,14 +303,12 @@ class ReaderPageDotsPainter extends CustomPainter {
         canvas.drawCircle(center, ScoreLayout.dotSize / 2, paint);
       }
     }
-    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant ReaderPageDotsPainter old) =>
       page != old.page ||
       pages != old.pages ||
-      offset != old.offset ||
       ink != old.ink ||
       markerFill != old.markerFill;
 }

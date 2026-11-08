@@ -247,3 +247,8 @@
 !/tools/flutter-patches/193372-semantics.patch
 !/tools/flutter-patches/FLUTTER-LICENSE
 !/tools/flutter-patches/README.md
+!/lib/reader/reader_page_number_button.dart
+!/lib/reader/songbook_directory_panel.dart
+!/lib/songbook/songbook_search_results.dart
+!/lib/songbook/songbook_service.dart
+!/packages/library_sync/lib/src/songbook.dart

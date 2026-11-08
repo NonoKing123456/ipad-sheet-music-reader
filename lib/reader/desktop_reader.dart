@@ -42,6 +42,8 @@ class DesktopReaderShell extends StatefulWidget {
     this.loading = false,
     this.onObstructionChanged,
     this.fitAspectFor,
+    this.directory,
+    this.pageControl,
   });
   final String title, pageLabel, statusLabel;
   final bool editing, writing, loading, textEditing;
@@ -56,6 +58,7 @@ class DesktopReaderShell extends StatefulWidget {
   final ValueChanged<bool>? onMenuChanged;
   final ValueChanged<EdgeInsets>? onObstructionChanged;
   final double Function(Size viewport)? fitAspectFor;
+  final Widget? directory, pageControl;
   final Widget? annotationTools;
   final List<Widget> actions, primaryActions, notices, documentMenu;
   final Widget bottom;
@@ -192,11 +195,22 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
               ),
               Expanded(
                 child: LayoutBuilder(
-                  builder: (context, available) => ReaderChromeViewport(
-                    key: const ValueKey('desktop-reader-content-inset'),
-                    topInset: constraints.maxHeight - available.maxHeight,
-                    fitAspectFor: widget.fitAspectFor,
-                    child: widget.contentBuilder(_toggle),
+                  builder: (context, available) => Row(
+                    children: [
+                      if (widget.directory != null)
+                        SizedBox(
+                          width: ReaderNavigationTokens.directoryWidth,
+                          child: widget.directory!,
+                        ),
+                      Expanded(
+                        child: ReaderChromeViewport(
+                          key: const ValueKey('desktop-reader-content-inset'),
+                          topInset: constraints.maxHeight - available.maxHeight,
+                          fitAspectFor: widget.fitAspectFor,
+                          child: widget.contentBuilder(_toggle),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -223,7 +237,9 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
               ),
             ),
           Positioned(
-            left: 0,
+            left: widget.directory == null
+                ? 0
+                : ReaderNavigationTokens.directoryWidth,
             right: 0,
             bottom: ScoreLayout.dotsBottom,
             child: IgnorePointer(
@@ -365,17 +381,18 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       final showAnnotationCaption =
           constraints.maxWidth >= ScoreLayout.windowsSidebarMin;
       final actions = <Widget>[
-        TextButton(
-          onPressed: disabled ? null : widget.onJump,
-          style: TextButton.styleFrom(
-            foregroundColor: t.ink500,
-            minimumSize: const Size(0, ScoreLayout.desktopTarget),
-            padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
-            textStyle: Theme.of(context).textTheme.labelLarge,
-            splashFactory: NoSplash.splashFactory,
-          ),
-          child: Text(widget.pageLabel),
-        ),
+        widget.pageControl ??
+            TextButton(
+              onPressed: disabled ? null : widget.onJump,
+              style: TextButton.styleFrom(
+                foregroundColor: t.ink500,
+                minimumSize: const Size(0, ScoreLayout.desktopTarget),
+                padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
+                textStyle: Theme.of(context).textTheme.labelLarge,
+                splashFactory: NoSplash.splashFactory,
+              ),
+              child: Text(widget.pageLabel),
+            ),
         if (widget.onAnnotate != null)
           ReaderActionButton(
             label: widget.editing ? '完成批注' : '批注',

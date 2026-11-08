@@ -24,6 +24,12 @@ import 'desktop_reader.dart';
 import 'reader_continuous.dart';
 import 'reader_view_capabilities.dart';
 import '../library/desktop_navigation_history.dart';
+
+import 'package:library_sync/library_sync.dart' show PageMetadataKey;
+
+import '../songbook/songbook_service.dart';
+import 'songbook_directory_panel.dart';
+import 'reader_page_number_button.dart';
 import '../theme/app_theme.dart';
 import '../theme/device_layout.dart';
 import '../theme/reader_icons.dart';
@@ -51,7 +57,9 @@ class LibraryReaderScreen extends StatefulWidget {
     this.beforeLeave,
     this.restoreScreen,
     this.initiallyShowToolbar = false,
+    this.songbooks,
   });
+  final SongbookService? songbooks;
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
   final ScoreTarget initialTarget;
@@ -156,6 +164,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   LoadedScore? _notifiedDocument;
   ReaderSnapshot? _shareSnapshot;
   bool _leaving = false;
+  bool _directoryOpen = false;
+  bool _pageInputOpen = false;
+  final _indexedDocuments = <DocumentKey>{};
+  final _canceledSeekGestures = Expando<bool>();
 
   @override
   void didChangeDependencies() {
@@ -206,6 +218,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         onPresented: widget.onPresented,
         onLoaded: widget.onLoaded,
         headerAction: widget.headerAction,
+        songbooks: widget.songbooks,
         beforeLeave: widget.beforeLeave,
         restoreScreen: widget.restoreScreen,
         initiallyShowToolbar: widget.initiallyShowToolbar,
@@ -662,7 +675,41 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final child = _buildReader(context);
+    final reader = _buildReader(context);
+    final document = _session.current;
+    final child = _isCompact
+        ? Stack(
+            children: [
+              Positioned.fill(child: reader),
+              if (_directoryOpen && document != null) ...[
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  top:
+                      MediaQuery.paddingOf(context).top +
+                      ScoreLayout.readerHeaderHeight,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _directoryOpen = false),
+                    child: ColoredBox(
+                      color: ScoreTokens.of(context).readerDirectoryScrim,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  top:
+                      MediaQuery.paddingOf(context).top +
+                      ScoreLayout.readerHeaderHeight,
+                  bottom: MediaQuery.viewInsetsOf(context).bottom,
+                  width: ReaderNavigationTokens.directoryWidth,
+                  child: _directory(document),
+                ),
+              ],
+            ],
+          )
+        : reader;
     if (widget.beforeLeave == null) return child;
     return PopScope<Object?>(
       canPop: false,
@@ -701,7 +748,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onToolsLayoutSettled: _refreshReaderLayout,
           beforeHideTools: () async =>
               !_writing && (!_editing || await _setEditing(false)),
-          blockArrowKeys: _desktopMenuOpen,
+          blockArrowKeys: _desktopMenuOpen || _directoryOpen || _pageInputOpen,
           onObstructionChanged: (insets) => setState(() => _panInsets = insets),
           onPrevious: () => _navigate(NavigationDirection.backward),
           onNext: () => _navigate(NavigationDirection.forward),
@@ -769,6 +816,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                                 _session.open(
                                   latest,
                                   itemId: widget.itemId,
+                                  pageNumber: widget.initialPageNumber,
                                   restore: false,
                                 ),
                               );
@@ -954,50 +1002,84 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     }
   }
 
-  Future<void> _jumpDialog() async {
-    if (!await _textControls.finish() || !mounted) return;
+  Future<void> _jumpTo(int target) async {
     final document = _session.current;
-    if (document == null || _writing) return;
-    final key = document.target.key;
-    var input = '${_visiblePage?.pageNumber ?? _session.page}';
-    final target = await showDialog<int>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('跳转到页'),
-        content: SizedBox(
-          width: 160,
-          child: TextFormField(
-            autofocus: true,
-            initialValue: input,
-            onChanged: (value) => input = value,
-            keyboardType: TextInputType.number,
-            onFieldSubmitted: (value) =>
-                Navigator.pop(context, int.tryParse(value)),
-            decoration: InputDecoration(suffixText: '/ ${document.pageCount}'),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, int.tryParse(input)),
-            child: const Text('前往'),
-          ),
-        ],
-      ),
-    );
-    if (!mounted || target == null || _session.current?.target.key != key) {
+    if (document == null ||
+        target < 1 ||
+        target > document.pageCount ||
+        _writing) {
       return;
     }
+    if (!await _textControls.finish() ||
+        !mounted ||
+        _session.current != document) {
+      return;
+    }
+    _direction = 0;
+    _requestedAt = widget.presentationClock?.call() ?? readerPresentationNow();
     await _session.seek(target, gesture: Object());
   }
+
+  Widget _pageNumber(LoadedScore document, {String? label}) =>
+      ReaderPageNumberButton(
+        key: ValueKey(('page-number', document.target.key)),
+        page: _visiblePage?.pageNumber ?? _session.page,
+        pageCount: document.pageCount,
+        label: label,
+        enabled: !_writing && !_directoryOpen,
+        target: _isCompact
+            ? ScoreLayout.touchTarget
+            : ScoreLayout.desktopTarget,
+        onJump: (page) => unawaited(_jumpTo(page)),
+        onOpenChanged: (open) {
+          if (mounted) setState(() => _pageInputOpen = open);
+        },
+      );
+
+  Widget _directory(LoadedScore document) => SongbookDirectoryPanel(
+    service: widget.songbooks!,
+    documentKey: PageMetadataKey(
+      document.target.entryId,
+      document.target.revisionId,
+    ),
+    title: p.basename(document.target.displayPath),
+    pageCount: document.pageCount,
+    currentPage: _visiblePage?.pageNumber ?? _session.page,
+    compact: _isCompact,
+    onClose: () => setState(() => _directoryOpen = false),
+    onJump: (page) {
+      if (_isCompact) setState(() => _directoryOpen = false);
+      unawaited(_jumpTo(page));
+    },
+  );
+
+  Widget _directoryButton(LoadedScore? document) => ReaderActionButton(
+    key: const ValueKey('reader-directory-toggle'),
+    width: ReaderNavigationTokens.directoryButtonWidth,
+    label: '目录',
+    caption: '目录',
+    selected: _directoryOpen,
+    target: _isCompact ? ScoreLayout.touchTarget : ScoreLayout.desktopTarget,
+    icon: const ReaderIcon(ReaderGlyph.list),
+    onPressed: _writing || document == null
+        ? null
+        : () async {
+            if (!await _textControls.finish() || !mounted) return;
+            setState(() => _directoryOpen = !_directoryOpen);
+          },
+  );
 
   void _retryOpen() {
     final latest = widget.locate(widget.initialTarget.entryId);
     if (latest != null) {
-      unawaited(_session.open(latest, itemId: widget.itemId, restore: false));
+      unawaited(
+        _session.open(
+          latest,
+          itemId: widget.itemId,
+          pageNumber: widget.initialPageNumber,
+          restore: false,
+        ),
+      );
     }
   }
 
@@ -1052,7 +1134,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           onViewportChanged: _resetViewport,
           onPrevious: () => _navigate(NavigationDirection.backward),
           onNext: () => _navigate(NavigationDirection.forward),
-          blockArrowKeys: _desktopMenuOpen || _quickPageMenu.isOpen,
+          blockArrowKeys:
+              _desktopMenuOpen || _quickPageMenu.isOpen || _pageInputOpen,
           contentBuilder: (_) => DesktopReaderShell(
             fitAspectFor: _effectiveViewMode == ReaderViewMode.continuous
                 ? null
@@ -1072,7 +1155,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                   child: const Text('图片信息'),
                 ),
             ],
+            directory:
+                _directoryOpen && document != null && widget.songbooks != null
+                ? _directory(document)
+                : null,
             primaryActions: [
+              if (widget.songbooks != null &&
+                  p
+                          .extension(document?.target.displayPath ?? '')
+                          .toLowerCase() ==
+                      '.pdf')
+                _directoryButton(document),
               if (widget.headerAction != null) widget.headerAction!,
               if (widget.allowAnnotations)
                 ReaderActionButton(
@@ -1121,7 +1214,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                 _transform.value = Matrix4.identity();
               }
             },
-            onJump: () => unawaited(_jumpDialog()),
+            onJump: () {},
+            pageControl: document == null
+                ? null
+                : _pageNumber(document, label: pageLabel),
             onAnnotate: widget.allowAnnotations
                 ? () => unawaited(_annotationAction())
                 : null,
@@ -1390,6 +1486,23 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _session.rememberPresented(visible, document.pageCount);
     }
     widget.onPresented?.call(visible);
+    // Begin metadata work only after the document has presented real paper.
+    final service = widget.songbooks;
+    if (service != null &&
+        p.extension(document.target.displayPath).toLowerCase() == '.pdf' &&
+        _indexedDocuments.add(document.target.key)) {
+      unawaited(
+        service
+            .load(
+              PageMetadataKey(
+                document.target.entryId,
+                document.target.revisionId,
+              ),
+            )
+            .then<void>((_) {})
+            .catchError((Object _) {}),
+      );
+    }
     _historyPosition = visible;
     _historyItemId = _session.position?.setListItemId;
     if (visible == _shownPage && !_presented) {
@@ -1988,20 +2101,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             const SizedBox(width: ScoreSpace.xs),
           ],
           if (_capabilities.multipleModes) _compactModeMenu(),
-          if (document != null)
-            TextButton(
-              onPressed: _writing ? null : _jumpDialog,
-              style: TextButton.styleFrom(
-                minimumSize: const Size(0, ScoreLayout.touchTarget),
-                padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
-                foregroundColor: t.ink500,
-                textStyle: Theme.of(context).textTheme.labelLarge,
-                splashFactory: NoSplash.splashFactory,
-              ),
-              child: Text(
-                '${_visiblePage?.pageNumber ?? _session.page} / ${document.pageCount}',
-              ),
-            ),
+          if (widget.songbooks != null &&
+              p.extension(document?.target.displayPath ?? '').toLowerCase() ==
+                  '.pdf')
+            _directoryButton(document),
+          if (document != null) _pageNumber(document),
           if (widget.allowAnnotations) ...[
             const SizedBox(width: ScoreSpace.xs),
             ReaderActionButton(
@@ -2144,7 +2248,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       enabled:
           !_picking &&
           _session.current?.target.key == _visibleDocument?.target.key,
-      onCancel: _session.cancelSeek,
+      onCancel: (gesture) {
+        _canceledSeekGestures[gesture] = true;
+        _session.cancelSeek(gesture);
+      },
       onSeek: (number, gesture) async {
         if (_writing ||
             _picking ||
@@ -2155,10 +2262,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         if (!await _textControls.finish() ||
             !mounted ||
             _visibleDocument != document ||
-            _writing) {
+            _writing ||
+            _canceledSeekGestures[gesture] == true) {
           return;
         }
-        _direction = number >= _visiblePage!.pageNumber ? 1 : -1;
+        _direction = 0;
         _requestedAt =
             widget.presentationClock?.call() ?? readerPresentationNow();
         unawaited(_session.seek(number, gesture: gesture));

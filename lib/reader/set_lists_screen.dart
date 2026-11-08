@@ -1,3 +1,4 @@
+import '../songbook/songbook_service.dart';
 import '../library/score_path_label.dart';
 
 import 'dart:async';
@@ -82,6 +83,7 @@ class SetListsScreen extends StatelessWidget {
     this.onSelectionChanged,
     this.onBack,
     this.pageCounts,
+    this.songbooks,
     this.onReaderActive,
   });
   final ReaderWorkspace workspace;
@@ -98,6 +100,7 @@ class SetListsScreen extends StatelessWidget {
   final ValueChanged<String?>? onSelectionChanged;
   final VoidCallback? onBack;
   final PageCountService? pageCounts;
+  final SongbookService? songbooks;
   final ValueChanged<bool>? onReaderActive;
 
   Future<void> _create(BuildContext context) async {
@@ -193,6 +196,7 @@ class SetListsScreen extends StatelessWidget {
                                 preparationLabel: preparationLabel,
                                 preparationNotice: preparationNotice,
                                 pageCounts: pageCounts,
+                                songbooks: songbooks,
                                 onReaderActive: onReaderActive,
                               ),
                             ),
@@ -431,6 +435,7 @@ class _SetListsEntryState extends State<_SetListsEntry> {
           embedded: screen.embedded,
           onBack: screen.embedded ? screen.onBack ?? () => _select(null) : null,
           pageCounts: screen.pageCounts,
+          songbooks: screen.songbooks,
           onReaderActive: screen.onReaderActive,
         );
       }
@@ -457,6 +462,7 @@ class _SetListDetail extends StatelessWidget {
     this.embedded = false,
     this.onBack,
     this.pageCounts,
+    this.songbooks,
     this.onReaderActive,
   });
   final ReaderWorkspace workspace;
@@ -471,6 +477,7 @@ class _SetListDetail extends StatelessWidget {
   final bool embedded;
   final VoidCallback? onBack;
   final PageCountService? pageCounts;
+  final SongbookService? songbooks;
   final ValueChanged<bool>? onReaderActive;
   List<ScoreCatalogEntry> _catalogEntries() =>
       catalog?.call() ?? targets().map(ScoreCatalogEntry.fromTarget).toList();
@@ -574,6 +581,7 @@ class _SetListDetail extends StatelessWidget {
             workspace: workspace,
             locate: locate,
             initialTarget: ready,
+            songbooks: songbooks,
             setListId: listId,
             itemId: item.id,
             sourceChanges: sourceChanges,

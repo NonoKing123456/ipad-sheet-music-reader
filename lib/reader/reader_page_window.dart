@@ -60,7 +60,11 @@ class ReaderPageWindow extends StatefulWidget {
     this.onWillPresent,
     this.onSelected,
   });
-  final int pageNumber, pageCount, direction;
+  final int pageNumber, pageCount;
+
+  /// Zero is an explicit seek/outline jump. Adjacent turns keep their existing
+  /// signed direction and animation, including cross-score prewarming.
+  final int direction;
   final Object documentKey;
   final double Function(int) aspectFor;
   final Widget Function(int)? pageBuilder;
@@ -143,6 +147,17 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   void didUpdateWidget(ReaderPageWindow oldWidget) {
     super.didUpdateWidget(oldWidget);
     _requested = _PageId(widget.documentKey, widget.pageNumber);
+    if (widget.direction == 0 && _incoming != null) {
+      // Retire an obsolete transition before capturing the latest destination.
+      // A desktop group already revealed is the paper the user currently sees.
+      if (_settleRevealed) _displayed = _incoming!;
+      _settleEpoch++;
+      _animation.stop();
+      _incoming = null;
+      _settleRevealed = false;
+      _reversing = false;
+      _startScheduled = false;
+    }
     _capture();
     _tryPresent();
   }
@@ -204,7 +219,11 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     return id.number == widget.pageNumber ||
         (_incoming == null &&
             _requested == _displayed &&
-            id.number == widget.pageNumber + widget.direction);
+            id.number ==
+                widget.pageNumber +
+                    (widget.direction == 0
+                        ? (widget.pageNumber == widget.pageCount ? -1 : 1)
+                        : widget.direction));
   }
 
   bool get _canPrewarm =>
@@ -260,6 +279,19 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       : widget.direction;
   void _tryPresent() {
     if (widget.holdPresentation) return;
+    if (widget.direction == 0 && _requested != _displayed) {
+      if (!(_surfaces[_requested]?.ready ?? false)) return;
+      // Only an explicit jump uses this path. Keep the old paper until the
+      // latest destination is decoded, then replace it in one frame.
+      widget.onWillPresent?.call();
+      _surfaces[_requested]!.owner.onSelected?.call(
+        _requested.document,
+        _requested.number,
+      );
+      _incoming = _requested;
+      _complete();
+      return;
+    }
     if (widget.shortPageTransition) {
       _trySettle();
       return;
