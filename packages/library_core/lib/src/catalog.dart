@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import 'models.dart';
+import 'search.dart';
 
 typedef FileAccessProbe = Future<FileAccess> Function(
     String absolutePath, FileStat stat);
@@ -86,6 +87,8 @@ class LibraryCatalog {
   (FileSystemEntityType, int, DateTime, DateTime, String?)? _backupStamp;
   LibrarySnapshot? _listedSnapshot;
   final _folderListings = <String, FolderListing>{};
+  LibrarySnapshot? _searchSnapshot;
+  final _searchText = <String, (String, PreparedSearchText)>{};
   final _storageWarnings = <String>[];
   int contentHashOperations = 0, contentHashBytesRead = 0;
   int scanFileStatChecks = 0, scanDirectoryEnumerations = 0, scanPathTypeChecks = 0;
@@ -133,6 +136,7 @@ class LibraryCatalog {
   /// Reload after another process updates this catalogue. Does not scan files.
   Future<void> reload() => _withLock(() async {
         _snapshot = await _loadSnapshot();
+        prepareSearchIndex();
       });
 
   /// Metadata cache avoids re-hashing unchanged files. [verifyAll] explicitly
@@ -164,6 +168,7 @@ class LibraryCatalog {
         checkpoint();
         await _saveSnapshot(result.snapshot);
         _snapshot = result.snapshot;
+        prepareSearchIndex();
         return result;
       });
 
@@ -439,19 +444,31 @@ class LibraryCatalog {
     return actual;
   }
 
+  /// Warm in the existing metadata worker before publishing a catalogue. No
+  /// content reads, stat calls or persisted fields are added by preparation.
+  void prepareSearchIndex() {
+    if (!identical(_searchSnapshot, _snapshot)) {
+      final retained = <String>{};
+      final prefix = PreparedSearchText(p.basename(rootPath));
+      for (final entry in _snapshot.availableEntries) {
+        retained.add(entry.id);
+        if (_searchText[entry.id]?.$1 != entry.relativePath) {
+          _searchText[entry.id] = (entry.relativePath,
+              PreparedSearchText.withPrefix(prefix, entry.preparedSearchPath));
+        }
+      }
+      _searchText.removeWhere((id, _) => !retained.contains(id));
+      _searchSnapshot = _snapshot;
+    }
+  }
+
   List<LibraryEntry> search(String query, {String? withinFolder}) {
     final scope = _relativeScope(withinFolder ?? '');
-    final terms = query
-        .trim()
-        .toLowerCase()
-        .split(RegExp(r'\s+'))
-        .where((term) => term.isNotEmpty)
-        .toList();
-    final rootName = p.basename(rootPath).toLowerCase();
+    final compiled = SearchQuery.physicalPath(query);
+    prepareSearchIndex();
     final results = _snapshot.availableEntries.where((entry) {
       if (!_inScope(scope, entry.relativePath)) return false;
-      final text = '$rootName/${entry.relativePath}'.toLowerCase();
-      return terms.every(text.contains);
+      return compiled.matches(_searchText[entry.id]!.$2);
     }).toList();
     results.sort((a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
     return List.unmodifiable(results);

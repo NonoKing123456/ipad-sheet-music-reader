@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart' show searchHighlightStart;
 import 'package:flutter/gestures.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
 import 'package:path/path.dart' as p;
@@ -115,9 +116,7 @@ class LibraryFileRow extends StatelessWidget {
             : ScoreLayout.searchRowHeight) *
         scale.clamp(1, double.infinity);
     final style = ScoreText.headline.copyWith(color: tokens.ink900);
-    final match = query.trim().isEmpty
-        ? -1
-        : name.toLowerCase().indexOf(query.toLowerCase().trim());
+    final match = searchHighlightStart(name, query);
     final title = match < 0
         ? Text(name, style: style, maxLines: 1, overflow: TextOverflow.ellipsis)
         : Text.rich(

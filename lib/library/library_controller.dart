@@ -237,7 +237,7 @@ class LibraryController extends ChangeNotifier {
   final _owners = <String, (CatalogSourceBinding, LibraryEntry)>{};
   List<(String, LibrarySnapshot, String, bool)> _indexedSources = const [];
   final _externalEntries = <String, LibraryEntry>{};
-  final _searchText = <String, String>{};
+  final _searchText = <String, PreparedSearchText>{};
   (LibrarySnapshot, String, String)? _listingKey;
   FolderListing? _listing;
   (LibrarySnapshot, String, String, String, bool)? _searchKey;
@@ -311,12 +311,13 @@ class LibraryController extends ChangeNotifier {
     _searchText.clear();
     final entries = <LibraryEntry>[];
     for (final source in currentSources) {
+      final prefix = PreparedSearchText(source.name);
       for (final e in source.catalog.snapshot.entries) {
         final external = _external(source, e);
         _owners[external.id] = (source, e);
         _externalEntries[external.id] = external;
-        _searchText[external.id] = '${source.name}/${e.relativePath}'
-            .toLowerCase();
+        _searchText[external.id] =
+            PreparedSearchText.withPrefix(prefix, e.preparedSearchPath);
         entries.add(external);
       }
     }
@@ -371,7 +372,7 @@ class LibraryController extends ChangeNotifier {
       searchCurrentFolder,
     );
     if (key == _searchKey) return _searchResults;
-    final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+    final compiled = SearchQuery.physicalPath(query);
     _searchKey = key;
     return _searchResults = combined.availableEntries
         .where((entry) {
@@ -381,7 +382,7 @@ class LibraryController extends ChangeNotifier {
                   !folderContains(currentFolder, entry.relativePath))) {
             return false;
           }
-          return terms.every(_searchText[entry.id]!.contains);
+          return compiled.matches(_searchText[entry.id]!);
         })
         .toList(growable: false);
   }
@@ -694,13 +695,14 @@ class LibraryController extends ChangeNotifier {
     }
     final source = currentSources.firstWhere((s) => s.id == sourceId);
     final replacements = <String, LibraryEntry>{};
+    final prefix = PreparedSearchText(source.name);
     for (final entry in entries) {
       final external = _external(source, entry);
       replacements[external.id] = external;
       _owners[external.id] = (source, entry);
       _externalEntries[external.id] = external;
-      _searchText[external.id] = '${source.name}/${entry.relativePath}'
-          .toLowerCase();
+      _searchText[external.id] =
+          PreparedSearchText.withPrefix(prefix, entry.preparedSearchPath);
     }
     _combined = _combined!.replacingEntries(
       replacements.values,

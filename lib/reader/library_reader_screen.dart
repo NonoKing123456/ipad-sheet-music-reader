@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart' show physicalFileDisplayName;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -2073,7 +2074,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                         children: [
                           Flexible(
                             child: Text(
-                              p.posix.basename(title.replaceAll('\\', '/')),
+                              physicalFileDisplayName(
+                                p.posix.basename(title.replaceAll('\\', '/')),
+                              ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: ScoreText.body.copyWith(

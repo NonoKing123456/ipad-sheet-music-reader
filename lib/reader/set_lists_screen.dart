@@ -4,6 +4,7 @@ import '../library/score_path_label.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
@@ -796,8 +797,8 @@ class _SetListDetail extends StatelessWidget {
                         final item = items[index],
                             target = metadata[items[index].entryId];
                         final displayPath = target?.displayPath ?? '目录尚未更新的曲谱';
-                        final filename = p.posix.basename(
-                          displayPath.replaceAll('\\', '/'),
+                        final filename = physicalFileDisplayName(
+                          p.posix.basename(displayPath.replaceAll('\\', '/')),
                         );
                         final path = target == null
                             ? '请更新目录'
@@ -1062,20 +1063,32 @@ class _AddScores extends StatefulWidget {
 }
 
 class _AddScoresState extends State<_AddScores> {
-  String _query = '';
+  SearchQuery _searchQuery = SearchQuery.physicalPath('');
+  final _preparedTargets = <ScoreCatalogEntry, PreparedSearchText>{};
   String? _message;
+
+  @override
+  void didUpdateWidget(covariant _AddScores oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.targets, widget.targets)) _preparedTargets.clear();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final terms = _query
-        .toLowerCase()
-        .split(RegExp(r'\s+'))
-        .where((term) => term.isNotEmpty);
     final matches = widget.targets
         .where(
-          (target) => terms.every(
-            (term) => '${target.displayPath} ${target.parentFolderLabel ?? ''}'
-                .toLowerCase()
-                .contains(term),
+          (target) => _searchQuery.matches(
+            _preparedTargets.putIfAbsent(
+              target,
+              () {
+                final parent = target.parentFolderLabel;
+                return PreparedSearchText.physicalPath(
+                  target.sourceId == null && parent != null
+                      ? '$parent / ${p.posix.basename(target.displayPath.replaceAll('\\', '/'))}'
+                      : '${target.sourceName} / ${target.displayPath}',
+                );
+              },
+            ),
           ),
         )
         .toList();
@@ -1108,7 +1121,8 @@ class _AddScoresState extends State<_AddScores> {
                   prefixIcon: ReaderIcon(ReaderGlyph.search),
                   hintText: '搜索曲名或路径',
                 ),
-                onChanged: (value) => setState(() => _query = value),
+                onChanged: (value) =>
+                    setState(() => _searchQuery = SearchQuery.physicalPath(value)),
               ),
               if (_message != null)
                 Padding(
@@ -1133,8 +1147,8 @@ class _AddScoresState extends State<_AddScores> {
                         child: Checkbox(value: included, onChanged: null),
                       ),
                       title: Text(
-                        p.posix.basename(
-                          target.displayPath.replaceAll('\\', '/'),
+                        physicalFileDisplayName(
+                          p.posix.basename(target.displayPath.replaceAll('\\', '/')),
                         ),
                         style: ScoreText.headline,
                       ),

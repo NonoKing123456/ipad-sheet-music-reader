@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 
 import 'page_metadata.dart';
@@ -29,6 +30,8 @@ class SongbookItem {
   final bool manual, needsReview;
   final String? sourceSignature;
   final int modified;
+  late final PreparedSearchText _searchText =
+      PreparedSearchText([...ancestors, title].join(' / '));
   bool get canNavigate => pageNumber != null && !needsReview;
   SongbookItem copyWith(
           {String? title,
@@ -153,15 +156,14 @@ class SongbookSearchHit {
 List<SongbookSearchHit> searchSongbooks(
     Iterable<SongbookIndex> indexes, String query,
     {PageMetadataKey? key, int limit = 100}) {
-  final terms = query.trim().toLowerCase().split(RegExp(r'\s+'));
+  final compiled = SearchQuery(query);
   if (query.trim().isEmpty || limit < 1) return [];
   final hits = <SongbookSearchHit>[];
   for (final index in indexes) {
     if (key != null && index.key != key) continue;
     for (final item in index.items) {
       // File names and source paths deliberately never enter this search text.
-      final text = [...item.ancestors, item.title].join(' / ').toLowerCase();
-      if (terms.every(text.contains)) {
+      if (compiled.matches(item._searchText)) {
         hits.add(SongbookSearchHit(index.key, item));
         if (hits.length >= limit) return hits;
       }

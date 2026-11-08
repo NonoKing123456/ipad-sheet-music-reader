@@ -209,6 +209,7 @@ class ReplicaLibraryView {
     try {
       await result._reloadAndVerify(
           verifyAll: verifyAll, deferVerification: deferVerification);
+      result.snapshot;
       return result;
     } finally {
       await lease.close();
@@ -539,9 +540,12 @@ class ReplicaLibraryView {
       ..addAll(ready);
   }
 
+  final _searchText = <String, PreparedSearchText>{};
+
   LibrarySnapshot get snapshot {
     if (_presentation case final cached?) return cached;
     _entryIndex.clear();
+    _searchText.clear();
     _manifestIndex.clear();
     _presentationPaths.clear();
     final entries = <LibraryEntry>[];
@@ -566,6 +570,7 @@ class ReplicaLibraryView {
         lastSeenUtc: _savedUtc,
       );
       entries.add(entry);
+      _searchText[e.entryId] = entry.preparedSearchPath;
       _entryIndex[e.entryId] = entry;
       _manifestIndex[e.entryId] = e;
       _presentationPaths[e.entryId] = path;
@@ -581,15 +586,11 @@ class ReplicaLibraryView {
   List<LibraryEntry> search(String query, {String? withinFolder}) {
     final scope = withinFolder ?? '';
     validatePortablePath(scope, folder: true);
-    final terms = query
-        .toLowerCase()
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((t) => t.isNotEmpty);
+    final compiled = SearchQuery.physicalPath(query);
     final result = snapshot.availableEntries
         .where((e) =>
             (scope.isEmpty || e.relativePath.startsWith('$scope/')) &&
-            terms.every(e.relativePath.toLowerCase().contains))
+            compiled.matches(_searchText[e.id]!))
         .toList()
       ..sort((a, b) => a.relativePath.compareTo(b.relativePath));
     return List.unmodifiable(result);

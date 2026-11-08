@@ -1557,7 +1557,9 @@ class _LibraryScreenState extends State<LibraryScreen>
                       return LibraryFileRow(
                         key: ValueKey('library-file-${entry.id}'),
                         leading: _HostLibraryIcon(path: entry.relativePath),
-                        name: p.posix.basename(entry.relativePath),
+                        name: physicalFileDisplayName(
+                          p.posix.basename(entry.relativePath),
+                        ),
                         query: library.searching ? library.query : '',
                         subtitle: library.searching
                             ? '${library.sourceNameFor(entry)} / ${scoreParentFolder(entry.relativePath)}'

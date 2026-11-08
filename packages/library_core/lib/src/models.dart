@@ -1,3 +1,5 @@
+import 'search.dart';
+
 /// The library's existing case-insensitive path order, with a stable case tie.
 int compareLibraryPaths(String a, String b) {
   final insensitive = a.toLowerCase().compareTo(b.toLowerCase());
@@ -78,6 +80,11 @@ class LibraryEntry {
   final String currentRevisionId;
   final DateTime lastSeenUtc;
   final String? platformFileId;
+  PreparedSearchText? _preparedSearchPath;
+
+  /// Pure metadata cache, intentionally excluded from JSON and wire formats.
+  PreparedSearchText get preparedSearchPath => _preparedSearchPath ??=
+      PreparedSearchText.physicalPath(relativePath);
 
   ContentRevision get currentRevision =>
       revisions.firstWhere((revision) => revision.id == currentRevisionId);
@@ -90,8 +97,8 @@ class LibraryEntry {
     String? currentRevisionId,
     DateTime? lastSeenUtc,
     String? platformFileId,
-  }) =>
-      LibraryEntry(
+  }) {
+    final next = LibraryEntry(
         id: id,
         relativePath: relativePath ?? this.relativePath,
         status: status ?? this.status,
@@ -101,6 +108,11 @@ class LibraryEntry {
         lastSeenUtc: lastSeenUtc ?? this.lastSeenUtc,
         platformFileId: platformFileId ?? this.platformFileId,
       );
+    if (next.relativePath == this.relativePath) {
+      next._preparedSearchPath = _preparedSearchPath;
+    }
+    return next;
+  }
 
   Map<String, Object?> toJson() => {
         'id': id,

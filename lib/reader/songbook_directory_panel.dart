@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 
 import '../songbook/songbook_service.dart';
@@ -34,7 +35,9 @@ class SongbookDirectoryPanel extends StatefulWidget {
 
 class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
   SongbookIndex? _index;
-  String _query = '';
+  SearchQuery _searchQuery = SearchQuery('');
+  SongbookIndex? _preparedIndex;
+  Map<String, PreparedSearchText> _preparedItems = {};
   bool _loading = true, _editing = false, _saving = false;
   String? _selectedId, _error;
   bool _adding = false;
@@ -240,15 +243,15 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
             ? byDepth
             : originalOrder[a.id]!.compareTo(originalOrder[b.id]!);
       });
-    final terms = _query.trim().toLowerCase().split(RegExp(r'\s+'));
+    if (!identical(_preparedIndex, _index)) {
+      _preparedIndex = _index;
+      _preparedItems = {
+        for (final item in source)
+          item.id: PreparedSearchText('${item.ancestors.join(' ')} ${item.title}'),
+      };
+    }
     final items = all
-        .where(
-          (item) => terms.every(
-            ('${item.ancestors.join(' ')} ${item.title}')
-                .toLowerCase()
-                .contains,
-          ),
-        )
+        .where((item) => _searchQuery.matches(_preparedItems[item.id]!))
         .toList();
     String? currentId;
     int nearest = 0;
@@ -308,7 +311,7 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  widget.title,
+                  physicalFileDisplayName(widget.title),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: ScoreText.caption.copyWith(color: t.ink500),
@@ -322,7 +325,8 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                 child: TextField(
                   style: ScoreText.body,
                   key: const ValueKey('songbook-directory-search'),
-                  onChanged: (value) => setState(() => _query = value),
+                  onChanged: (value) =>
+                      setState(() => _searchQuery = SearchQuery(value)),
                   decoration: InputDecoration(
                     isDense: true,
                     filled: true,

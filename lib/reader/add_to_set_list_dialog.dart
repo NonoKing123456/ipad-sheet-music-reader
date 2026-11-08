@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart' show physicalFileDisplayName;
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
 
@@ -147,8 +148,8 @@ class _AddToSetListDialogState extends State<_AddToSetListDialog> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  p.posix.basenameWithoutExtension(
-                    widget.displayPath.replaceAll('\\', '/'),
+                  physicalFileDisplayName(
+                    p.posix.basename(widget.displayPath.replaceAll('\\', '/')),
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

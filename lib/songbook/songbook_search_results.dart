@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
 
 import '../library/library_widgets.dart';
@@ -92,7 +93,7 @@ class SongbookSearchResultRow extends StatelessWidget {
     leading: const ReaderIcon(ReaderGlyph.book),
     name: hit.item.title,
     subtitle:
-        '$pathLabel${hit.item.ancestors.isEmpty ? '' : ' / ${hit.item.ancestors.join(' / ')}'}',
+        '${physicalFileDisplayPath(pathLabel)}${hit.item.ancestors.isEmpty ? '' : ' / ${hit.item.ancestors.join(' / ')}'}',
     metadata: Row(
       children: [
         SizedBox(

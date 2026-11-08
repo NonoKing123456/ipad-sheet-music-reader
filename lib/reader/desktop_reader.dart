@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:library_core/library_core.dart' show physicalFileDisplayName;
 
 import '../theme/tokens.dart';
 import '../theme/reader_icons.dart';
@@ -68,8 +69,60 @@ class DesktopReaderShell extends StatefulWidget {
 }
 
 class _DesktopReaderShellState extends State<DesktopReaderShell>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   bool _shown = true, _reserveBar = true;
+  Widget? _retainedDirectory;
+  double _directoryFrom = 0, _directoryTo = 0;
+  late final AnimationController _directoryAnimation =
+      AnimationController(vsync: this, value: 1, duration: ScoreMotion.panel)
+        ..addStatusListener((status) {
+          if (status == AnimationStatus.completed &&
+              _directoryTo == 0 &&
+              widget.directory == null &&
+              _retainedDirectory != null &&
+              mounted) {
+            setState(() => _retainedDirectory = null);
+          }
+        });
+
+  double get _directoryProgress =>
+      _directoryFrom +
+      (_directoryTo - _directoryFrom) *
+          Curves.easeOutCubic.transform(_directoryAnimation.value);
+
+  @override
+  void initState() {
+    super.initState();
+    _retainedDirectory = widget.directory;
+    _directoryFrom = _directoryTo = widget.directory == null ? 0 : 1;
+  }
+
+  void _animateDirectory() {
+    final target = widget.directory == null ? 0.0 : 1.0;
+    final current = _directoryProgress;
+    _retainedDirectory = widget.directory ?? _retainedDirectory;
+    _directoryFrom = current;
+    _directoryTo = target;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _directoryFrom = target;
+      _directoryAnimation.value = 1;
+      if (target == 0) _retainedDirectory = null;
+    } else {
+      _directoryAnimation.forward(from: 0);
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context) &&
+        _directoryAnimation.isAnimating) {
+      _directoryFrom = _directoryTo;
+      _directoryAnimation.value = 1;
+      if (_directoryTo == 0) _retainedDirectory = null;
+    }
+  }
+
   final _topKey = GlobalKey();
   final _arrangementMenu = MenuController();
   final _readingControls = ScrollController();
@@ -105,6 +158,11 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
   @override
   void didUpdateWidget(covariant DesktopReaderShell oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if ((oldWidget.directory == null) != (widget.directory == null)) {
+      _animateDirectory();
+    } else if (widget.directory != null) {
+      _retainedDirectory = widget.directory;
+    }
     if (widget.editing && !oldWidget.editing && !_shown) {
       _shown = _reserveBar = true;
       _animation.forward();
@@ -113,6 +171,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
 
   @override
   void dispose() {
+    _directoryAnimation.dispose();
     _animation.dispose();
     _readingControls.dispose();
     super.dispose();
@@ -154,106 +213,131 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
         ],
       ),
     );
-    return LayoutBuilder(
-      builder: (context, constraints) => Stack(
-        fit: StackFit.expand,
-        children: [
-          Column(
-            children: [
-              ClipRect(
-                child: Align(
-                  heightFactor: _reserveBar ? 1 : 0,
-                  child: IgnorePointer(
-                    ignoring: !_shown,
-                    child: ExcludeFocus(
-                      excluding: !_shown,
-                      child: ExcludeSemantics(
+    return AnimatedBuilder(
+      animation: _directoryAnimation,
+      builder: (context, _) => LayoutBuilder(
+        builder: (context, constraints) => Stack(
+          fit: StackFit.expand,
+          children: [
+            Column(
+              children: [
+                ClipRect(
+                  child: Align(
+                    heightFactor: _reserveBar ? 1 : 0,
+                    child: IgnorePointer(
+                      ignoring: !_shown,
+                      child: ExcludeFocus(
                         excluding: !_shown,
-                        child: AnimatedBuilder(
-                          animation: _animation,
-                          child: bar,
-                          builder: (context, child) {
-                            final progress = Curves.easeOutCubic.transform(
-                              _animation.value,
-                            );
-                            return Opacity(
-                              opacity: progress,
-                              child: Transform.translate(
-                                offset: Offset(
-                                  0,
-                                  -ScoreSpace.sm * (1 - progress),
+                        child: ExcludeSemantics(
+                          excluding: !_shown,
+                          child: AnimatedBuilder(
+                            animation: _animation,
+                            child: bar,
+                            builder: (context, child) {
+                              final progress = Curves.easeOutCubic.transform(
+                                _animation.value,
+                              );
+                              return Opacity(
+                                opacity: progress,
+                                child: Transform.translate(
+                                  offset: Offset(
+                                    0,
+                                    -ScoreSpace.sm * (1 - progress),
+                                  ),
+                                  child: child,
                                 ),
-                                child: child,
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, available) => Row(
-                    children: [
-                      if (widget.directory != null)
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, available) => Row(
+                      children: [
                         SizedBox(
-                          width: ReaderNavigationTokens.directoryWidth,
-                          child: widget.directory!,
+                          key: const ValueKey(
+                            'desktop-reader-directory-extent',
+                          ),
+                          width:
+                              ReaderNavigationTokens.directoryWidth *
+                              _directoryProgress,
+                          child: ClipRect(
+                            child: OverflowBox(
+                              alignment: Alignment.centerRight,
+                              minWidth: ReaderNavigationTokens.directoryWidth,
+                              maxWidth: ReaderNavigationTokens.directoryWidth,
+                              child: SizedBox(
+                                width: ReaderNavigationTokens.directoryWidth,
+                                child: ExcludeFocus(
+                                  excluding: widget.directory == null,
+                                  child: IgnorePointer(
+                                    ignoring: widget.directory == null,
+                                    child:
+                                        _retainedDirectory ??
+                                        const SizedBox.shrink(),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                      Expanded(
-                        child: ReaderChromeViewport(
-                          key: const ValueKey('desktop-reader-content-inset'),
-                          topInset: constraints.maxHeight - available.maxHeight,
-                          fitAspectFor: widget.fitAspectFor,
-                          child: widget.contentBuilder(_toggle),
+                        Expanded(
+                          child: ReaderChromeViewport(
+                            key: const ValueKey('desktop-reader-content-inset'),
+                            animateWidthChanges: false,
+                            topInset:
+                                constraints.maxHeight - available.maxHeight,
+                            fitAspectFor: widget.fitAspectFor,
+                            child: widget.contentBuilder(_toggle),
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (widget.notices.isNotEmpty)
+              Positioned(
+                top: (_shown ? _barHeight : 0) + ScoreSpace.sm,
+                right: ScoreSpace.sm,
+                child: ReaderStatusButton(
+                  label: widget.statusLabel,
+                  details: widget.notices,
+                ),
+              ),
+            if (widget.loading)
+              const Positioned(
+                right: ScoreLayout.readerStatusInset,
+                bottom: ScoreLayout.readerStatusInset,
+                child: IgnorePointer(
+                  child: SizedBox.square(
+                    dimension: ScoreLayout.readerStatusIndicatorSize,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                 ),
               ),
-            ],
-          ),
-          if (widget.notices.isNotEmpty)
             Positioned(
-              top: (_shown ? _barHeight : 0) + ScoreSpace.sm,
-              right: ScoreSpace.sm,
-              child: ReaderStatusButton(
-                label: widget.statusLabel,
-                details: widget.notices,
-              ),
-            ),
-          if (widget.loading)
-            const Positioned(
-              right: ScoreLayout.readerStatusInset,
-              bottom: ScoreLayout.readerStatusInset,
+              left: ReaderNavigationTokens.directoryWidth * _directoryProgress,
+              right: 0,
+              bottom: ScoreLayout.dotsBottom,
               child: IgnorePointer(
-                child: SizedBox.square(
-                  dimension: ScoreLayout.readerStatusIndicatorSize,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                ignoring: !_shown,
+                child: ExcludeSemantics(
+                  excluding: !_shown,
+                  child: FadeTransition(
+                    opacity: _animation,
+                    child: widget.bottom,
+                  ),
                 ),
               ),
             ),
-          Positioned(
-            left: widget.directory == null
-                ? 0
-                : ReaderNavigationTokens.directoryWidth,
-            right: 0,
-            bottom: ScoreLayout.dotsBottom,
-            child: IgnorePointer(
-              ignoring: !_shown,
-              child: ExcludeSemantics(
-                excluding: !_shown,
-                child: FadeTransition(
-                  opacity: _animation,
-                  child: widget.bottom,
-                ),
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -509,9 +593,9 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                     onClose: () => widget.onMenuChanged?.call(false),
                     builder: (context, controller, _) => Semantics(
                       button: true,
-                      label: '${widget.title}，曲谱操作',
+                      label: '${physicalFileDisplayName(widget.title)}，曲谱操作',
                       child: Tooltip(
-                        message: widget.title,
+                        message: physicalFileDisplayName(widget.title),
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onTap: disabled || widget.documentMenu.isEmpty
@@ -526,7 +610,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
                               children: [
                                 Flexible(
                                   child: Text(
-                                    widget.title,
+                                    physicalFileDisplayName(widget.title),
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: Theme.of(context).textTheme.bodyLarge

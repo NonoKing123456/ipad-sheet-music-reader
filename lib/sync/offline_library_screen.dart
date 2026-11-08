@@ -851,11 +851,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                   path: entry
                                                                       .relativePath,
                                                                 ),
-                                                                name: p.posix
-                                                                    .basename(
-                                                                      entry
-                                                                          .relativePath,
-                                                                    ),
+                                                                name: physicalFileDisplayName(
+                                                                  p.posix.basename(entry.relativePath),
+                                                                ),
                                                                 query: searching
                                                                     ? _query
                                                                     : '',

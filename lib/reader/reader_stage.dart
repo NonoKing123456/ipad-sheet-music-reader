@@ -607,7 +607,9 @@ class ReaderChromeViewport extends StatefulWidget {
     this.pagePadding = const EdgeInsets.all(ScoreLayout.pageGutter),
     this.transition,
     this.transitionTarget,
+    this.animateWidthChanges = true,
   });
+  final bool animateWidthChanges;
   final double topInset;
   final Widget child;
   final double Function(Size viewport)? fitAspectFor;
@@ -665,7 +667,17 @@ class _ReaderChromeViewportState extends State<ReaderChromeViewport>
 
   void _layout(Size size, bool reduceMotion) {
     final paper = _paperRect(size);
-    if (_layoutSize == null) {
+    if (_layoutSize != null &&
+        _layoutSize!.width != size.width &&
+        !widget.animateWidthChanges) {
+      // The desktop dock already interpolates its width. Following that clock
+      // directly prevents a second paper transform from chasing every frame.
+      _animation.stop();
+      _externalClock = false;
+      _animation.value = 1;
+      _fromPaper = _toPaper = paper;
+      _fromInset = _toInset = widget.topInset;
+    } else if (_layoutSize == null) {
       _fromPaper = _toPaper = paper;
       _fromInset = _toInset = widget.topInset;
     } else if (_layoutSize != size || _toInset != widget.topInset) {

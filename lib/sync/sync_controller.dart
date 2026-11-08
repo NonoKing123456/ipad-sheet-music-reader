@@ -1076,7 +1076,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   final _scoreCatalog = <String, ScoreCatalogEntry>{};
   List<ScoreCatalogEntry> _scoreCatalogValues = const [];
   final _offlineByFolder = <(String, String), List<LibraryEntry>>{};
-  final _offlineSearchText = <String, String>{};
+  final _offlineSearchText = <String, PreparedSearchText>{};
   List<LibraryEntry> _offlineMissing = const [];
   (LibrarySnapshot?, String?, String, String, bool)? _offlineSearchKey;
   List<LibraryEntry> _offlineSearchResults = const [];
@@ -1146,6 +1146,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       snapshot?.entries.where((entry) => entry.status == EntryStatus.missing) ??
           <LibraryEntry>[],
     );
+    final searchPrefixes = {
+      for (final name in names.values) name: PreparedSearchText(name),
+      '': PreparedSearchText(''),
+    };
     for (final entry in snapshot?.availableEntries ?? <LibraryEntry>[]) {
       final metadata = _scoreCatalog[entry.id];
       final folder = p.posix.dirname(entry.relativePath);
@@ -1155,8 +1159,10 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
               )] ??=
               [])
           .add(entry);
-      _offlineSearchText[entry.id] =
-          '${metadata?.sourceName ?? ''}/${entry.relativePath}'.toLowerCase();
+      _offlineSearchText[entry.id] = PreparedSearchText.withPrefix(
+        searchPrefixes[metadata?.sourceName ?? '']!,
+        entry.preparedSearchPath,
+      );
     }
   }
 
@@ -1187,7 +1193,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           withinFolder,
         );
         if (key != _directorySearchKey) {
-          final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+          final compiled = SearchQuery.physicalPath(query);
           _directorySearchIds = [
             for (final id in directory.availableIds)
               if ((!withinFolder ||
@@ -1196,7 +1202,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
                             folder,
                             selected.itemFor(id)!.relativePath,
                           ))) &&
-                  terms.every(directory.searchText[id]!.contains))
+                  compiled.matches(directory.searchText[id]!))
                 id,
           ];
           _directorySearchKey = key;
@@ -1211,14 +1217,14 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
     final key = (_scoreCatalogSnapshot, sourceId, folder, query, withinFolder);
     if (key == _offlineSearchKey) return _offlineSearchResults;
-    final terms = query.toLowerCase().trim().split(RegExp(r'\s+'));
+    final compiled = SearchQuery.physicalPath(query);
     _offlineSearchKey = key;
     return _offlineSearchResults = [
       for (final entry in offlineSnapshot?.availableEntries ?? <LibraryEntry>[])
         if ((!withinFolder ||
                 (_scoreCatalog[entry.id]?.sourceId == sourceId &&
                     folderContains(folder, entry.relativePath))) &&
-            terms.every(_offlineSearchText[entry.id]!.contains))
+            compiled.matches(_offlineSearchText[entry.id]!))
           entry,
     ];
   }

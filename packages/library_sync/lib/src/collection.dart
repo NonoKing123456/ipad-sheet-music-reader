@@ -168,8 +168,8 @@ class CollectionDirectoryIndex {
       (_byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= [])
           .add(item.entryId);
       searchText[item.entryId] =
-          '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}'
-              .toLowerCase();
+          PreparedSearchText.physicalPath(
+              '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}');
       update(item, readable[item.entryId], ready);
     }
     availableIds.sort(_compareIds);
@@ -182,7 +182,7 @@ class CollectionDirectoryIndex {
   final Map<String, int> _sourceOrder;
   final availableIds = <String>[];
   final missingIds = <String>[];
-  final searchText = <String, String>{};
+  final searchText = <String, PreparedSearchText>{};
   final _byFolder = <(String, String), List<String>>{};
   final _descriptors = <String, (String, String, bool)>{};
   final _contributions = <String, (bool, bool, bool)>{};
@@ -255,7 +255,8 @@ class CollectionDirectoryIndex {
       _insertOrdered(
           _byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= [],
           item.entryId);
-      searchText[item.entryId] = '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}'.toLowerCase();
+      searchText[item.entryId] = PreparedSearchText.physicalPath(
+          '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}');
     }
     update(item, readable, ready);
   }

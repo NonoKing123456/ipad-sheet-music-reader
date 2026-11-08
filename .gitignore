@@ -252,3 +252,4 @@
 !/lib/songbook/songbook_search_results.dart
 !/lib/songbook/songbook_service.dart
 !/packages/library_sync/lib/src/songbook.dart
+!/packages/library_core/lib/src/search.dart
