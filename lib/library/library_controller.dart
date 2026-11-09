@@ -1,3 +1,4 @@
+import '../recent/recent_reading_store.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -216,6 +217,9 @@ class LibraryController extends ChangeNotifier {
        _catalogLoader = catalogLoader ?? _openInWorker;
 
   final Directory dataDirectory;
+  late final recentReading = RecentReadingStore(
+    File(p.join(dataDirectory.path, 'recent-reading.json')),
+  );
   final bool watchSource;
   final LibraryScanRunner _scanRunner;
   final LibraryCatalogLoader _catalogLoader;
@@ -836,6 +840,7 @@ class LibraryController extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
+    unawaited(recentReading.initialize());
     try {
       await dataDirectory.create(recursive: true);
       final settings = File(
@@ -1388,6 +1393,7 @@ class LibraryController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    recentReading.dispose();
     for (final waiter in _importScanWaiters) {
       if (!waiter.isCompleted) waiter.complete();
     }

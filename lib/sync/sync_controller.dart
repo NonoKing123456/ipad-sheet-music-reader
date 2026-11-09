@@ -1234,6 +1234,11 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     return _scoreCatalogValues;
   }
 
+  /// Bounded lookup for the at-most-100 local history rows.
+  LibraryEntry? recentEntry(String id) => activeCollection != null
+      ? activeCollection!.entryForDisplay(id)
+      : replica?.snapshot.entryById(id);
+
   String sourceNameFor(String entryId) {
     final selected = activeCollection;
     if (selected != null) {

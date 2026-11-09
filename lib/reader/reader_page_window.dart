@@ -58,6 +58,7 @@ class ReaderPageWindow extends StatefulWidget {
     this.paperWidthTransition = false,
     this.shortPageTransition = false,
     this.onWillPresent,
+    this.onWillPresentPage,
     this.onSelected,
   });
   final int pageNumber, pageCount;
@@ -85,6 +86,11 @@ class ReaderPageWindow extends StatefulWidget {
   /// The callback resets its viewport in the same frame that reveals the group.
   final bool shortPageTransition;
   final VoidCallback? onWillPresent;
+
+  /// Prepaint geometry for the exact surface being revealed, including a
+  /// replacement during a rapid turn. Metadata persistence still uses
+  /// [onPresented] after the selected surface has painted.
+  final void Function(Object document, int page)? onWillPresentPage;
 
   /// Metadata selection for the frame being revealed. Persistence still waits
   /// for [onPresented], after an actual selected paint acknowledgement.
@@ -277,13 +283,28 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   int _directionFor(_PageId id) => id.document == _displayed.document
       ? (id.number > _displayed.number ? 1 : -1)
       : widget.direction;
+  bool _geometryPresentationScheduled = false;
   void _tryPresent() {
+    // Geometry listeners can include ancestors of this surface. Publish the
+    // exact target before the next build, never from a descendant's build.
+    if ((widget.onWillPresentPage != null || widget.onWillPresent != null) &&
+        SchedulerBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+      if (!_geometryPresentationScheduled) {
+        _geometryPresentationScheduled = true;
+        SchedulerBinding.instance.scheduleFrameCallback((_) {
+          _geometryPresentationScheduled = false;
+          if (mounted) setState(_tryPresent);
+        });
+      }
+      return;
+    }
     if (widget.holdPresentation) return;
     if (widget.direction == 0 && _requested != _displayed) {
       if (!(_surfaces[_requested]?.ready ?? false)) return;
       // Only an explicit jump uses this path. Keep the old paper until the
       // latest destination is decoded, then replace it in one frame.
-      widget.onWillPresent?.call();
+      _preparePresentation(_requested);
       _surfaces[_requested]!.owner.onSelected?.call(
         _requested.document,
         _requested.number,
@@ -320,6 +341,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       if (MediaQuery.disableAnimationsOf(context)) {
         _incoming = _requested;
         _reversing = false;
+        _preparePresentation(_incoming!);
         _complete();
         return;
       }
@@ -341,6 +363,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
         final resume = _reversing;
         _incoming = _requested;
         _reversing = false;
+        _preparePresentation(_incoming!);
         _trim();
         if (!_startScheduled && (resume || !_animation.isAnimating)) {
           _animation.forward();
@@ -360,6 +383,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     _reversing = false;
     if (MediaQuery.disableAnimationsOf(context) ||
         (widget.forwardWindowOnly && widget.direction == 0)) {
+      _preparePresentation(_incoming!);
       _complete();
     } else {
       final requested = widget.requestedAt ?? _now();
@@ -419,7 +443,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
         // This callback runs before build/paint, so the new paper and its fit
         // transform become visible together. Hidden decoded neighbours do not
         // have to paint before they may be selected.
-        widget.onWillPresent?.call();
+        _preparePresentation(_incoming!);
         _settleRevealed = true;
         final selected = _incoming!;
         _surfaces[selected]!.owner.onSelected?.call(
@@ -445,7 +469,13 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     }
   }
 
+  void _preparePresentation(_PageId id) {
+    widget.onWillPresent?.call();
+    _surfaces[id]?.owner.onWillPresentPage?.call(id.document, id.number);
+  }
+
   void _launchAnimation() {
+    _preparePresentation(_incoming!);
     final elapsed = (_now() - _transitionStart).inMicroseconds / 90000;
     _animation.forward(from: elapsed.clamp(0.0, 1.0));
   }

@@ -82,7 +82,8 @@ class LibraryReaderScreen extends StatefulWidget {
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
 
-class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
+class _LibraryReaderScreenState extends State<LibraryReaderScreen>
+    with SingleTickerProviderStateMixin {
   bool get _isCompact => DeviceLayoutScope.isCompact(context);
   ReaderViewCapabilities get _capabilities =>
       ReaderViewCapabilities.of(context);
@@ -155,6 +156,89 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   (PageKey, DocumentKey)? _prewarmAnchor;
   int _color = 0xffc12b32;
   double _scale = 1;
+  // Current reading-sequence layout, deliberately not written to preferences.
+  bool _coverLayout = false;
+  bool _layoutChosen = false;
+  PageKey? _layoutPage;
+  late final AnimationController _layoutAnimation = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..addListener(_animatePageLayout);
+  Matrix4? _layoutFrom, _layoutTo;
+  bool _writingLayoutFrame = false;
+
+  void _animatePageLayout() {
+    final from = _layoutFrom, to = _layoutTo;
+    if (from == null || to == null) return;
+    _writingLayoutFrame = true;
+    try {
+      _transform.value = Matrix4Tween(
+        begin: from,
+        end: to,
+      ).transform(Curves.easeOutCubic.transform(_layoutAnimation.value));
+    } finally {
+      _writingLayoutFrame = false;
+    }
+  }
+
+  void _togglePageLayout() {
+    if (!_isCompact ||
+        _tool != null ||
+        _textTool ||
+        _picking ||
+        _visiblePage == null) {
+      return;
+    }
+    _layoutChosen = true;
+    _coverLayout = !_coverLayout;
+    if (_effectiveViewMode == ReaderViewMode.continuous) {
+      _continuous.layout(_coverLayout);
+      setState(() {});
+      return;
+    }
+    final size = _paperViewportSize;
+    if (size == null || size.isEmpty) return;
+    _layoutFrom = Matrix4.copy(_transform.value);
+    _layoutTo = readerPageLayoutMatrix(
+      viewport: size,
+      pageAspect: _readerFitAspect(size),
+      cover: _coverLayout,
+    );
+    _layoutAnimation.stop();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _transform.value = _layoutTo!;
+    } else {
+      _layoutAnimation.forward(from: 0);
+    }
+  }
+
+  void _applyPageLayout({
+    LoadedScore? document,
+    int? number,
+    double? pageAspect,
+  }) {
+    _layoutAnimation.stop();
+    final size = _paperViewportSize;
+    if (size == null ||
+        size.isEmpty ||
+        _effectiveViewMode == ReaderViewMode.continuous) {
+      return;
+    }
+    _transform.value = readerPageLayoutMatrix(
+      viewport: size,
+      pageAspect: pageAspect ?? _readerFitAspect(size),
+      cover: _coverLayout,
+      startAtTop: true,
+    );
+    _layoutPage = document == null
+        ? _visiblePage
+        : PageKey(
+            entryId: document.target.entryId,
+            revisionId: document.target.revisionId,
+            pageNumber: number!,
+          );
+  }
+
   bool _desktopMenuOpen = false;
   PageKey? _shownPage;
   final Set<PageKey> _renderedPages = {};
@@ -360,6 +444,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   void _transformChanged() {
+    // A touch/controller edit takes over from the currently painted zoom.
+    if (!_writingLayoutFrame && _layoutAnimation.isAnimating) {
+      _layoutAnimation.stop();
+    }
     if (!_projectingViewport) {
       _preferredViewportAnchor = null;
       _preferredAnchorPage = null;
@@ -398,10 +486,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _pageWatch = Stopwatch()..start();
         _presented = false;
       }
-      if ((_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
-          _effectiveViewMode == ReaderViewMode.continuous) {
-        _transform.value = Matrix4.identity();
-      }
+      // Retain outgoing paper and transform through the ready/paint gate.
+      // The newly presented page receives its own fit/cover geometry below.
     }
     setState(() {});
     if (_terminalVisiblePage != null) {
@@ -437,6 +523,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     widget.sourceChanges?.removeListener(_session.refreshSource);
     _session.removeListener(_changed);
     _session.dispose();
+    _layoutAnimation.dispose();
     _transform.dispose();
     _textControls.dispose();
     super.dispose();
@@ -833,6 +920,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     onPrevious: () => _navigate(NavigationDirection.backward),
                     onNext: () => _navigate(NavigationDirection.forward),
                     onCenterTap: _picking ? null : toggleTools,
+                    onCenterDoubleTap: _tool != null || _textTool || _picking
+                        ? null
+                        : _togglePageLayout,
                     allowPointerPageTurns:
                         !_picking &&
                         !_textTool &&
@@ -858,6 +948,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     textSelectionKey: _textSelectionKey,
                     textControls: _picking ? null : _textControls,
                     child: ReaderPageWindow(
+                      onWillPresentPage: (key, number) {
+                        if (key != current.target.key) return;
+                        _applyPageLayout(
+                          document: current,
+                          number: number,
+                          pageAspect: current.aspectFor(number),
+                        );
+                      },
                       documentKey: current.target.key,
                       pageNumber: _session.page,
                       pageCount: current.pageCount,
@@ -1212,7 +1310,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               if (_effectiveViewMode == ReaderViewMode.continuous) {
                 _continuous.fit();
               } else {
-                _transform.value = Matrix4.identity();
+                _layoutChosen = true;
+                _coverLayout = false;
+                _applyPageLayout();
               }
             },
             onJump: () {},
@@ -1270,6 +1370,15 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         rasterPageLimit: _isCompact ? 2 : 4,
         touchPanHorizontal: _isCompact,
         edgeToEdge: _isCompact,
+        touchInk: _editing && _tool != null,
+        navigationBlocked:
+            _picking || _desktopMenuOpen || _directoryOpen || _pageInputOpen,
+        textTool: _textTool,
+        onTransformGestureChanged: (active) {
+          if (mounted && _touchTransforming != active) {
+            setState(() => _touchTransforming = active);
+          }
+        },
         requestedPage: _session.page,
         navigationToken: _continuousNavigation,
         initialAnchor: _continuousRestore,
@@ -1278,6 +1387,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         retainDocument: current.retain,
         releaseDocument: current.release,
         onCenterTap: toggleBar,
+        onCenterDoubleTap:
+            _isCompact && _tool == null && !_textTool && !_picking
+            ? _togglePageLayout
+            : null,
+        pageLayout: _layoutChosen ? _coverLayout : null,
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
         pageBuilder: (number, active, ready, failed) =>
@@ -1366,6 +1480,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             onCenterTap: _tool != null || _textTool || _picking
                 ? null
                 : toggleBar,
+            onCenterDoubleTap:
+                _isCompact && _tool == null && !_textTool && !_picking
+                ? _togglePageLayout
+                : null,
             allowPointerPageTurns:
                 _tool == null && !_textTool && !_picking && _scale <= 1.01,
             pageAspect: aspect(
@@ -1403,7 +1521,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               forwardWindowOnly: true,
               paperWidthTransition: true,
               shortPageTransition: true,
-              onWillPresent: () => _transform.value = Matrix4.identity(),
+              onWillPresentPage: (key, index) {
+                if (key != viewKey) return;
+                final group = groups.at(index);
+                _applyPageLayout(
+                  document: current,
+                  number: group.contains(_session.page)
+                      ? _session.page
+                      : group.first,
+                  pageAspect: aspect(index),
+                );
+              },
               prewarm: warm,
               surfaceBackground: Colors.transparent,
               retainDocument: current.retain,
@@ -1472,6 +1600,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         _visiblePage = visible;
         _visibleDocument = document;
         _annotationPage = _editing ? visible : null;
+        if (_layoutPage != visible) _applyPageLayout();
       });
     }
   }
@@ -2246,7 +2375,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     return ReaderPageSeekBar(
       hitRegionKey: _seekRegionKey,
       key: ValueKey(_visibleDocument?.target.key),
-      currentPage: _visiblePage!.pageNumber,
+      currentPage: _effectiveViewMode == ReaderViewMode.spread
+          ? ReaderSpreads(
+              pageCount: _visibleDocument!.pageCount,
+              doublePage: true,
+              arrangement: _arrangementFor(_visibleDocument!.target.entryId),
+            ).forPage(_visiblePage!.pageNumber).first
+          : _visiblePage!.pageNumber,
+      lastVisiblePage: _effectiveViewMode == ReaderViewMode.spread
+          ? ReaderSpreads(
+              pageCount: _visibleDocument!.pageCount,
+              doublePage: true,
+              arrangement: _arrangementFor(_visibleDocument!.target.entryId),
+            ).forPage(_visiblePage!.pageNumber).last
+          : null,
       pageCount: _visibleDocument?.pageCount ?? 1,
       enabled:
           !_picking &&

@@ -1,3 +1,5 @@
+import '../recent/recent_reading_list.dart';
+import '../recent/recent_presentation_observer.dart';
 import '../library/score_path_label.dart';
 import '../library/directory_navigation.dart';
 import '../library/library_widgets.dart';
@@ -91,6 +93,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   bool _searchOpen = false;
   String _query = '';
   bool _setListsOpen = false;
+  bool _recentOpen = false;
   String? _setListId;
   bool _setListCreate = false;
   int _setListEntry = 0;
@@ -140,6 +143,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   void _openSearch() {
     setState(() {
+      _recentOpen = false;
       _searchOpen = true;
       _setListsOpen = false;
       _setListId = null;
@@ -188,6 +192,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _selectSource(String id) => setState(() {
+    _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
     _searchOpen = false;
@@ -289,6 +294,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _selectFolder(String folder) {
+    _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
     _collapsed.removeWhere(
@@ -360,6 +366,13 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       }
       _pendingSongbookOpen = null;
       final readable = target;
+      final recent = RecentPresentationObserver(
+        widget.controller.library.recentReading,
+        onLoaded: (document) => widget.controller.pageCounts.remember(
+          PageMetadataKey(document.target.entryId, document.target.revisionId),
+          document.pageCount,
+        ),
+      );
       opened = true;
       widget.controller.setReaderActive(true);
       await Navigator.push(
@@ -369,16 +382,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             workspace: widget.controller.workspace,
             locate: widget.controller.locateOffline,
             initialTarget: readable,
+            onPresented: recent.presented,
             initialPageNumber: pageNumber,
             songbooks: widget.controller.songbooks,
             sourceChanges: widget.controller,
-            onLoaded: (document) => widget.controller.pageCounts.remember(
-              PageMetadataKey(
-                document.target.entryId,
-                document.target.revisionId,
-              ),
-              document.pageCount,
-            ),
+            onLoaded: recent.loaded,
           ),
         ),
       );
@@ -441,6 +449,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   void _setLists({String? initialListId, bool initialCreate = false}) {
     setState(() {
+      _recentOpen = false;
       _setListsOpen = true;
       _setListId = initialListId;
       _setListCreate = initialCreate;
@@ -456,9 +465,11 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     initialListId: _setListId,
     initialCreate: _setListCreate,
     pageCounts: widget.controller.pageCounts,
+    recentReading: widget.controller.library.recentReading,
     songbooks: widget.controller.songbooks,
     onReaderActive: widget.controller.setReaderActive,
     onBack: () => setState(() {
+      _recentOpen = false;
       _setListsOpen = false;
       _setListId = null;
       _setListCreate = false;
@@ -490,7 +501,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           const [''];
       final folder = folders.contains(_folder) ? _folder : '';
       final searching = _query.trim().isNotEmpty;
-      final entries = sync.offlineEntries(
+      final entries = _recentOpen ? <LibraryEntry>[] : sync.offlineEntries(
         sourceId: _activeSourceId,
         folder: folder,
         query: _query,
@@ -550,14 +561,23 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                         padding: const EdgeInsets.symmetric(
                                           horizontal: ScoreLayout.listMargin,
                                         ),
-                                        itemCount: sync.offlineSources.length,
+                                        itemCount:
+                                            sync.offlineSources.length + 1,
                                         separatorBuilder: (_, _) =>
                                             const SizedBox(width: 8),
                                         itemBuilder: (_, index) {
-                                          final source =
-                                              sync.offlineSources[index];
+                                          if (index == 1 || sync.offlineSources.isEmpty) {
+                                            return RecentNavigationItem(
+                                              compact: true,
+                                              selected: _recentOpen,
+                                              onTap: _showRecent,
+                                            );
+                                          }
+                                          final sources = [...sync.offlineSources]
+                                            ..sort((a, b) => a.id == _activeSourceId ? -1 : b.id == _activeSourceId ? 1 : 0);
+                                          final source = sources[index == 0 ? 0 : index - 1];
                                           final selected =
-                                              source.id == _activeSourceId;
+                                              !_recentOpen && source.id == _activeSourceId;
                                           return Center(
                                             child: TextButton(
                                               onPressed: () =>
@@ -598,7 +618,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                       ),
                                     ),
                                   Expanded(
-                                    child: LibraryOutsideTapListener(
+                                    child: _recentOpen
+                                        ? _recentContent()
+                                        : LibraryOutsideTapListener(
                                       enabled: _searchOpen,
                                       onTap: () => scheduleMicrotask(() {
                                         if (mounted &&
@@ -1022,6 +1044,53 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           ?.name ??
       '谱库';
 
+  void _showRecent([BuildContext? navigationContext]) {
+    setState(() {
+      _recentOpen = true;
+      _setListsOpen = false;
+      _searchOpen = false;
+    });
+    _searchFocus.unfocus();
+    if (navigationContext != null && Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
+      Navigator.pop(navigationContext);
+    }
+  }
+
+  Widget _recentContent() => RecentReadingList(
+    store: widget.controller.library.recentReading,
+    host: false,
+    resolve: (recent) {
+      final sync = widget.controller, entry = sync.recentEntry(recent.entryId);
+      if (entry == null || entry.status == EntryStatus.missing) {
+        return RecentDisplay(
+          recent.path,
+          recent.contextLabel,
+          RecentAvailability.missing,
+        );
+      }
+      final sources = sync.offlineSources;
+      final sourceName = sync.activeCollection != null
+          ? sync.sourceNameFor(entry.id)
+          : sources.isEmpty ? '谱库' : sources.first.name;
+      return RecentDisplay(
+        entry.relativePath,
+        '$sourceName · ${scoreParentFolder(entry.relativePath)}',
+        entry.availability == ContentAvailability.ready
+            ? RecentAvailability.ready : RecentAvailability.cloud,
+        revisionId: entry.currentRevisionId,
+      );
+    },
+    onOpen: (recent, display) {
+      final entry = widget.controller.recentEntry(recent.entryId);
+      if (display.availability == RecentAvailability.missing || entry == null) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('文件已不存在，可从最近阅读移除记录。')));
+      } else {
+        unawaited(_open(entry));
+      }
+    },
+  );
+
   Widget _header(BuildContext headerContext, bool wide, String folder) =>
       SizedBox(
         height: ScoreLayout.headerHeight,
@@ -1040,7 +1109,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                 const SizedBox(width: 8),
               ],
               Expanded(
-                child: _searchOpen
+                child: _recentOpen
+                    ? Text('最近阅读', style: ScoreText.title.copyWith(color: ScoreTokens.of(context).ink900))
+                    : _searchOpen
                     ? DirectorySearchField(
                         controller: _search,
                         focusNode: _searchFocus,
@@ -1275,6 +1346,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                 LibraryNavEntry(LibraryNavKind.folder, value: row),
         ],
         const LibraryNavEntry(LibraryNavKind.addSource),
+        const LibraryNavEntry(LibraryNavKind.group, label: '最近阅读'),
         const LibraryNavEntry(LibraryNavKind.group, label: '曲单'),
         for (final list
             in widget.controller.workspace.store.snapshot.activeSetLists)
@@ -1290,6 +1362,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       itemBuilder: (context, entry) {
         switch (entry.kind) {
           case LibraryNavKind.group:
+            if (entry.label == '最近阅读') {
+              return RecentNavigationItem(
+                selected: _recentOpen,
+                onTap: () => _showRecent(context),
+              );
+            }
             return Padding(
               padding: EdgeInsets.only(
                 top: entry.label == '曲单' ? ScoreSpace.lg : 0,
@@ -1300,7 +1378,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             final source = entry.value! as LibrarySourceInfo;
             return LibraryNavigationItem(
               label: source.name,
-              selected: !_setListsOpen && source.id == _activeSourceId,
+              selected:
+                  !_recentOpen &&
+                  !_setListsOpen &&
+                  source.id == _activeSourceId,
               count:
                   '${widget.controller.folderOfflineStatus(sourceId: source.id).total}',
               onTap: () => _selectSource(source.id),
@@ -1354,7 +1435,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     return LibraryNavigationItem(
       key: ValueKey('offline-folder-$folder'),
       label: p.posix.basename(folder),
-      selected: !_setListsOpen && _folder == folder,
+      selected: !_recentOpen && !_setListsOpen && _folder == folder,
       indent: (depth * ScoreLayout.treeIndent).clamp(0, 132),
       onTap: () => _selectFolder(folder),
       trailing: children.isEmpty

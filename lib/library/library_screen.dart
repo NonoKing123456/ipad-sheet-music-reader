@@ -1,3 +1,5 @@
+import '../recent/recent_reading_list.dart';
+import '../recent/recent_presentation_observer.dart';
 import '../signing/signing_expiry_chip.dart';
 import 'score_path_label.dart';
 import 'directory_navigation.dart';
@@ -83,6 +85,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   final _searchFocus = FocusNode();
   bool _searchOpen = false;
   bool _setListsOpen = false;
+  bool _recentOpen = false;
   String? _setListId;
   bool _setListCreate = false;
   int _setListEntry = 0;
@@ -226,6 +229,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       _searchOpen,
       _setListsOpen,
       _setListId,
+      _recentOpen,
     );
     _history?.directory(route, state, () {
       if (!mounted) return;
@@ -239,6 +243,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         _search.text = state.$3;
         _setListsOpen = state.$6;
         _setListId = state.$7;
+        _recentOpen = state.$8;
         _setListCreate = false;
         _setListEntry++;
       });
@@ -277,6 +282,7 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _openSearch() {
     setState(() {
+      _recentOpen = false;
       _searchOpen = true;
       _setListsOpen = false;
       _setListId = null;
@@ -548,6 +554,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
 
   void _folder(String folder) {
+    _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
     _collapsedFolders.removeWhere(
@@ -587,6 +594,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         _message('文件已更新，请重新读取目录并核对页码。');
         return;
       }
+      final recent = RecentPresentationObserver(library.recentReading);
       opened = true;
       _sync?.setReaderActive(true);
       await Navigator.of(context).push(
@@ -595,6 +603,8 @@ class _LibraryScreenState extends State<LibraryScreen>
             workspace: workspace,
             locate: _locate,
             initialTarget: target,
+            onPresented: recent.presented,
+            onLoaded: recent.loaded,
             sourceChanges: library,
             loader: _loadLocalTarget,
             initialPageNumber: pageNumber,
@@ -748,6 +758,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       if (!mounted) return;
       setState(() {
         _setListSync = sync;
+        _recentOpen = false;
         _setListsOpen = true;
         _setListId = initialListId;
         _setListCreate = initialCreate;
@@ -765,6 +776,7 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   void _leaveSetLists() {
     setState(() {
+      _recentOpen = false;
       _setListsOpen = false;
       _setListId = null;
       _setListCreate = false;
@@ -781,6 +793,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       initialListId: _setListId,
       initialCreate: _setListCreate,
       pageCounts: (sync ?? _sync)?.pageCounts,
+      recentReading: _library!.recentReading,
       songbooks: (sync ?? _sync)?.songbooks,
       onReaderActive: (sync ?? _sync)?.setReaderActive,
       onBack: _leaveSetLists,
@@ -921,18 +934,27 @@ class _LibraryScreenState extends State<LibraryScreen>
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: ScoreLayout.listMargin,
                                   ),
-                                  itemCount: library.sources.length,
+                                  itemCount: library.sources.length + 1,
                                   separatorBuilder: (_, _) =>
                                       const SizedBox(width: 8),
                                   itemBuilder: (_, index) {
-                                    final source = library.sources[index];
+                                    if (index == 1) {
+                                      return RecentNavigationItem(
+                                        compact: true,
+                                        selected: _recentOpen,
+                                        onTap: _showRecent,
+                                      );
+                                    }
+                                    final sources = [...library.sources]
+                                      ..sort((a, b) => a.id == library.selectedSourceId ? -1 : b.id == library.selectedSourceId ? 1 : 0);
+                                    final source = sources[index == 0 ? 0 : index - 1];
                                     return Center(
                                       child: TextButton(
                                         onPressed: () =>
                                             _selectSource(library, source.id),
                                         style: TextButton.styleFrom(
                                           backgroundColor:
-                                              source.id ==
+                                              !_recentOpen && source.id ==
                                                   library.selectedSourceId
                                               ? ScoreTokens.of(context).pineWash
                                               : ScoreTokens.of(context).paper0,
@@ -972,6 +994,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                                   ? const Center(
                                       child: CircularProgressIndicator(),
                                     )
+                                  : _recentOpen
+                                  ? _recentContent()
                                   : library.rootPath == null
                                   ? _welcome(library)
                                   : LibraryOutsideTapListener(
@@ -1000,6 +1024,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   }
 
   void _selectSource(LibraryController library, String id) {
+    _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
     _directoryMutation = true;
@@ -1010,6 +1035,49 @@ class _LibraryScreenState extends State<LibraryScreen>
     _directoryMutation = false;
     _recordDirectory();
   }
+
+  void _showRecent([BuildContext? navigationContext]) {
+    setState(() {
+      _recentOpen = true;
+      _setListsOpen = false;
+      _searchOpen = false;
+    });
+    _searchFocus.unfocus();
+    _recordDirectory();
+    if (navigationContext != null && Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
+      Navigator.pop(navigationContext);
+    }
+  }
+
+  Widget _recentContent() => RecentReadingList(
+    store: _library!.recentReading,
+    host: true,
+    resolve: (recent) {
+      final library = _library!,
+          entry = library.snapshot?.entryById(recent.entryId);
+      if (entry == null || entry.status != EntryStatus.available) {
+        return RecentDisplay(
+          recent.path,
+          recent.contextLabel,
+          RecentAvailability.missing,
+        );
+      }
+      return RecentDisplay(
+        entry.relativePath,
+        '${library.sourceNameFor(entry)} · ${scoreParentFolder(entry.relativePath)}',
+        RecentAvailability.ready,
+        revisionId: entry.currentRevisionId,
+      );
+    },
+    onOpen: (recent, display) {
+      final entry = _library!.snapshot?.entryById(recent.entryId);
+      if (display.availability == RecentAvailability.missing || entry == null) {
+        _message('文件已不存在，可从最近阅读移除记录。');
+      } else {
+        unawaited(_openEntry(entry));
+      }
+    },
+  );
 
   Widget _header(
     BuildContext headerContext,
@@ -1033,7 +1101,14 @@ class _LibraryScreenState extends State<LibraryScreen>
               const SizedBox(width: 8),
             ],
             Expanded(
-              child: _searchOpen
+              child: _recentOpen
+                  ? Text(
+                      '最近阅读',
+                      style: ScoreText.title.copyWith(
+                        color: ScoreTokens.of(context).ink900,
+                      ),
+                    )
+                  : _searchOpen
                   ? DirectorySearchField(
                       controller: _search,
                       focusNode: _searchFocus,
@@ -1229,6 +1304,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                 LibraryNavEntry(LibraryNavKind.folder, value: row),
         ],
         const LibraryNavEntry(LibraryNavKind.addSource),
+        const LibraryNavEntry(LibraryNavKind.group, label: '最近阅读'),
         const LibraryNavEntry(LibraryNavKind.group, label: '曲单'),
         for (final list
             in _workspace?.store.snapshot.activeSetLists ?? <ScoreSetList>[])
@@ -1243,6 +1319,12 @@ class _LibraryScreenState extends State<LibraryScreen>
       itemBuilder: (context, entry) {
         switch (entry.kind) {
           case LibraryNavKind.group:
+            if (entry.label == '最近阅读') {
+              return RecentNavigationItem(
+                selected: _recentOpen,
+                onTap: () => _showRecent(context),
+              );
+            }
             return Padding(
               padding: EdgeInsets.only(
                 top: entry.label == '曲单' ? ScoreSpace.lg : 0,
@@ -1254,7 +1336,10 @@ class _LibraryScreenState extends State<LibraryScreen>
             return LibraryNavigationItem(
               key: ValueKey('source-${source.id}'),
               label: source.name,
-              selected: !_setListsOpen && source.id == library.selectedSourceId,
+              selected:
+                  !_recentOpen &&
+                  !_setListsOpen &&
+                  source.id == library.selectedSourceId,
               count: '${source.catalog.snapshot.availableEntries.length}',
               onTap: () => _selectSource(library, source.id),
             );
@@ -1340,7 +1425,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     return LibraryNavigationItem(
       key: ValueKey('folder-$folder'),
       label: p.posix.basename(folder),
-      selected: !_setListsOpen && library.currentFolder == folder,
+      selected:
+          !_recentOpen && !_setListsOpen && library.currentFolder == folder,
       indent: mathIndent(depth),
       onTap: () => _folder(folder),
       trailing: children.isEmpty

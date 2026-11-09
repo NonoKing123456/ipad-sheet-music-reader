@@ -16,11 +16,15 @@ class ReaderPageSeekBar extends StatefulWidget {
     required this.currentPage,
     required this.pageCount,
     required this.onSeek,
+    this.lastVisiblePage,
     this.onCancel,
     this.enabled = true,
     this.hitRegionKey,
   });
   final int currentPage, pageCount;
+
+  /// Inclusive physical page at the end of the visible spread, if any.
+  final int? lastVisiblePage;
   final bool enabled;
   final GlobalKey? hitRegionKey;
   final void Function(int page, Object gesture) onSeek;
@@ -36,6 +40,18 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
   double _width = 0;
   bool _dots = true;
   bool get _enabled => widget.enabled && widget.pageCount > 1;
+  int get _pageCount => math.max(1, widget.pageCount);
+  int get _currentPage => widget.currentPage.clamp(1, _pageCount);
+
+  String _label(int page) {
+    final first = page.clamp(1, _pageCount);
+    final visibleEnd = (widget.lastVisiblePage ?? _currentPage).clamp(
+      _currentPage,
+      _pageCount,
+    );
+    final last = (first + visibleEnd - _currentPage).clamp(first, _pageCount);
+    return last > first ? '$first–$last / $_pageCount' : '$first / $_pageCount';
+  }
 
   void _cancel() {
     final gesture = _gesture;
@@ -86,7 +102,7 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
     }
     _pointer = event.pointer;
     _gesture = Object();
-    _lastSent = widget.currentPage;
+    _lastSent = _currentPage;
     _move(event.localPosition.dx);
   }
 
@@ -111,9 +127,9 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
         ScoreLayout.dotsMaxWidth,
         math.max(0.0, constraints.maxWidth - 2 * ScoreSpace.xl),
       );
-      _dots = widget.pageCount * ScoreLayout.dotsPitch <= dotWidth;
+      _dots = _pageCount * ScoreLayout.dotsPitch <= dotWidth;
       _width = _dots
-          ? widget.pageCount * ScoreLayout.dotsPitch
+          ? _pageCount * ScoreLayout.dotsPitch
           : math.min(
               ReaderNavigationTokens.seekTrackMaxWidth,
               math.max(
@@ -123,16 +139,10 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
               ),
             );
       final tokens = ScoreTokens.of(context);
-      final page = _preview ?? widget.currentPage;
-      final fraction = widget.pageCount <= 1
+      final page = (_preview ?? _currentPage).clamp(1, _pageCount);
+      final fraction = _pageCount <= 1
           ? 0.0
-          : ((page - 1) / (widget.pageCount - 1)).clamp(0.0, 1.0);
-      final tooltipLeft =
-          (fraction * _width - ReaderNavigationTokens.seekTooltipWidth / 2)
-              .clamp(
-                0.0,
-                math.max(0.0, _width - ReaderNavigationTokens.seekTooltipWidth),
-              );
+          : ((page - 1) / (_pageCount - 1)).clamp(0.0, 1.0);
       return Center(
         heightFactor: 1,
         child: SizedBox(
@@ -142,17 +152,15 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
           child: Semantics(
             key: const ValueKey('page-indicator'),
             label: '页码',
-            value: '${widget.currentPage} / ${widget.pageCount}',
-            increasedValue:
-                '${(widget.currentPage + 1).clamp(1, widget.pageCount)} / ${widget.pageCount}',
-            decreasedValue:
-                '${(widget.currentPage - 1).clamp(1, widget.pageCount)} / ${widget.pageCount}',
-            onIncrease: !_enabled || widget.currentPage == widget.pageCount
+            value: _label(page),
+            increasedValue: _label(page + 1),
+            decreasedValue: _label(page - 1),
+            onIncrease: !_enabled || page == _pageCount
                 ? null
-                : () => widget.onSeek(widget.currentPage + 1, Object()),
-            onDecrease: !_enabled || widget.currentPage == 1
+                : () => widget.onSeek(page + 1, Object()),
+            onDecrease: !_enabled || page == 1
                 ? null
-                : () => widget.onSeek(widget.currentPage - 1, Object()),
+                : () => widget.onSeek(page - 1, Object()),
             child: Listener(
               // The paper must receive a Pencil's very first point before
               // the surrounding reader hides this overlay. ReaderInput's
@@ -173,7 +181,7 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                         painter: _dots
                             ? ReaderPageDotsPainter(
                                 page: page,
-                                pages: widget.pageCount,
+                                pages: _pageCount,
                                 ink: tokens.ink300,
                                 markerFill: tokens.pineBright,
                                 markerOutline: tokens.pineBright,
@@ -186,32 +194,37 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                               ),
                       ),
                     ),
-                    if (_preview != null)
-                      Positioned(
-                        top:
-                            ReaderNavigationTokens.seekHitHeight / 2 -
-                            ReaderNavigationTokens.seekTooltipOffset,
-                        left: tooltipLeft.toDouble(),
-                        width: ReaderNavigationTokens.seekTooltipWidth,
-                        height: ReaderNavigationTokens.seekTooltipHeight,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: tokens.paper0,
-                            border: Border.all(color: tokens.paper2),
-                            borderRadius: BorderRadius.circular(
-                              ReaderNavigationTokens.seekTooltipRadius,
-                            ),
-                          ),
-                          child: Center(
-                            child: Text(
-                              '跳至$_preview页',
-                              style: ScoreText.caption.copyWith(
-                                color: tokens.ink900,
-                              ),
+                    Positioned(
+                      top: 0,
+                      // A one-page dot is narrower than its label. Let the
+                      // transparent label overflow without widening the seek
+                      // region or changing the full-book drag mapping.
+                      left: -ScoreSpace.huge,
+                      right: -ScoreSpace.huge,
+                      child: ExcludeSemantics(
+                        child: Baseline(
+                          baseline: ScoreSpace.md,
+                          baselineType: TextBaseline.alphabetic,
+                          child: Text(
+                            _label(page),
+                            key: const ValueKey('reader-bottom-page-label'),
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            style: ScoreText.caption.copyWith(
+                              color: tokens.ink900,
+                              // Paper can stay white in dark mode, and the
+                              // label can also cross the black letterbox.
+                              shadows: [
+                                Shadow(
+                                  color: tokens.paper0,
+                                  blurRadius: ScoreLayout.iconStroke,
+                                ),
+                              ],
                             ),
                           ),
                         ),
                       ),
+                    ),
                   ],
                 ),
               ),

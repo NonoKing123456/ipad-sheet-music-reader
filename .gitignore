@@ -253,3 +253,6 @@
 !/lib/songbook/songbook_service.dart
 !/packages/library_sync/lib/src/songbook.dart
 !/packages/library_core/lib/src/search.dart
+!/lib/recent/recent_presentation_observer.dart
+!/lib/recent/recent_reading_list.dart
+!/lib/recent/recent_reading_store.dart

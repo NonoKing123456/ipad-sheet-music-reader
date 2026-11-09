@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'reader_text_editing.dart';
@@ -42,8 +43,40 @@ Offset clampReaderPan({
   );
 }
 
-/// Shared reading input. Page turning is classified once at pointer-up, so a
-/// swipe can never also become a tap. This layer does not distinguish a pedal
+/// Fit is the raster surface's base geometry. Cover preserves the existing 4x
+/// maximum even for unusually narrow pages; ordinary score pages reach cover.
+Matrix4 readerPageLayoutMatrix({
+  required Size viewport,
+  required double pageAspect,
+  required bool cover,
+  bool startAtTop = false,
+}) {
+  final fitted = applyBoxFit(
+    BoxFit.contain,
+    Size(pageAspect, 1),
+    viewport,
+  ).destination;
+  final scale = cover
+      ? math
+            .max(viewport.width / fitted.width, viewport.height / fitted.height)
+            .clamp(1.0, 4.0)
+      : 1.0;
+  final paper = Alignment.center.inscribe(fitted, Offset.zero & viewport);
+  final translation = clampReaderPan(
+    viewport: viewport,
+    scale: scale,
+    pageAspect: pageAspect,
+    translation: Offset(
+      viewport.width * (1 - scale) / 2,
+      startAtTop ? -paper.top * scale : viewport.height * (1 - scale) / 2,
+    ),
+  );
+  return Matrix4.diagonal3Values(scale, scale, 1)
+    ..setTranslationRaw(translation.dx, translation.dy, 0);
+}
+
+/// Shared reading input. A qualifying move consumes the entire contact sequence,
+/// so holding, reversing or adding a finger cannot request another page. This layer does not distinguish a pedal
 /// from a keyboard: both send ordinary PageUp/PageDown events.
 class ReaderInput extends StatefulWidget {
   const ReaderInput({
@@ -54,6 +87,7 @@ class ReaderInput extends StatefulWidget {
     this.enabled = true,
     this.allowPointerPageTurns = true,
     this.onCenterTap,
+    this.onCenterDoubleTap,
     this.transform,
     this.viewportKey,
     this.touchControlKey,
@@ -77,6 +111,9 @@ class ReaderInput extends StatefulWidget {
   final bool enabled;
   final bool allowPointerPageTurns;
   final VoidCallback? onCenterTap;
+
+  /// Enables delayed center-tap arbitration for fit/cover on tablet.
+  final VoidCallback? onCenterDoubleTap;
   final TransformationController? transform;
   final GlobalKey? viewportKey;
   final GlobalKey? touchControlKey;
@@ -103,6 +140,13 @@ class ReaderInput extends StatefulWidget {
 class _ReaderInputState extends State<ReaderInput> {
   final FocusNode _focus = FocusNode(debugLabel: 'reader-page-controls');
   final Set<int> _pointers = {};
+  final Set<int> _contacts = {};
+  bool _sequenceConsumed = false, _panSequence = false;
+  Timer? _centerTapTimer;
+  Offset? _centerTapPosition;
+  Duration? _centerTapTime;
+  static const _turnTravel = 32.0, _turnRatio = 1.5, _tapTravel = 8.0;
+  static const _doubleTapWindow = Duration(milliseconds: 280);
   final Set<int> _inkPointers = {};
   final Set<int> _textMoves = {};
   final Set<int> _ignoredPointers = {};
@@ -138,6 +182,7 @@ class _ReaderInputState extends State<ReaderInput> {
     if (oldWidget.editing != widget.editing ||
         oldWidget.textTool != widget.textTool ||
         oldWidget.gestureGeneration != widget.gestureGeneration) {
+      _cancelCenterTap();
       final transforming = _touches.length >= 2;
       final generation = ++_touchGeneration;
       _pointers.clear();
@@ -211,6 +256,7 @@ class _ReaderInputState extends State<ReaderInput> {
 
   @override
   void dispose() {
+    _centerTapTimer?.cancel();
     _focus.dispose();
     super.dispose();
   }
@@ -240,9 +286,52 @@ class _ReaderInputState extends State<ReaderInput> {
     return KeyEventResult.handled;
   }
 
+  void _cancelCenterTap() {
+    _centerTapTimer?.cancel();
+    _centerTapTimer = null;
+    _centerTapPosition = null;
+    _centerTapTime = null;
+  }
+
+  void _centerTap(PointerUpEvent event) {
+    if (widget.onCenterDoubleTap == null ||
+        event.kind != PointerDeviceKind.touch) {
+      widget.onCenterTap?.call();
+      return;
+    }
+    if (_centerTapTime != null &&
+        event.timeStamp - _centerTapTime! <= _doubleTapWindow &&
+        (event.localPosition - _centerTapPosition!).distance <= 32) {
+      _cancelCenterTap();
+      widget.onCenterDoubleTap?.call();
+      return;
+    }
+    // A distant second tap is a distinct single tap.
+    if (_centerTapTimer != null) widget.onCenterTap?.call();
+    _cancelCenterTap();
+    _centerTapPosition = event.localPosition;
+    _centerTapTime = event.timeStamp;
+    _centerTapTimer = Timer(_doubleTapWindow, () {
+      _cancelCenterTap();
+      if (mounted && widget.enabled && !readerTextEditorActive) {
+        widget.onCenterTap?.call();
+      }
+    });
+  }
+
   void _down(PointerDownEvent event) {
-    if (readerTextHandleActive) return;
+    if (_contacts.isEmpty) {
+      _sequenceConsumed = false;
+      _panSequence =
+          (widget.transform?.value.getMaxScaleOnAxis() ?? 1) > 1.000001;
+    }
+    _contacts.add(event.pointer);
+    if (readerTextHandleActive) {
+      _cancelCenterTap();
+      return;
+    }
     if (widget.ignorePointerGestures) {
+      _cancelCenterTap();
       _ignoredPointers.add(event.pointer);
       return;
     }
@@ -254,6 +343,7 @@ class _ReaderInputState extends State<ReaderInput> {
           (Offset.zero & box.size).contains(
             box.globalToLocal(event.position),
           )) {
+        _cancelCenterTap();
         return;
       }
     }
@@ -262,6 +352,7 @@ class _ReaderInputState extends State<ReaderInput> {
         (event.kind == PointerDeviceKind.stylus ||
             event.kind == PointerDeviceKind.invertedStylus ||
             (widget.mouseInk && event.kind == PointerDeviceKind.mouse))) {
+      _cancelCenterTap();
       _inkPointers.add(event.pointer);
       if (_pointers.isNotEmpty) _cancelled = true;
       return;
@@ -269,6 +360,7 @@ class _ReaderInputState extends State<ReaderInput> {
     _pointers.add(event.pointer);
     if (widget.textControls?.selectionPointers.contains(event.pointer) ??
         false) {
+      _cancelCenterTap();
       _textMoves.add(event.pointer);
     }
     if (_pointers.length == 1) {
@@ -285,6 +377,7 @@ class _ReaderInputState extends State<ReaderInput> {
           (Offset.zero & selected.size).contains(
             selected.globalToLocal(event.position),
           )) {
+        _cancelCenterTap();
         _textMoves.add(event.pointer);
       }
       _touches[event.pointer] = event.localPosition;
@@ -292,7 +385,8 @@ class _ReaderInputState extends State<ReaderInput> {
       _anchorPinch();
       if (_touches.length == 2) widget.onTransformGestureChanged?.call(true);
     }
-    if (_pointers.length > 1) {
+    if (_contacts.length > 1) {
+      _cancelCenterTap();
       _cancelled = true;
       return;
     }
@@ -300,6 +394,7 @@ class _ReaderInputState extends State<ReaderInput> {
     _greatestTravel = 0;
     _cancelled =
         !widget.enabled ||
+        _sequenceConsumed ||
         _inkPointers.isNotEmpty ||
         (event.kind == PointerDeviceKind.mouse &&
             event.buttons != kPrimaryButton);
@@ -309,7 +404,7 @@ class _ReaderInputState extends State<ReaderInput> {
   void _move(PointerMoveEvent event) {
     if (_ignoredPointers.contains(event.pointer)) return;
     widget.textControls?.paperMove(event);
-    if (!_pointers.contains(event.pointer)) return;
+    if (!_pointers.contains(event.pointer) || _sequenceConsumed) return;
     if (_touches.containsKey(event.pointer)) {
       _touches[event.pointer] = event.localPosition;
       final controller = widget.transform;
@@ -360,10 +455,30 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_origin != null) {
       final travel = (event.localPosition - _origin!).distance;
       if (travel > _greatestTravel) _greatestTravel = travel;
+      if (travel > _tapTravel) _cancelCenterTap();
+      final delta = event.localPosition - _origin!;
+      if (!_cancelled &&
+          !_panSequence &&
+          _contacts.length == 1 &&
+          _inkPointers.isEmpty &&
+          !widget.touchInk &&
+          !widget.textTool &&
+          !readerTextEditorActive &&
+          !_textMoves.contains(event.pointer) &&
+          widget.enabled &&
+          widget.allowPointerPageTurns &&
+          delta.dx.abs() >= _turnTravel &&
+          delta.dx.abs() >= delta.dy.abs() * _turnRatio) {
+        _sequenceConsumed = true;
+        _cancelled = true;
+        _cancelCenterTap();
+        delta.dx < 0 ? widget.onNext() : widget.onPrevious();
+      }
     }
   }
 
   void _up(PointerUpEvent event, double width) {
+    _contacts.remove(event.pointer);
     if (_ignoredPointers.remove(event.pointer)) return;
     widget.textControls?.paperUp(event);
     if (readerTextHandleActive) {
@@ -395,18 +510,20 @@ class _ReaderInputState extends State<ReaderInput> {
     }
     final delta = event.localPosition - origin;
     _origin = null;
-    if (delta.dx.abs() >= 48 && delta.dx.abs() > delta.dy.abs() * 1.4) {
-      if (widget.allowPointerPageTurns) {
-        delta.dx < 0 ? widget.onNext() : widget.onPrevious();
-      }
-    } else if (_greatestTravel < 12 &&
-        delta.distance < 12 &&
+    if (_greatestTravel <= _tapTravel &&
+        delta.distance <= _tapTravel &&
         !widget.textTool) {
       final fraction = event.localPosition.dx / width;
-      if (fraction >= 0.35 && fraction <= 0.65) widget.onCenterTap?.call();
-      if (widget.allowPointerPageTurns) {
-        if (fraction < 0.35) widget.onPrevious();
-        if (fraction > 0.65) widget.onNext();
+      final center = widget.onCenterDoubleTap == null
+          ? fraction >= .35 && fraction <= .65
+          : fraction >= .3 &&
+                fraction <= .7 &&
+                event.localPosition.dy >= _size.height * .2 &&
+                event.localPosition.dy <= _size.height * .8;
+      if (center) _centerTap(event);
+      if (!center && widget.allowPointerPageTurns) {
+        if (fraction < .35) widget.onPrevious();
+        if (fraction > .65) widget.onNext();
       }
     }
   }
@@ -488,6 +605,8 @@ class _ReaderInputState extends State<ReaderInput> {
             onPointerMove: _move,
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {
+              _contacts.remove(event.pointer);
+              _cancelCenterTap();
               if (_ignoredPointers.remove(event.pointer)) return;
               widget.textControls?.paperCancel(event.pointer);
               _inkPointers.remove(event.pointer);

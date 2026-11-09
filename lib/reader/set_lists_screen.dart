@@ -1,3 +1,5 @@
+import '../recent/recent_presentation_observer.dart';
+import '../recent/recent_reading_store.dart';
 import '../songbook/songbook_service.dart';
 import '../library/score_path_label.dart';
 
@@ -86,6 +88,7 @@ class SetListsScreen extends StatelessWidget {
     this.pageCounts,
     this.songbooks,
     this.onReaderActive,
+    this.recentReading,
   });
   final ReaderWorkspace workspace;
   final ScoreLocator locate;
@@ -103,6 +106,7 @@ class SetListsScreen extends StatelessWidget {
   final PageCountService? pageCounts;
   final SongbookService? songbooks;
   final ValueChanged<bool>? onReaderActive;
+  final RecentReadingStore? recentReading;
 
   Future<void> _create(BuildContext context) async {
     final name = await _nameDialog(context);
@@ -199,6 +203,7 @@ class SetListsScreen extends StatelessWidget {
                                 pageCounts: pageCounts,
                                 songbooks: songbooks,
                                 onReaderActive: onReaderActive,
+                                recentReading: recentReading,
                               ),
                             ),
                           );
@@ -438,6 +443,7 @@ class _SetListsEntryState extends State<_SetListsEntry> {
           pageCounts: screen.pageCounts,
           songbooks: screen.songbooks,
           onReaderActive: screen.onReaderActive,
+          recentReading: screen.recentReading,
         );
       }
       return screen._overview(
@@ -465,6 +471,7 @@ class _SetListDetail extends StatelessWidget {
     this.pageCounts,
     this.songbooks,
     this.onReaderActive,
+    this.recentReading,
   });
   final ReaderWorkspace workspace;
   final String listId;
@@ -480,6 +487,7 @@ class _SetListDetail extends StatelessWidget {
   final PageCountService? pageCounts;
   final SongbookService? songbooks;
   final ValueChanged<bool>? onReaderActive;
+  final RecentReadingStore? recentReading;
   List<ScoreCatalogEntry> _catalogEntries() =>
       catalog?.call() ?? targets().map(ScoreCatalogEntry.fromTarget).toList();
 
@@ -573,6 +581,15 @@ class _SetListDetail extends StatelessWidget {
       return;
     }
     final ready = target;
+    final recent = recentReading == null
+        ? null
+        : RecentPresentationObserver(
+            recentReading!,
+            onLoaded: (score) => pageCounts?.remember(
+              PageMetadataKey(score.target.entryId, score.target.revisionId),
+              score.pageCount,
+            ),
+          );
     onReaderActive?.call(true);
     try {
       await Navigator.push(
@@ -582,6 +599,8 @@ class _SetListDetail extends StatelessWidget {
             workspace: workspace,
             locate: locate,
             initialTarget: ready,
+            onPresented: recent?.presented,
+            onLoaded: recent?.loaded,
             songbooks: songbooks,
             setListId: listId,
             itemId: item.id,
