@@ -256,3 +256,4 @@
 !/lib/recent/recent_presentation_observer.dart
 !/lib/recent/recent_reading_list.dart
 !/lib/recent/recent_reading_store.dart
+!/lib/reader/reader_presentation_policy.dart

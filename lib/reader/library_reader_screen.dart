@@ -14,6 +14,7 @@ import 'reader_input.dart';
 import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
 import 'reader_page_window.dart';
+import 'reader_presentation_policy.dart';
 import 'reader_session.dart';
 import 'reader_workspace.dart';
 import 'sharp_pdf_page.dart';
@@ -82,14 +83,26 @@ class LibraryReaderScreen extends StatefulWidget {
   State<LibraryReaderScreen> createState() => _LibraryReaderScreenState();
 }
 
-class _LibraryReaderScreenState extends State<LibraryReaderScreen>
-    with SingleTickerProviderStateMixin {
+class _ReaderModeFrame {
+  _ReaderModeFrame(this.mode);
+  final ReaderViewMode mode;
+  final transform = TransformationController();
+  final viewportKey = GlobalKey();
+  final continuous = ReaderContinuousController();
+}
+
+class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   bool get _isCompact => DeviceLayoutScope.isCompact(context);
   ReaderViewCapabilities get _capabilities =>
       ReaderViewCapabilities.of(context);
   late final ReaderSession _session;
-  final TransformationController _transform = TransformationController();
-  final GlobalKey _viewportKey = GlobalKey();
+  _ReaderModeFrame _frame = _ReaderModeFrame(ReaderViewMode.single);
+  _ReaderModeFrame? _heldFrame;
+  Widget? _heldModeContent, _lastModeContent;
+  TransformationController get _transform => _frame.transform;
+  GlobalKey get _viewportKey => _frame.viewportKey;
+  ReaderViewMode get _displayedMode => _heldFrame?.mode ?? _viewMode;
+  bool get _modeChanging => _heldFrame != null;
   final GlobalKey _seekRegionKey = GlobalKey();
   final GlobalKey _textSelectionKey = GlobalKey();
   final GlobalKey _textToolsKey = GlobalKey();
@@ -116,7 +129,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   DesktopReaderPreferences? _viewPreferences;
   ReaderViewMode _viewMode = ReaderViewMode.single;
   FirstPageArrangement _externalArrangement = FirstPageArrangement.paired;
-  final _continuous = ReaderContinuousController();
+  ReaderContinuousController get _continuous => _frame.continuous;
+  double _continuousRestoreScale = 1;
   ReaderScrollAnchor? _continuousRestore;
   PageKey? _continuousAnchorFocus;
   PageKey? _continuousEditStart;
@@ -156,87 +170,20 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   (PageKey, DocumentKey)? _prewarmAnchor;
   int _color = 0xffc12b32;
   double _scale = 1;
-  // Current reading-sequence layout, deliberately not written to preferences.
-  bool _coverLayout = false;
-  bool _layoutChosen = false;
-  PageKey? _layoutPage;
-  late final AnimationController _layoutAnimation = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 200),
-  )..addListener(_animatePageLayout);
-  Matrix4? _layoutFrom, _layoutTo;
-  bool _writingLayoutFrame = false;
-
-  void _animatePageLayout() {
-    final from = _layoutFrom, to = _layoutTo;
-    if (from == null || to == null) return;
-    _writingLayoutFrame = true;
-    try {
-      _transform.value = Matrix4Tween(
-        begin: from,
-        end: to,
-      ).transform(Curves.easeOutCubic.transform(_layoutAnimation.value));
-    } finally {
-      _writingLayoutFrame = false;
-    }
-  }
-
-  void _togglePageLayout() {
-    if (!_isCompact ||
-        _tool != null ||
-        _textTool ||
-        _picking ||
-        _visiblePage == null) {
-      return;
-    }
-    _layoutChosen = true;
-    _coverLayout = !_coverLayout;
-    if (_effectiveViewMode == ReaderViewMode.continuous) {
-      _continuous.layout(_coverLayout);
-      setState(() {});
-      return;
-    }
-    final size = _paperViewportSize;
-    if (size == null || size.isEmpty) return;
-    _layoutFrom = Matrix4.copy(_transform.value);
-    _layoutTo = readerPageLayoutMatrix(
-      viewport: size,
-      pageAspect: _readerFitAspect(size),
-      cover: _coverLayout,
-    );
-    _layoutAnimation.stop();
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _transform.value = _layoutTo!;
-    } else {
-      _layoutAnimation.forward(from: 0);
-    }
-  }
-
   void _applyPageLayout({
     LoadedScore? document,
     int? number,
     double? pageAspect,
   }) {
-    _layoutAnimation.stop();
     final size = _paperViewportSize;
-    if (size == null ||
-        size.isEmpty ||
-        _effectiveViewMode == ReaderViewMode.continuous) {
+    if (size == null || size.isEmpty) {
       return;
     }
     _transform.value = readerPageLayoutMatrix(
       viewport: size,
       pageAspect: pageAspect ?? _readerFitAspect(size),
-      cover: _coverLayout,
-      startAtTop: true,
+      cover: false,
     );
-    _layoutPage = document == null
-        ? _visiblePage
-        : PageKey(
-            entryId: document.target.entryId,
-            revisionId: document.target.revisionId,
-            pageNumber: number!,
-          );
   }
 
   bool _desktopMenuOpen = false;
@@ -444,10 +391,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   }
 
   void _transformChanged() {
-    // A touch/controller edit takes over from the currently painted zoom.
-    if (!_writingLayoutFrame && _layoutAnimation.isAnimating) {
-      _layoutAnimation.stop();
-    }
     if (!_projectingViewport) {
       _preferredViewportAnchor = null;
       _preferredAnchorPage = null;
@@ -487,7 +430,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         _presented = false;
       }
       // Retain outgoing paper and transform through the ready/paint gate.
-      // The newly presented page receives its own fit/cover geometry below.
+      // The newly presented page receives normal fit at its prepaint gate.
     }
     setState(() {});
     if (_terminalVisiblePage != null) {
@@ -523,8 +466,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     widget.sourceChanges?.removeListener(_session.refreshSource);
     _session.removeListener(_changed);
     _session.dispose();
-    _layoutAnimation.dispose();
     _transform.dispose();
+    _heldFrame?.transform.dispose();
     _textControls.dispose();
     super.dispose();
   }
@@ -676,6 +619,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   }
 
   Future<bool> _setEditing(bool editing) async {
+    if (editing && _modeChanging) return false;
     if (!editing && !_editing) return true;
     if (!editing && (!await _textControls.finish() || !mounted)) return false;
     editing = editing && widget.allowAnnotations;
@@ -890,110 +834,16 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             if (_session.sourceChanged) _notice('源曲谱已变更，当前为旧版。'),
           ],
           loading: _session.loading && _visiblePage != null,
-          contentBuilder: (toggleTools) => current == null || page == null
-              ? Center(
-                  child: _initialLoading || _session.loading
-                      ? const CircularProgressIndicator()
-                      : FilledButton(
-                          onPressed: () {
-                            final latest = widget.locate(
-                              widget.initialTarget.entryId,
-                            );
-                            if (latest != null) {
-                              unawaited(
-                                _session.open(
-                                  latest,
-                                  itemId: widget.itemId,
-                                  pageNumber: widget.initialPageNumber,
-                                  restore: false,
-                                ),
-                              );
-                            }
-                          },
-                          child: const Text('重新打开'),
-                        ),
-                )
-              : _effectiveViewMode != ReaderViewMode.single
-              ? _modeContent(current, page, toggleTools)
-              : _paperViewport(
-                  ReaderInput(
-                    onPrevious: () => _navigate(NavigationDirection.backward),
-                    onNext: () => _navigate(NavigationDirection.forward),
-                    onCenterTap: _picking ? null : toggleTools,
-                    onCenterDoubleTap: _tool != null || _textTool || _picking
-                        ? null
-                        : _togglePageLayout,
-                    allowPointerPageTurns:
-                        !_picking &&
-                        !_textTool &&
-                        _tool == null &&
-                        _scale <= 1.01,
-                    panInsets: _panInsets,
-                    pageAspect:
-                        _visibleDocument?.aspectFor(
-                          _visiblePage?.pageNumber ?? 1,
-                        ) ??
-                        current.aspectFor(_session.page),
-                    mouseInk: _editing && _tool != null,
-                    touchInk: _editing && _tool != null,
-                    editing: _editing,
-                    ignorePointerGestures: _desktopMenuOpen,
-                    gestureGeneration: _inputGeneration,
-                    onTransformGestureChanged: (active) =>
-                        setState(() => _touchTransforming = active),
-                    transform: _transform,
-                    viewportKey: _viewportKey,
-                    touchControlKey: _seekRegionKey,
-                    textTool: _textTool,
-                    textSelectionKey: _textSelectionKey,
-                    textControls: _picking ? null : _textControls,
-                    child: ReaderPageWindow(
-                      onWillPresentPage: (key, number) {
-                        if (key != current.target.key) return;
-                        _applyPageLayout(
-                          document: current,
-                          number: number,
-                          pageAspect: current.aspectFor(number),
-                        );
-                      },
-                      documentKey: current.target.key,
-                      pageNumber: _session.page,
-                      pageCount: current.pageCount,
-                      aspectFor: current.aspectFor,
-                      direction: _direction,
-                      requestedAt: _requestedAt,
-                      presentationClock: widget.presentationClock,
-                      retainDocument: current.retain,
-                      releaseDocument: current.release,
-                      holdPresentation: _writing,
-                      onPresented: (document, number) {
-                        if (document == current.target.key) {
-                          _markPresented(current, number);
-                        }
-                      },
-                      prewarm: _prewarmScore == null
-                          ? null
-                          : ReaderPrewarmPage(
-                              documentKey: _prewarmScore!.target.key,
-                              aspect: _prewarmScore!.aspectFor(1),
-                              retainDocument: _prewarmScore!.retain,
-                              releaseDocument: _prewarmScore!.release,
-                              pageBuilder: _prewarmBuilder(_prewarmScore!),
-                            ),
-                      readyPageBuilder: (number, active, ready, failed) =>
-                          _surface(current, number, active, ready, failed),
-                    ),
-                  ),
-                ),
+          contentBuilder: (toggleTools) =>
+              _modeContent(current, page, toggleTools),
         ),
       ),
     );
   }
 
-  ReaderViewMode get _effectiveViewMode =>
-      _editing && _viewMode == ReaderViewMode.continuous
-      ? ReaderViewMode.single
-      : _viewMode;
+  ReaderViewMode get _effectiveViewMode => _heldFrame?.mode ??
+      (_editing && _viewMode == ReaderViewMode.continuous
+          ? ReaderViewMode.single : _viewMode);
   FirstPageArrangement _arrangementFor(String entryId) =>
       widget.allowAnnotations
       ? _viewPreferences?.arrangementFor(entryId) ?? FirstPageArrangement.paired
@@ -1015,21 +865,89 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         !_capabilities.supports(mode)) {
       return;
     }
-    if (_viewMode == ReaderViewMode.continuous) {
-      _continuousRestore = _continuous.anchor;
+    if (_displayedMode == ReaderViewMode.continuous) {
+      final old = _heldFrame ?? _frame;
+      _continuousRestore = old.continuous.anchor;
+      _continuousRestoreScale = old.continuous.scale;
       _continuousAnchorFocus = _visiblePage;
     } else if (mode == ReaderViewMode.continuous &&
         _session.pageKey != _continuousAnchorFocus) {
       _continuousRestore = null;
     }
     setState(() {
+      if (_heldFrame == null) {
+        _heldFrame = _frame;
+        _heldModeContent = _lastModeContent;
+      } else {
+        _retireFrame(_frame);
+      }
       _viewMode = mode;
+      if (mode == _heldFrame!.mode) {
+        _activateFrame(_heldFrame!);
+        _heldFrame = null;
+        _heldModeContent = null;
+      } else {
+        final next = _ReaderModeFrame(mode);
+        if (mode == ReaderViewMode.continuous) {
+          next.continuous.scale = _continuousRestoreScale;
+        }
+        _activateFrame(next);
+      }
       _direction = 0;
       _inputGeneration++;
       _cancelPick();
-      _transform.value = Matrix4.identity();
+      _prewarmEpoch++;
+      _prewarmScore = null;
+      _prewarmAnchor = null;
+      _session.cancelPrewarm();
     });
     _savePreference(_viewPreferences?.setMode(mode));
+  }
+
+  void _activateFrame(_ReaderModeFrame frame) {
+    _transform.removeListener(_transformChanged);
+    _frame = frame;
+    _transform.addListener(_transformChanged);
+    _scale = _transform.value.getMaxScaleOnAxis();
+    _paperViewportSize = null;
+    _paperViewportPage = null;
+  }
+
+  void _retireFrame(_ReaderModeFrame frame) {
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => frame.transform.dispose(),
+    );
+  }
+
+  bool _acceptModePresentation(_ReaderModeFrame frame, int number) {
+    if (!mounted || !identical(_frame, frame)) return false;
+    if (_modeChanging) {
+      if (number != _session.page) return false;
+      final old = _heldFrame!;
+      setState(() {
+        _heldFrame = null;
+        _heldModeContent = null;
+      });
+      _retireFrame(old);
+    }
+    return true;
+  }
+
+  void _rejectModePresentation(_ReaderModeFrame frame, String? error) {
+    if (error == null || !_modeChanging || !identical(_frame, frame)) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_modeChanging || !identical(_frame, frame)) return;
+      setState(() {
+        _activateFrame(_heldFrame!);
+        _viewMode = _frame.mode;
+        _heldFrame = null;
+        _heldModeContent = null;
+        _navigationWarning = '阅读模式切换失败，已保留原页面。';
+      });
+      _retireFrame(frame);
+      _savePreference(_viewPreferences?.setMode(_viewMode));
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   void _changeArrangement(FirstPageArrangement value) {
@@ -1047,7 +965,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   }
 
   Future<void> _annotationAction() async {
-    if (_writing) return;
+    if (_writing || _modeChanging) return;
     if (_editing) {
       await _finishAnnotation();
       return;
@@ -1062,6 +980,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     final selected = visible.pageNumber;
     if (_viewMode == ReaderViewMode.continuous) {
       _continuousRestore = _continuous.anchor;
+      _continuousRestoreScale = _continuous.scale;
       _continuousEditStart = visible;
       _continuousAnchorFocus = visible;
     }
@@ -1310,8 +1229,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
               if (_effectiveViewMode == ReaderViewMode.continuous) {
                 _continuous.fit();
               } else {
-                _layoutChosen = true;
-                _coverLayout = false;
                 _applyPageLayout();
               }
             },
@@ -1353,6 +1270,71 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     PageKey? page,
     VoidCallback toggleBar,
   ) {
+    // Initial preferences load before the first readable tree exists.
+    final requestedMode = _editing && _viewMode == ReaderViewMode.continuous
+        ? ReaderViewMode.single
+        : _viewMode;
+    if (!_modeChanging && _frame.mode != requestedMode) {
+      final previous = _frame;
+      if (_lastModeContent != null && _visiblePage != null) {
+        _heldFrame = previous;
+        _heldModeContent = _lastModeContent;
+        _prewarmEpoch++;
+        _prewarmScore = null;
+        _session.cancelPrewarm();
+      } else {
+        _retireFrame(previous);
+      }
+      final next = _ReaderModeFrame(requestedMode);
+      if (requestedMode == ReaderViewMode.continuous) {
+        next.continuous.scale = _continuousRestoreScale;
+      }
+      _activateFrame(next);
+    }
+    final frame = _frame;
+    final content = KeyedSubtree(
+      key: ObjectKey(frame),
+      child: _buildModeContent(current, page, toggleBar, frame),
+    );
+    _lastModeContent = content;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ReaderPresentationPolicy(
+          key: ObjectKey(frame),
+          limited: _modeChanging,
+          child: IgnorePointer(
+            ignoring: _modeChanging,
+            child: ExcludeFocus(
+              excluding: _modeChanging,
+              child: ExcludeSemantics(excluding: _modeChanging, child: content),
+            ),
+          ),
+        ),
+        if (_modeChanging && _heldModeContent != null)
+          ReaderPresentationPolicy(
+            key: ObjectKey(_heldFrame!),
+            limited: true,
+            frozen: true,
+            child: IgnorePointer(
+              child: ExcludeFocus(
+                child: ExcludeSemantics(child: _heldModeContent!),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildModeContent(
+    LoadedScore? current,
+    PageKey? page,
+    VoidCallback toggleBar,
+    _ReaderModeFrame frame,
+  ) {
+    final mode = frame.mode;
+    final transform = frame.transform;
+    final viewportKey = frame.viewportKey;
     if (current == null || page == null) {
       return Center(
         child: _initialLoading || _session.loading
@@ -1360,13 +1342,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             : FilledButton(onPressed: _retryOpen, child: const Text('重新打开')),
       );
     }
-    if (_effectiveViewMode == ReaderViewMode.continuous) {
+    if (mode == ReaderViewMode.continuous) {
       return ReaderContinuousView(
         key: ValueKey(current.target.key),
         documentKey: current.target.key,
         pageCount: current.pageCount,
         aspectFor: current.aspectFor,
-        controller: _continuous,
+        controller: frame.continuous,
         rasterPageLimit: _isCompact ? 2 : 4,
         touchPanHorizontal: _isCompact,
         edgeToEdge: _isCompact,
@@ -1383,19 +1365,23 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         navigationToken: _continuousNavigation,
         initialAnchor: _continuousRestore,
         controlKey: _seekRegionKey,
-        viewportKey: _viewportKey,
+        viewportKey: viewportKey,
         retainDocument: current.retain,
         releaseDocument: current.release,
         onCenterTap: toggleBar,
-        onCenterDoubleTap:
-            _isCompact && _tool == null && !_textTool && !_picking
-            ? _togglePageLayout
-            : null,
-        pageLayout: _layoutChosen ? _coverLayout : null,
         onPrevious: () => _navigate(NavigationDirection.backward),
         onNext: () => _navigate(NavigationDirection.forward),
-        pageBuilder: (number, active, ready, failed) =>
-            _surface(current, number, active, ready, failed),
+        pageBuilder: (number, active, ready, failed) => _surface(
+          current,
+          number,
+          active,
+          ready,
+          failed,
+          transform: transform,
+          viewportKey: viewportKey,
+          mode: mode,
+          frame: frame,
+        ),
         previewPageBuilder: (number, pixels, ready, failed) => _surface(
           current,
           number,
@@ -1403,10 +1389,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
           ready,
           failed,
           previewPixels: pixels,
+          transform: transform,
+          viewportKey: viewportKey,
+          mode: mode,
+          frame: frame,
         ),
         onPresented: (number) {
-          if (_effectiveViewMode != ReaderViewMode.continuous ||
-              _session.current?.target.key != current.target.key) {
+          if (_session.current?.target.key != current.target.key ||
+              !_acceptModePresentation(frame, number)) {
             return;
           }
           _followingContinuous = true;
@@ -1433,10 +1423,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         );
         final groups = ReaderSpreads(
           pageCount: current.pageCount,
-          doublePage: _effectiveViewMode == ReaderViewMode.spread,
+          doublePage: mode == ReaderViewMode.spread,
           arrangement: _arrangementFor(current.target.entryId),
         );
-        final mode = _effectiveViewMode;
         final viewKey = (current.target.key, mode, groups.arrangement);
         double aspect(int index) {
           final group = groups.at(index);
@@ -1447,7 +1436,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         }
 
         ReaderPrewarmPage? warm;
-        final next = _terminalVisiblePage == null ? null : _prewarmScore;
+        final next = _modeChanging || _terminalVisiblePage == null
+            ? null
+            : _prewarmScore;
         if (next != null) {
           final nextGroups = ReaderSpreads(
             pageCount: next.pageCount,
@@ -1480,10 +1471,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             onCenterTap: _tool != null || _textTool || _picking
                 ? null
                 : toggleBar,
-            onCenterDoubleTap:
-                _isCompact && _tool == null && !_textTool && !_picking
-                ? _togglePageLayout
-                : null,
             allowPointerPageTurns:
                 _tool == null && !_textTool && !_picking && _scale <= 1.01,
             pageAspect: aspect(
@@ -1501,8 +1488,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             panInsets: _panInsets,
             editing: _editing,
             gestureGeneration: _inputGeneration,
-            transform: _transform,
-            viewportKey: _viewportKey,
+            transform: transform,
+            viewportKey: viewportKey,
             touchControlKey: _seekRegionKey,
             textTool: _textTool,
             textSelectionKey: _textSelectionKey,
@@ -1518,11 +1505,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
               direction: _direction,
               requestedAt: _requestedAt,
               presentationClock: widget.presentationClock,
-              forwardWindowOnly: true,
-              paperWidthTransition: true,
-              shortPageTransition: true,
+              forwardWindowOnly: !_isCompact || groups.doublePage,
+              paperWidthTransition: !_isCompact || groups.doublePage,
+              shortPageTransition: !_isCompact || groups.doublePage,
               onWillPresentPage: (key, index) {
-                if (key != viewKey) return;
+                if (key != viewKey || !identical(frame, _frame)) return;
                 final group = groups.at(index);
                 _applyPageLayout(
                   document: current,
@@ -1539,13 +1526,14 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
               holdPresentation: _writing,
               onSelected: (key, index) {
                 if (key != viewKey ||
-                    _effectiveViewMode != mode ||
+                    !identical(frame, _frame) ||
                     _session.current?.target.key != current.target.key ||
                     _arrangementFor(current.target.entryId) !=
                         groups.arrangement) {
                   return;
                 }
                 final group = groups.at(index);
+                if (_modeChanging) return;
                 _selectVisible(
                   current,
                   group.contains(_session.page) ? _session.page : group.first,
@@ -1553,13 +1541,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
               },
               onPresented: (key, index) {
                 if (key != viewKey ||
-                    _effectiveViewMode != mode ||
+                    !identical(frame, _frame) ||
                     _session.current?.target.key != current.target.key ||
                     _arrangementFor(current.target.entryId) !=
                         groups.arrangement) {
                   return;
                 }
                 final group = groups.at(index);
+                final number = group.contains(_session.page)
+                    ? _session.page
+                    : group.first;
+                if (!_acceptModePresentation(frame, number)) return;
                 _markPresented(
                   current,
                   group.contains(_session.page) ? _session.page : group.first,
@@ -1577,6 +1569,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
                       active,
                       pageReady,
                       pageFailed,
+                      transform: transform,
+                      viewportKey: viewportKey,
+                      mode: mode,
+                      frame: frame,
                     ),
                   ),
             ),
@@ -1600,7 +1596,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
         _visiblePage = visible;
         _visibleDocument = document;
         _annotationPage = _editing ? visible : null;
-        if (_layoutPage != visible) _applyPageLayout();
       });
     }
   }
@@ -1654,14 +1649,26 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     VoidCallback ready,
     ValueChanged<String?> failed, {
     int? previewPixels,
+    TransformationController? transform,
+    GlobalKey? viewportKey,
+    ReaderViewMode? mode,
+    _ReaderModeFrame? frame,
   }) {
+    transform ??= _transform;
+    viewportKey ??= _viewportKey;
+    mode ??= _effectiveViewMode;
+    final reportFailure = failed;
+    failed = (error) {
+      reportFailure(error);
+      if (frame != null) _rejectModePresentation(frame, error);
+    };
     final surfacePage = PageKey(
       entryId: document.target.entryId,
       revisionId: document.target.revisionId,
       pageNumber: number,
     );
     final editableSpread =
-        _effectiveViewMode == ReaderViewMode.spread &&
+        mode == ReaderViewMode.spread &&
         identical(document, _visibleDocument) &&
         _visiblePage != null &&
         _session.current == document &&
@@ -1683,21 +1690,24 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             page: document.pdf!.pages[number - 1],
             active: active,
             allowDetail:
-                (_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
-                _effectiveViewMode == ReaderViewMode.continuous ||
-                (identical(document, _visibleDocument) &&
-                    (_effectiveViewMode == ReaderViewMode.spread
-                        ? ReaderSpreads(
-                            pageCount: document.pageCount,
-                            doublePage: true,
-                            arrangement: _arrangementFor(
-                              document.target.entryId,
-                            ),
-                          ).forPage(_visiblePage!.pageNumber).contains(number)
-                        : number == _visiblePage?.pageNumber)),
+                (!_modeChanging || identical(frame, _heldFrame)) &&
+                ((_isCompact && mode == ReaderViewMode.single) ||
+                    mode == ReaderViewMode.continuous ||
+                    (identical(document, _visibleDocument) &&
+                        (mode == ReaderViewMode.spread
+                            ? ReaderSpreads(
+                                    pageCount: document.pageCount,
+                                    doublePage: true,
+                                    arrangement: _arrangementFor(
+                                      document.target.entryId,
+                                    ),
+                                  )
+                                  .forPage(_visiblePage!.pageNumber)
+                                  .contains(number)
+                            : number == _visiblePage?.pageNumber))),
             previewPixels: previewPixels,
-            transform: _transform,
-            viewportKey: _viewportKey,
+            transform: transform,
+            viewportKey: viewportKey,
             onRendered: () {
               ready();
               _onRendered(document, number);
@@ -1711,7 +1721,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             active: active,
             fileVersion: document.target.contentHash,
             path: document.renderPath ?? document.target.filePath,
-            transform: _transform,
+            transform: transform,
             onRendered: ready,
             onError: failed,
             colorSampler: _colorSampler,
@@ -1730,11 +1740,13 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
           ),
         if (widget.allowAnnotations)
           AnnotationTextLayer(
-            transform: _transform,
+            transform: transform,
             textControls: _textControls,
             topControlsKey: _textToolsKey,
-            viewportKey: _viewportKey,
-            selectionKey: surfacePage == (_annotationPage ?? _visiblePage)
+            viewportKey: viewportKey,
+            selectionKey:
+                !_modeChanging &&
+                    surfacePage == (_annotationPage ?? _visiblePage)
                 ? _textSelectionKey
                 : null,
             mouseControlKey: _seekRegionKey,
@@ -1742,8 +1754,9 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
             page: surfacePage,
             enabled:
                 active &&
+                !_modeChanging &&
                 _editing &&
-                ((_isCompact && _effectiveViewMode == ReaderViewMode.single) ||
+                ((_isCompact && mode == ReaderViewMode.single) ||
                     editableSpread ||
                     (_editing &&
                         surfacePage == _visiblePage &&
@@ -1781,10 +1794,6 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     );
   }
 
-  ReadyPageBuilder _prewarmBuilder(LoadedScore document) =>
-      (number, active, ready, failed) =>
-          _surface(document, number, active, ready, failed);
-
   int? get _terminalVisiblePage {
     final document = _visibleDocument, visible = _visiblePage;
     if (document == null ||
@@ -1806,6 +1815,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   }
 
   Future<void> _prewarmNext() async {
+    if (_modeChanging) return;
     final last = _terminalVisiblePage;
     if (last == null) return;
     final next = _session.nextPrewarmTargetFor(lastVisiblePage: last);
@@ -1993,76 +2003,80 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
     return document.aspectFor(number);
   }
 
-  Widget _paperViewport(Widget child) => Padding(
-    padding: readerPagePadding(context),
-    child: LayoutBuilder(
-      builder: (context, constraints) {
-        final next = constraints.biggest, before = _paperViewportSize;
-        final samePage = _paperViewportPage == _visiblePage;
-        _paperViewportSize = next;
-        _paperViewportPage = _visiblePage;
-        final matrix = Matrix4.copy(_transform.value);
-        final scale = matrix.getMaxScaleOnAxis();
-        if (before != null &&
-            before != next &&
-            samePage &&
-            scale > 1.000001 &&
-            !readerTextEditorActive) {
-          Rect fitted(Size size) => Alignment.center.inscribe(
-            applyBoxFit(
-              BoxFit.contain,
-              Size(_readerFitAspect(size), 1),
-              size,
-            ).destination,
-            Offset.zero & size,
-          );
-          final oldPaper = fitted(before), newPaper = fitted(next);
-          final scene =
-              (before.center(Offset.zero) -
-                  Offset(matrix.storage[12], matrix.storage[13])) /
-              scale;
-          // Preserve the user's preferred content anchor through temporary
-          // chrome clamping. Opening a bar can make an edge view unreachable;
-          // closing it restores that original view instead of accumulating drift.
-          final fraction =
-              _preferredAnchorPage == _visiblePage &&
-                  _preferredAnchorScale == scale &&
-                  _preferredViewportAnchor != null
-              ? _preferredViewportAnchor!
-              : Offset(
-                  (scene.dx - oldPaper.left) / oldPaper.width,
-                  (scene.dy - oldPaper.top) / oldPaper.height,
+  Widget _paperViewport(Widget child) {
+    final controller = _transform;
+    return Padding(
+      padding: readerPagePadding(context),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (!identical(controller, _transform)) return child;
+          final next = constraints.biggest, before = _paperViewportSize;
+          final samePage = _paperViewportPage == _visiblePage;
+          _paperViewportSize = next;
+          _paperViewportPage = _visiblePage;
+          final matrix = Matrix4.copy(_transform.value);
+          final scale = matrix.getMaxScaleOnAxis();
+          if (before != null &&
+              before != next &&
+              samePage &&
+              scale > 1.000001 &&
+              !readerTextEditorActive) {
+            Rect fitted(Size size) => Alignment.center.inscribe(
+              applyBoxFit(
+                BoxFit.contain,
+                Size(_readerFitAspect(size), 1),
+                size,
+              ).destination,
+              Offset.zero & size,
+            );
+            final oldPaper = fitted(before), newPaper = fitted(next);
+            final scene =
+                (before.center(Offset.zero) -
+                    Offset(matrix.storage[12], matrix.storage[13])) /
+                scale;
+            // Preserve the user's preferred content anchor through temporary
+            // chrome clamping. Opening a bar can make an edge view unreachable;
+            // closing it restores that original view instead of accumulating drift.
+            final fraction =
+                _preferredAnchorPage == _visiblePage &&
+                    _preferredAnchorScale == scale &&
+                    _preferredViewportAnchor != null
+                ? _preferredViewportAnchor!
+                : Offset(
+                    (scene.dx - oldPaper.left) / oldPaper.width,
+                    (scene.dy - oldPaper.top) / oldPaper.height,
+                  );
+            _preferredViewportAnchor = fraction;
+            _preferredAnchorPage = _visiblePage;
+            _preferredAnchorScale = scale;
+            final anchor =
+                newPaper.topLeft +
+                Offset(
+                  fraction.dx * newPaper.width,
+                  fraction.dy * newPaper.height,
                 );
-          _preferredViewportAnchor = fraction;
-          _preferredAnchorPage = _visiblePage;
-          _preferredAnchorScale = scale;
-          final anchor =
-              newPaper.topLeft +
-              Offset(
-                fraction.dx * newPaper.width,
-                fraction.dy * newPaper.height,
-              );
-          final translation = clampReaderPan(
-            viewport: next,
-            scale: scale,
-            translation: next.center(Offset.zero) - anchor * scale,
-            pageAspect: _readerFitAspect(next),
-          );
-          // This LayoutBuilder owns the transformed reader below it. Publish
-          // the reprojected anchor before those descendants build/paint, so
-          // the compositor never shows one frame with the old viewport matrix.
-          _projectingViewport = true;
-          try {
-            _transform.value = Matrix4.diagonal3Values(scale, scale, 1)
-              ..setTranslationRaw(translation.dx, translation.dy, 0);
-          } finally {
-            _projectingViewport = false;
+            final translation = clampReaderPan(
+              viewport: next,
+              scale: scale,
+              translation: next.center(Offset.zero) - anchor * scale,
+              pageAspect: _readerFitAspect(next),
+            );
+            // This LayoutBuilder owns the transformed reader below it. Publish
+            // the reprojected anchor before those descendants build/paint, so
+            // the compositor never shows one frame with the old viewport matrix.
+            _projectingViewport = true;
+            try {
+              _transform.value = Matrix4.diagonal3Values(scale, scale, 1)
+                ..setTranslationRaw(translation.dx, translation.dy, 0);
+            } finally {
+              _projectingViewport = false;
+            }
           }
-        }
-        return child;
-      },
-    ),
-  );
+          return child;
+        },
+      ),
+    );
+  }
 
   Widget _trackPen(Widget child) => Listener(
     onPointerDown: (event) {
@@ -2364,8 +2378,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen>
   }
 
   Widget _footer() {
-    if ((_effectiveViewMode == ReaderViewMode.continuous) ||
-        _dotsSuppressed ||
+    if (_dotsSuppressed ||
         _writing ||
         _textDraftActive ||
         MediaQuery.viewInsetsOf(context).bottom > 0 ||

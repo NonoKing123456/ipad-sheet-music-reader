@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'reader_presentation_policy.dart';
+
 import '../theme/tokens.dart';
 
 import 'package:flutter/material.dart';
@@ -138,6 +140,27 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   int _settleEpoch = 0;
   _PageId? _awaitingPaint;
   Duration _transitionStart = Duration.zero;
+  bool _limited = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final limited = ReaderPresentationPolicy.limitedOf(context);
+    if (_limited != limited) {
+      _limited = limited;
+      if (limited) {
+        // A mode handoff retains the last committed paper, never two halves
+        // of an unfinished turn plus another full destination window.
+        _animation.stop();
+        _settleEpoch++;
+        if (_settleRevealed && _incoming != null) _displayed = _incoming!;
+        _incoming = null;
+        _settleRevealed = false;
+        _startScheduled = false;
+        _requested = _displayed;
+      }
+      _capture();
+    }
+  }
   @override
   void initState() {
     super.initState();
@@ -181,7 +204,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       n <= math.min(widget.pageCount, widget.pageNumber + 1);
       n++
     ) {
-      if (widget.forwardWindowOnly &&
+      if ((widget.forwardWindowOnly || _limited) &&
           !_inWindow(_PageId(widget.documentKey, n))) {
         continue;
       }
@@ -218,6 +241,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   }
 
   bool _inWindow(_PageId id) {
+    if (_limited) return id == _requested;
     if (id.document != widget.documentKey) return false;
     if (!widget.forwardWindowOnly) {
       return (id.number - widget.pageNumber).abs() <= 1;
@@ -233,8 +257,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   }
 
   bool get _canPrewarm =>
-      !widget.forwardWindowOnly ||
-      (_incoming == null && _requested == _displayed);
+      !_limited &&
+      (!widget.forwardWindowOnly ||
+          (_incoming == null && _requested == _displayed));
 
   void _trim() {
     final remove = _surfaces.keys
@@ -373,6 +398,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     }
     if (_displayed == _requested) {
       if (!_initialPresented) {
+        _preparePresentation(_displayed);
         _initialPresented = true;
         _notifyPresented();
       }
@@ -426,6 +452,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     if (!(_surfaces[_requested]?.ready ?? false)) return;
     if (_displayed == _requested) {
       if (!_initialPresented) {
+        _preparePresentation(_displayed);
         _initialPresented = true;
         _notifyPresented();
       }
@@ -482,7 +509,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
 
   void _notifyPresented() {
     final id = _displayed;
-    if (widget.shortPageTransition && !(_surfaces[id]?.painted ?? false)) {
+    if (!(_surfaces[id]?.painted ?? false)) {
       _awaitingPaint = id;
       return;
     }
@@ -490,7 +517,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted &&
           _displayed == id &&
-          (!widget.shortPageTransition || _requested == id)) {
+          _requested == id) {
         _surfaces[id]?.owner.onPresented?.call(id.document, id.number);
       }
     });
@@ -597,9 +624,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                                 ),
                                 child: ColoredBox(
                                   color: _surfaces[id]!.owner.surfaceBackground,
-                                  child: widget.shortPageTransition
-                                      ? _observePaint(id, _buildSurface(id))
-                                      : _buildSurface(id),
+                                  child: _observePaint(id, _buildSurface(id)),
                                 ),
                               ),
                             ),

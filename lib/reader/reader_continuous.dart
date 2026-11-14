@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -8,6 +7,7 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 
 import 'reader_page_window.dart';
+import 'reader_presentation_policy.dart';
 import 'reader_text_editing.dart';
 import '../theme/tokens.dart';
 
@@ -31,8 +31,6 @@ class ReaderContinuousController {
   double scale = 1;
   ReaderScrollAnchor? anchor;
   ValueChanged<double>? _zoom;
-  ValueChanged<bool>? _layout;
-  void layout(bool cover) => _layout?.call(cover);
   void zoom(double factor) {
     final next = (scale * factor).clamp(continuousMinScale, continuousMaxScale);
     if (_zoom != null) {
@@ -67,8 +65,6 @@ class ReaderContinuousView extends StatefulWidget {
     required this.onPresented,
     this.initialAnchor,
     this.onCenterTap,
-    this.onCenterDoubleTap,
-    this.pageLayout,
     this.onPrevious,
     this.onNext,
     this.controlKey,
@@ -91,9 +87,7 @@ class ReaderContinuousView extends StatefulWidget {
   final ReaderContinuousController controller;
   final ReaderScrollAnchor? initialAnchor;
   final ValueChanged<int> onPresented;
-  final VoidCallback? onCenterTap, onCenterDoubleTap, onPrevious, onNext;
-  // Null preserves the original continuous width-fit until the user chooses.
-  final bool? pageLayout;
+  final VoidCallback? onCenterTap, onPrevious, onNext;
   final GlobalKey? controlKey, viewportKey;
   final VoidCallback? retainDocument, releaseDocument;
 
@@ -108,8 +102,7 @@ class ReaderContinuousView extends StatefulWidget {
   State<ReaderContinuousView> createState() => _ReaderContinuousViewState();
 }
 
-class _ReaderContinuousViewState extends State<ReaderContinuousView>
-    with SingleTickerProviderStateMixin {
+class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   final _vertical = ScrollController(), _horizontal = ScrollController();
   final _mounted = <int, Object>{};
   final _ready = <int>{};
@@ -142,102 +135,38 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   int _gesturePointers = 0;
   final _contacts = <int>{}, _pens = <int>{}, _touches = <int>{};
   bool _blockedPointerSequence = false;
-  Timer? _centerTapTimer;
-  Duration? _centerTapTime;
-  Offset? _centerTapPosition, _tapOrigin;
-  Duration _tapEventTime = Duration.zero;
+  Offset? _tapOrigin;
   bool _tapMoved = false;
-  bool? _pendingLayout;
-  late final AnimationController _layoutAnimation =
-      AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 200),
-      )..addListener(() {
-        final t = Curves.easeOutCubic.transform(_layoutAnimation.value);
-        _zoom(
-          _layoutStartScale + (_layoutTargetScale - _layoutStartScale) * t,
-          null,
-        );
-      });
-  double _layoutStartScale = 1, _layoutTargetScale = 1;
-  late final ValueChanged<bool> _layoutCallback = _setLayout;
+  final _painted = <int>{};
+  bool _limited = false, _frozen = false;
 
-  double _layoutScale(bool cover, int page, Size viewport) {
-    final baseWidth = math.max(1.0, viewport.width - 2 * _sideInset);
-    final height = baseWidth / widget.aspectFor(page);
-    final x = viewport.width / baseWidth, y = viewport.height / height;
-    return (cover ? math.max(x, y) : math.min(x, y)).clamp(
-      continuousMinScale,
-      continuousMaxScale,
-    );
-  }
-
-  void _setLayout(bool cover) {
-    if (_viewport.isEmpty) return;
-    _layoutAnimation.stop();
-    _layoutStartScale = widget.controller.scale;
-    _layoutTargetScale = _layoutScale(
-      cover,
-      _reported ?? widget.requestedPage,
-      _viewport,
-    );
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _zoom(_layoutTargetScale, null);
-    } else {
-      _layoutAnimation.forward(from: 0);
-    }
-  }
-
-  void _cancelCenterTap() {
-    _centerTapTimer?.cancel();
-    _centerTapTimer = null;
-    _centerTapTime = null;
-    _centerTapPosition = null;
-  }
-
-  void _centerTap(Offset point) {
-    if (widget.onCenterDoubleTap == null) {
-      widget.onCenterTap?.call();
-      return;
-    }
-    if (_centerTapTime != null &&
-        _tapEventTime - _centerTapTime! <= const Duration(milliseconds: 280) &&
-        (point - _centerTapPosition!).distance <= 32) {
-      _cancelCenterTap();
-      widget.onCenterDoubleTap?.call();
-      return;
-    }
-    if (_centerTapTimer != null) widget.onCenterTap?.call();
-    _cancelCenterTap();
-    _centerTapTime = _tapEventTime;
-    _centerTapPosition = point;
-    _centerTapTimer = Timer(const Duration(milliseconds: 280), () {
-      _cancelCenterTap();
-      if (mounted && !widget.navigationBlocked && !readerTextEditorActive) {
-        widget.onCenterTap?.call();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final limited = ReaderPresentationPolicy.limitedOf(context);
+    final frozen = ReaderPresentationPolicy.frozenOf(context);
+    if (_limited != limited || _frozen != frozen) {
+      _limited = limited;
+      _frozen = frozen;
+      if (frozen) {
+        // Drop only offscreen prefetch. Every already visible full surface or
+        // low-resolution preview stays in place, with unchanged scroll geometry.
+        _window = _window.intersection(_visible);
+      } else {
+        _schedule();
       }
-    });
+    }
   }
 
   void _pointerDown(PointerDownEvent event) {
-    _layoutAnimation.stop();
-    _tapEventTime = event.timeStamp;
     if (_contacts.isEmpty) {
       _blockedPointerSequence = false;
       _tapOrigin = event.localPosition;
       _tapMoved = false;
     }
     _contacts.add(event.pointer);
-    if (_contacts.length > 1 ||
-        _insideControl(event.position) ||
-        widget.navigationBlocked ||
-        readerTextHandleActive ||
-        readerTextEditorActive) {
-      _cancelCenterTap();
-    }
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus) {
-      _cancelCenterTap();
       _pens.add(event.pointer);
       _blockedPointerSequence = true;
     }
@@ -250,7 +179,6 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   }
 
   void _pointerEnd(PointerEvent event) {
-    _tapEventTime = event.timeStamp;
     final transforming = _touches.length >= 2;
     _contacts.remove(event.pointer);
     _pens.remove(event.pointer);
@@ -296,7 +224,6 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
 
   late final ValueChanged<double> _zoomCallback = _zoomFromController;
   void _zoomFromController(double value) {
-    _layoutAnimation.stop();
     _zoom(value, null);
   }
 
@@ -304,18 +231,11 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   void initState() {
     super.initState();
     widget.retainDocument?.call();
-    _pendingAnchor =
-        widget.initialAnchor ??
-        ReaderScrollAnchor(
-          widget.requestedPage,
-          0,
-          widget.pageLayout == null ? 0 : .5,
-        );
-    _requestedPresentation = _pendingAnchor!.page;
-    _navigationFocus = _requestedPresentation;
+    _pendingAnchor = widget.initialAnchor ??
+        ReaderScrollAnchor(widget.requestedPage, 0, 0);
+    _requestedPresentation = widget.requestedPage;
+    _navigationFocus = widget.requestedPage;
     widget.controller._zoom = _zoomCallback;
-    widget.controller._layout = _layoutCallback;
-    _pendingLayout = widget.pageLayout;
     _vertical.addListener(_schedule);
   }
 
@@ -323,14 +243,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   void didUpdateWidget(covariant ReaderContinuousView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.navigationToken != widget.navigationToken) {
-      _layoutAnimation.stop();
-      _cancelCenterTap();
-      _pendingLayout = widget.pageLayout;
-      _pendingAnchor = ReaderScrollAnchor(
-        widget.requestedPage,
-        0,
-        widget.pageLayout == null ? 0 : .5,
-      );
+      _pendingAnchor = ReaderScrollAnchor(widget.requestedPage, 0, 0);
       _requestedPresentation = widget.requestedPage;
       _navigationFocus = widget.requestedPage;
       _pendingZoom = null;
@@ -341,11 +254,6 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
 
   @override
   void dispose() {
-    _cancelCenterTap();
-    _layoutAnimation.dispose();
-    if (identical(widget.controller._layout, _layoutCallback)) {
-      widget.controller._layout = null;
-    }
     if (identical(widget.controller._zoom, _zoomCallback)) {
       widget.controller._zoom = null;
     }
@@ -398,11 +306,11 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   }
 
   void _schedule() {
-    if (_scheduled || !mounted) return;
+    if (_scheduled || !mounted || _frozen) return;
     _scheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scheduled = false;
-      if (!mounted || !_vertical.hasClients || _heights.isEmpty) return;
+      if (!mounted || _frozen || !_vertical.hasClients || _heights.isEmpty) return;
       final zoom = _pendingZoom, anchor = _pendingAnchor;
       _pendingZoom = null;
       _pendingAnchor = null;
@@ -449,10 +357,13 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
       ) {
         final top = _prefix[i] + _verticalCenterInset + _pageTopInset,
             bottom = top + _heights[i];
-        visible[i + 1] = math.max(
-          0,
+        final area = math.max(
+          0.0,
           math.min(bottom, _offset + _viewport.height) - math.max(top, _offset),
         );
+        // A page whose tail is above the viewport's inter-page gap cannot
+        // paint here and must not participate in the destination paint gate.
+        if (area > 0) visible[i + 1] = area;
       }
       final priority = visible.keys.toList()
         ..sort((a, b) {
@@ -465,16 +376,17 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
         if (navigationFocus != null && visible.containsKey(navigationFocus))
           navigationFocus,
         ...priority,
-      }.take(widget.rasterPageLimit).toSet();
+      }.take(_limited ? 1 : widget.rasterPageLimit).toSet();
       for (
         var distance = 0;
-        nextWindow.length < math.min(widget.rasterPageLimit, widget.pageCount);
+        nextWindow.length <
+            math.min(_limited ? 1 : widget.rasterPageLimit, widget.pageCount);
         distance++
       ) {
         for (final page in [primary + distance, primary - distance]) {
           if (page >= 1 &&
               page <= widget.pageCount &&
-              nextWindow.length < widget.rasterPageLimit) {
+              nextWindow.length < (_limited ? 1 : widget.rasterPageLimit)) {
             nextWindow.add(page);
           }
         }
@@ -494,6 +406,9 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
           : primary;
       if (!_layoutPending &&
           _ready.contains(presented) &&
+          _painted.contains(presented) &&
+          (!_limited || _visible.every((page) =>
+              _ready.contains(page) && _painted.contains(page))) &&
           (presented != _reported || requested != null)) {
         _requestedPresentation = null;
         _reported = presented;
@@ -535,8 +450,6 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   }
 
   void _signal(PointerSignalEvent event) {
-    _layoutAnimation.stop();
-    _cancelCenterTap();
     if (event is! PointerScrollEvent || _insideControl(event.position)) return;
     GestureBinding.instance.pointerSignalResolver.register(event, (_) {
       _requestedPresentation = null;
@@ -564,14 +477,6 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      if (_pendingLayout != null) {
-        widget.controller.scale = _layoutScale(
-          _pendingLayout!,
-          widget.requestedPage,
-          constraints.biggest,
-        );
-        _pendingLayout = null;
-      }
       final width =
           math.max(1.0, constraints.maxWidth - 2 * _sideInset) *
           widget.controller.scale;
@@ -609,14 +514,10 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
           if (_tapOrigin != null &&
               (event.localPosition - _tapOrigin!).distance > 8) {
             _tapMoved = true;
-            _cancelCenterTap();
           }
         },
         onPointerUp: _pointerEnd,
-        onPointerCancel: (event) {
-          _cancelCenterTap();
-          _pointerEnd(event);
-        },
+        onPointerCancel: _pointerEnd,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapUp: (details) {
@@ -631,14 +532,9 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
               return;
             }
             final x = details.localPosition.dx / _viewport.width;
-            final center = widget.onCenterDoubleTap == null
-                ? x >= .35 && x <= .65
-                : x >= .3 &&
-                      x <= .7 &&
-                      details.localPosition.dy >= _viewport.height * .2 &&
-                      details.localPosition.dy <= _viewport.height * .8;
+            final center = x >= .35 && x <= .65;
             if (center) {
-              _centerTap(details.localPosition);
+              widget.onCenterTap?.call();
             } else if (x < .35) {
               widget.onPrevious?.call();
             } else {
@@ -736,9 +632,9 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
                               key: ValueKey((
                                 widget.documentKey,
                                 number,
-                                preview,
                               )),
                               number: number,
+                              preview: preview,
                               active:
                                   _prefix[index] + _verticalCenterInset <
                                       _offset + _viewport.height &&
@@ -756,17 +652,29 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView>
                               mounted: (token) {
                                 _mounted[number] = token;
                                 _ready.remove(number);
+                                _painted.remove(number);
                               },
                               unmounted: (token) {
                                 if (identical(_mounted[number], token)) {
                                   _mounted.remove(number);
                                   _ready.remove(number);
+                                  _painted.remove(number);
+                                }
+                              },
+                              painted: (token) {
+                                if (mounted &&
+                                    identical(_mounted[number], token) &&
+                                    _ready.contains(number)) {
+                                  _painted.add(number);
+                                  _schedule();
                                 }
                               },
                               ready: (token) {
                                 if (mounted &&
                                     identical(_mounted[number], token)) {
-                                  if (!preview) _ready.add(number);
+                                  if (!_ready.contains(number)) {
+                                    setState(() => _ready.add(number));
+                                  }
                                   _schedule();
                                 }
                               },
@@ -797,15 +705,17 @@ class _ContinuousPaper extends StatefulWidget {
     super.key,
     required this.number,
     required this.active,
+    required this.preview,
     required this.builder,
     required this.mounted,
     required this.unmounted,
     required this.ready,
+    required this.painted,
   });
   final int number;
-  final bool active;
+  final bool active, preview;
   final ReadyPageBuilder builder;
-  final ValueChanged<Object> mounted, unmounted, ready;
+  final ValueChanged<Object> mounted, unmounted, ready, painted;
   @override
   State<_ContinuousPaper> createState() => _ContinuousPaperState();
 }
@@ -813,10 +723,20 @@ class _ContinuousPaper extends StatefulWidget {
 class _ContinuousPaperState extends State<_ContinuousPaper> {
   final _token = Object();
   String? _error;
+  bool _ready = false;
   @override
   void initState() {
     super.initState();
     widget.mounted(_token);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ContinuousPaper oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.preview != widget.preview) {
+      _ready = false;
+      widget.mounted(_token);
+    }
   }
 
   @override
@@ -829,15 +749,21 @@ class _ContinuousPaperState extends State<_ContinuousPaper> {
   Widget build(BuildContext context) => Stack(
     fit: StackFit.expand,
     children: [
-      ColoredBox(
-        color: Colors.white,
-        child: widget.builder(
-          widget.number,
-          widget.active,
-          () => widget.ready(_token),
-          (error) {
-            if (mounted && error != _error) setState(() => _error = error);
-          },
+      ReaderPaintAcknowledgement(
+        onPainted: _ready ? () => widget.painted(_token) : null,
+        child: ColoredBox(
+          color: Colors.white,
+          child: widget.builder(
+            widget.number,
+            widget.active,
+            () {
+              if (mounted && !_ready) setState(() => _ready = true);
+              widget.ready(_token);
+            },
+            (error) {
+              if (mounted && error != _error) setState(() => _error = error);
+            },
+          ),
         ),
       ),
       if (_error != null) Center(child: Text(_error!)),

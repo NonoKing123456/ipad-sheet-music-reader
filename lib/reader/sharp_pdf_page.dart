@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 import 'raster_plan.dart';
+import 'reader_presentation_policy.dart';
 import 'paper_color_sampler.dart';
 
 Future<ui.Image?> renderSharpPdfPage(
@@ -86,7 +87,25 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
   Size? _paper;
   double _dpr = 1;
   bool _scheduled = false;
-  bool _baseFailed = false;
+  bool _baseFailed = false, _frozen = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final frozen = ReaderPresentationPolicy.frozenOf(context);
+    if (_frozen == frozen) return;
+    _frozen = frozen;
+    if (frozen) {
+      _timer?.cancel();
+      _baseEpoch++;
+      _detailEpoch++;
+      _baseToken?.cancel();
+      _detailToken?.cancel();
+      _basePlan = null;
+      _requestedDetail = null;
+    } else {
+      _schedule();
+    }
+  }
   String? _error;
   @override
   void initState() {
@@ -273,7 +292,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
 
   void _refresh() {
     final paper = _paper;
-    if (!mounted || paper == null || paper.isEmpty) return;
+    if (!mounted || _frozen || paper == null || paper.isEmpty) return;
     final base = planPageRaster(
       paper: paper,
       devicePixelRatio: _dpr,

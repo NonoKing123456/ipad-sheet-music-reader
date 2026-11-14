@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'reader_text_editing.dart';
@@ -87,7 +86,6 @@ class ReaderInput extends StatefulWidget {
     this.enabled = true,
     this.allowPointerPageTurns = true,
     this.onCenterTap,
-    this.onCenterDoubleTap,
     this.transform,
     this.viewportKey,
     this.touchControlKey,
@@ -112,8 +110,6 @@ class ReaderInput extends StatefulWidget {
   final bool allowPointerPageTurns;
   final VoidCallback? onCenterTap;
 
-  /// Enables delayed center-tap arbitration for fit/cover on tablet.
-  final VoidCallback? onCenterDoubleTap;
   final TransformationController? transform;
   final GlobalKey? viewportKey;
   final GlobalKey? touchControlKey;
@@ -142,11 +138,7 @@ class _ReaderInputState extends State<ReaderInput> {
   final Set<int> _pointers = {};
   final Set<int> _contacts = {};
   bool _sequenceConsumed = false, _panSequence = false;
-  Timer? _centerTapTimer;
-  Offset? _centerTapPosition;
-  Duration? _centerTapTime;
   static const _turnTravel = 32.0, _turnRatio = 1.5, _tapTravel = 8.0;
-  static const _doubleTapWindow = Duration(milliseconds: 280);
   final Set<int> _inkPointers = {};
   final Set<int> _textMoves = {};
   final Set<int> _ignoredPointers = {};
@@ -182,7 +174,6 @@ class _ReaderInputState extends State<ReaderInput> {
     if (oldWidget.editing != widget.editing ||
         oldWidget.textTool != widget.textTool ||
         oldWidget.gestureGeneration != widget.gestureGeneration) {
-      _cancelCenterTap();
       final transforming = _touches.length >= 2;
       final generation = ++_touchGeneration;
       _pointers.clear();
@@ -256,7 +247,6 @@ class _ReaderInputState extends State<ReaderInput> {
 
   @override
   void dispose() {
-    _centerTapTimer?.cancel();
     _focus.dispose();
     super.dispose();
   }
@@ -286,39 +276,6 @@ class _ReaderInputState extends State<ReaderInput> {
     return KeyEventResult.handled;
   }
 
-  void _cancelCenterTap() {
-    _centerTapTimer?.cancel();
-    _centerTapTimer = null;
-    _centerTapPosition = null;
-    _centerTapTime = null;
-  }
-
-  void _centerTap(PointerUpEvent event) {
-    if (widget.onCenterDoubleTap == null ||
-        event.kind != PointerDeviceKind.touch) {
-      widget.onCenterTap?.call();
-      return;
-    }
-    if (_centerTapTime != null &&
-        event.timeStamp - _centerTapTime! <= _doubleTapWindow &&
-        (event.localPosition - _centerTapPosition!).distance <= 32) {
-      _cancelCenterTap();
-      widget.onCenterDoubleTap?.call();
-      return;
-    }
-    // A distant second tap is a distinct single tap.
-    if (_centerTapTimer != null) widget.onCenterTap?.call();
-    _cancelCenterTap();
-    _centerTapPosition = event.localPosition;
-    _centerTapTime = event.timeStamp;
-    _centerTapTimer = Timer(_doubleTapWindow, () {
-      _cancelCenterTap();
-      if (mounted && widget.enabled && !readerTextEditorActive) {
-        widget.onCenterTap?.call();
-      }
-    });
-  }
-
   void _down(PointerDownEvent event) {
     if (_contacts.isEmpty) {
       _sequenceConsumed = false;
@@ -327,11 +284,9 @@ class _ReaderInputState extends State<ReaderInput> {
     }
     _contacts.add(event.pointer);
     if (readerTextHandleActive) {
-      _cancelCenterTap();
       return;
     }
     if (widget.ignorePointerGestures) {
-      _cancelCenterTap();
       _ignoredPointers.add(event.pointer);
       return;
     }
@@ -343,7 +298,6 @@ class _ReaderInputState extends State<ReaderInput> {
           (Offset.zero & box.size).contains(
             box.globalToLocal(event.position),
           )) {
-        _cancelCenterTap();
         return;
       }
     }
@@ -352,7 +306,6 @@ class _ReaderInputState extends State<ReaderInput> {
         (event.kind == PointerDeviceKind.stylus ||
             event.kind == PointerDeviceKind.invertedStylus ||
             (widget.mouseInk && event.kind == PointerDeviceKind.mouse))) {
-      _cancelCenterTap();
       _inkPointers.add(event.pointer);
       if (_pointers.isNotEmpty) _cancelled = true;
       return;
@@ -360,7 +313,6 @@ class _ReaderInputState extends State<ReaderInput> {
     _pointers.add(event.pointer);
     if (widget.textControls?.selectionPointers.contains(event.pointer) ??
         false) {
-      _cancelCenterTap();
       _textMoves.add(event.pointer);
     }
     if (_pointers.length == 1) {
@@ -377,7 +329,6 @@ class _ReaderInputState extends State<ReaderInput> {
           (Offset.zero & selected.size).contains(
             selected.globalToLocal(event.position),
           )) {
-        _cancelCenterTap();
         _textMoves.add(event.pointer);
       }
       _touches[event.pointer] = event.localPosition;
@@ -386,7 +337,6 @@ class _ReaderInputState extends State<ReaderInput> {
       if (_touches.length == 2) widget.onTransformGestureChanged?.call(true);
     }
     if (_contacts.length > 1) {
-      _cancelCenterTap();
       _cancelled = true;
       return;
     }
@@ -455,7 +405,6 @@ class _ReaderInputState extends State<ReaderInput> {
     if (_origin != null) {
       final travel = (event.localPosition - _origin!).distance;
       if (travel > _greatestTravel) _greatestTravel = travel;
-      if (travel > _tapTravel) _cancelCenterTap();
       final delta = event.localPosition - _origin!;
       if (!_cancelled &&
           !_panSequence &&
@@ -471,7 +420,6 @@ class _ReaderInputState extends State<ReaderInput> {
           delta.dx.abs() >= delta.dy.abs() * _turnRatio) {
         _sequenceConsumed = true;
         _cancelled = true;
-        _cancelCenterTap();
         delta.dx < 0 ? widget.onNext() : widget.onPrevious();
       }
     }
@@ -514,13 +462,8 @@ class _ReaderInputState extends State<ReaderInput> {
         delta.distance <= _tapTravel &&
         !widget.textTool) {
       final fraction = event.localPosition.dx / width;
-      final center = widget.onCenterDoubleTap == null
-          ? fraction >= .35 && fraction <= .65
-          : fraction >= .3 &&
-                fraction <= .7 &&
-                event.localPosition.dy >= _size.height * .2 &&
-                event.localPosition.dy <= _size.height * .8;
-      if (center) _centerTap(event);
+      final center = fraction >= .35 && fraction <= .65;
+      if (center) widget.onCenterTap?.call();
       if (!center && widget.allowPointerPageTurns) {
         if (fraction < .35) widget.onPrevious();
         if (fraction > .65) widget.onNext();
@@ -606,7 +549,6 @@ class _ReaderInputState extends State<ReaderInput> {
             onPointerUp: (event) => _up(event, constraints.maxWidth),
             onPointerCancel: (event) {
               _contacts.remove(event.pointer);
-              _cancelCenterTap();
               if (_ignoredPointers.remove(event.pointer)) return;
               widget.textControls?.paperCancel(event.pointer);
               _inkPointers.remove(event.pointer);

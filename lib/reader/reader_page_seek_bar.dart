@@ -143,12 +143,18 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
       final fraction = _pageCount <= 1
           ? 0.0
           : ((page - 1) / (_pageCount - 1)).clamp(0.0, 1.0);
+      final tooltipCenter = (_width - ReaderNavigationTokens.seekTooltipWidth) / 2;
+      final tooltipLeft =
+          (fraction * _width - ReaderNavigationTokens.seekTooltipWidth / 2).clamp(
+            math.min(-ScoreSpace.xl, tooltipCenter),
+            math.max(tooltipCenter, _width - ReaderNavigationTokens.seekTooltipWidth + ScoreSpace.xl),
+          ).toDouble();
       return Center(
         heightFactor: 1,
         child: SizedBox(
           key: widget.hitRegionKey,
           width: _width,
-          height: ReaderNavigationTokens.seekHitHeight,
+          height: ScoreLayout.touchTarget,
           child: Semantics(
             key: const ValueKey('page-indicator'),
             label: '页码',
@@ -194,37 +200,32 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
                               ),
                       ),
                     ),
-                    Positioned(
-                      top: 0,
-                      // A one-page dot is narrower than its label. Let the
-                      // transparent label overflow without widening the seek
-                      // region or changing the full-book drag mapping.
-                      left: -ScoreSpace.huge,
-                      right: -ScoreSpace.huge,
-                      child: ExcludeSemantics(
-                        child: Baseline(
-                          baseline: ScoreSpace.md,
-                          baselineType: TextBaseline.alphabetic,
-                          child: Text(
-                            _label(page),
+                    if (_preview != null)
+                      Positioned(
+                        top: -ReaderNavigationTokens.seekTooltipOffset,
+                        left: tooltipLeft,
+                        child: ExcludeSemantics(
+                          child: Container(
                             key: const ValueKey('reader-bottom-page-label'),
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            style: ScoreText.caption.copyWith(
-                              color: tokens.ink900,
-                              // Paper can stay white in dark mode, and the
-                              // label can also cross the black letterbox.
-                              shadows: [
-                                Shadow(
-                                  color: tokens.paper0,
-                                  blurRadius: ScoreLayout.iconStroke,
-                                ),
-                              ],
+                            width: ReaderNavigationTokens.seekTooltipWidth,
+                            height: ReaderNavigationTokens.seekTooltipHeight,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: tokens.paper0,
+                              borderRadius: BorderRadius.circular(
+                                ReaderNavigationTokens.seekTooltipRadius,
+                              ),
+                            ),
+                            child: Text(
+                              _label(page),
+                              maxLines: 1,
+                              style: ScoreText.caption.copyWith(
+                                color: tokens.ink900,
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
