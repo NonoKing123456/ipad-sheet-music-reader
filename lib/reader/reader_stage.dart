@@ -554,9 +554,17 @@ class _ReaderStageState extends State<ReaderStage>
                   bottom: 0,
                   child: SafeArea(
                     top: false,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: ScoreLayout.dotsBottom),
-                      child: widget.bottom,
+                    child: AnimatedBuilder(
+                      animation: _curve,
+                      builder: (context, _) => _curve.value == 0
+                          ? const SizedBox.shrink()
+                          : _animatedTools(
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: ScoreLayout.dotsBottom),
+                                child: widget.bottom,
+                              ),
+                              const Offset(0, 1),
+                            ),
                     ),
                   ),
                 ),
