@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/gestures.dart';
@@ -18,9 +17,7 @@ import 'package:score_reader/reader/reader_stage.dart';
 import 'package:score_reader/reader/reader_text_editing.dart';
 import 'package:score_reader/reader/reader_tool_button.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
-import 'package:score_reader/reader/text_handle_layout.dart';
 import 'package:score_reader/theme/app_theme.dart';
-import 'package:score_reader/sharing/score_share.dart';
 
 import 'desktop_reader_fixture.dart' show desktopPdf, desktopUntil;
 
@@ -62,7 +59,10 @@ Future<void> _dispose(
 ) async {
   await tester.pumpWidget(const SizedBox());
   await tester.pump();
-  await tester.runAsync(workspace.flushPositions);
+  await desktopUntil(tester, () => !workspace.saving);
+  await tester.runAsync(
+    () => workspace.flushPositions().timeout(const Duration(seconds: 10)),
+  );
   workspace.dispose();
   await tester.runAsync(() async {
     for (var i = 0; ; i++) {
@@ -120,7 +120,7 @@ void main() {
         );
         expect(
           tester.getTopLeft(find.byKey(const ValueKey('reading-viewport'))).dy,
-          24 / tester.view.devicePixelRatio,
+          0,
         );
         expect(
           tester
@@ -187,39 +187,6 @@ void main() {
       }
     },
   );
-  test('local delete target is 44px and separate from text and three manipulation handles', () {
-    for (final scale in [.7, 1.0, 2.0, 4.0]) {
-      for (final angle in [-.55, 0.0, .55, math.pi / 2]) {
-        for (final rect in [
-          const Rect.fromLTWH(100, 150, 96, 18),
-          const Rect.fromLTWH(520, 400, 80, 14),
-        ]) {
-          const viewport = Rect.fromLTWH(0, 0, 744, 700);
-          final handles = layoutTextHandles(
-            frame: rect,
-            viewport: viewport,
-            rotation: angle,
-            scale: scale,
-          );
-          final trash = layoutTextDelete(
-            frame: rect,
-            viewport: viewport,
-            rotation: angle,
-            scale: scale,
-            handles: handles.values,
-          );
-          expect(trash.hitRect.width * scale, closeTo(44, .001));
-          expect(trash.visualRect.width * scale, closeTo(28, .001));
-          expect(trash.hitRect.overlaps(rect), isFalse);
-          expect(
-            handles.values.any((p) => p.hitRect.overlaps(trash.hitRect)),
-            isFalse,
-          );
-        }
-      }
-    }
-  });
-
   testWidgets(
     'selected tool permits finger ink; pinch cancels entire finger draft and pen excludes palm ink',
     (tester) async {
@@ -343,7 +310,7 @@ void main() {
   );
 
   testWidgets(
-    'iPad actual reader keeps system bars, none by default, consistent T tools and empty one-line input; double tap edits and local trash preserves failure',
+    'iPad actual reader keeps system bars, none by default, consistent T tools and empty one-line input; double tap edits and action delete preserves failure',
     (tester) async {
       final dir = (await tester.runAsync(
         () => Directory.systemTemp.createTemp('reader31-'),
@@ -358,6 +325,15 @@ void main() {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         provider,
         (_) async => dir.path,
+      );
+      final sharedPaths = <String>[];
+      const shareChannel = MethodChannel('dev.fluttercommunity.plus/share');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        shareChannel,
+        (call) async {
+          sharedPaths.addAll((call.arguments['paths'] as List).cast<String>());
+          return 'dev.fluttercommunity.plus/share/dismissed';
+        },
       );
       final calls = <MethodCall>[];
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -409,9 +385,13 @@ void main() {
         );
         expect(
           tester.getTopLeft(find.byKey(const ValueKey('reading-viewport'))).dy,
-          24,
+          0,
         );
         await tester.tapAt(const Offset(372, 480));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('批注'), findsOneWidget);
+        expect(find.byTooltip('完成批注'), findsNothing);
+        await tester.tap(find.byTooltip('批注'));
         await tester.pumpAndSettle();
         expect(
           tester
@@ -422,11 +402,21 @@ void main() {
         expect(
           tester
               .widget<AnnotationTextLayer>(find.byType(AnnotationTextLayer))
-              .enabled,
+              .textTool,
           isFalse,
         );
-        await tester.tap(find.byTooltip('画笔；左右拖动调大小'));
+        await tester.tap(find.byTooltip('画笔'));
         await tester.pump();
+        final sizeButton = find.byKey(const ValueKey('annotation-size-button'));
+        final penWidthBefore = tester
+            .widget<ReaderSizeButton>(sizeButton)
+            .value;
+        await tester.drag(sizeButton, const Offset(45, 0));
+        await tester.pump();
+        expect(
+          tester.widget<ReaderSizeButton>(sizeButton).value,
+          greaterThan(penWidthBefore),
+        );
         expect(
           tester
               .widgetList<ReaderToolButton>(find.byType(ReaderToolButton))
@@ -434,7 +424,7 @@ void main() {
               .selected,
           isTrue,
         );
-        await tester.tap(find.byTooltip('画笔；左右拖动调大小'));
+        await tester.tap(find.byTooltip('画笔'));
         await tester.pump();
         expect(
           tester
@@ -446,6 +436,22 @@ void main() {
         await tester.pump();
         expect(find.byType(ReaderToolButton), findsNWidgets(3));
         expect(find.byType(ReaderSampleColorButton), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('annotation-size-button')),
+          findsOneWidget,
+        );
+        expect(find.byType(ReaderSizeButton), findsOneWidget);
+        expect(tester.widget<ReaderSizeButton>(sizeButton).label, '字号');
+        expect(tester.widget<ReaderSizeButton>(sizeButton).textMode, isTrue);
+        final textSizeBefore = tester.widget<ReaderSizeButton>(sizeButton);
+        expect(textSizeBefore.min, 8 / 1024);
+        expect(textSizeBefore.max, 96 / 1024);
+        await tester.drag(sizeButton, const Offset(35, 0));
+        await tester.pump();
+        final selectedTextSize = tester
+            .widget<ReaderSizeButton>(sizeButton)
+            .value;
+        expect(selectedTextSize, greaterThan(20 / 1024));
         expect(find.byTooltip('编辑文字'), findsNothing);
         final paper = tester.renderObject<RenderBox>(
           find.byType(AnnotationTextLayer),
@@ -460,31 +466,35 @@ void main() {
         expect(field.decoration!.hintText, isNull);
         expect(field.minLines, 1);
         expect(tester.getSize(find.byType(TextField)).height, lessThan(44));
-        expect(find.byTooltip('删除文字'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('text-context-actions')),
+          findsOneWidget,
+        );
+        expect(find.byTooltip('删除文字'), findsNothing);
         await tester.tapAt(paper.localToGlobal(const Offset(15, 350)));
         await tester.pump();
         expect(workspace.store.snapshot.annotationsFor(page), isEmpty);
         await tester.tapAt(spot);
         await tester.pump();
         await tester.enterText(find.byType(TextField), '原文字\n第二行');
-        final share = tester.widget<ShareAction>(find.byType(ShareAction));
-        expect(
-          share.filePath,
-          path,
-          reason: 'share uses original, never reading cache',
-        );
         workspace.gate = Completer<bool>();
-        final blockedShare = share.beforeShare!();
+        await tester.tap(find.byTooltip('分享'));
         await tester.pump();
         expect(
           tester.widget<TextField>(find.byType(TextField)).readOnly,
           isTrue,
         );
         workspace.gate!.complete(false);
-        bool? shareResult;
-        blockedShare.then((value) => shareResult = value);
-        await desktopUntil(tester, () => shareResult != null);
-        expect(shareResult, isFalse);
+        await desktopUntil(
+          tester,
+          () => find.byTooltip('分享').evaluate().isNotEmpty,
+        );
+        expect(find.text('分享原文件'), findsNothing);
+        expect(
+          sharedPaths,
+          isEmpty,
+          reason: 'failed save blocks native sharing',
+        );
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
           '原文字\n第二行',
@@ -514,12 +524,75 @@ void main() {
           tester,
           () => find.byType(TextField).evaluate().isEmpty,
         );
-        final saved = workspace.store.snapshot
+        var saved = workspace.store.snapshot
             .annotationsFor(page)
             .whereType<TextAnnotation>()
             .single;
+        expect(saved.fontSizeFraction, closeTo(selectedTextSize, .001));
         expect(saved.argb, 0xffeeeeee);
-        final point = paper.localToGlobal(
+        // Distinguish the original from the reader's cached PDF without real files.
+        final originalBytes = [
+          ...bytes,
+          ...'\n% synthetic original source\n'.codeUnits,
+        ];
+        await tester.runAsync(() => File(path).writeAsBytes(originalBytes));
+        await tester.tap(find.byTooltip('分享'));
+        await desktopUntil(
+          tester,
+          () => find.text('分享原文件').evaluate().isNotEmpty,
+        );
+        // Sharing stays busy until the sheet closes; settle only its entrance.
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.tap(find.text('分享原文件'));
+        await desktopUntil(tester, () => sharedPaths.isNotEmpty);
+        expect(
+          await tester.runAsync(() => File(sharedPaths.single).readAsBytes()),
+          originalBytes,
+          reason: 'share uses original, never reading cache',
+        );
+
+        var point = paper.localToGlobal(
+          textAnnotationFrame(saved, paper.size).center,
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.tapAt(point);
+        await tester.pump();
+        workspace.gate = Completer<bool>();
+        final fontSizeButton = find.byKey(
+          const ValueKey('annotation-size-button'),
+        );
+        final selectedFontBefore = tester
+            .widget<ReaderSizeButton>(fontSizeButton)
+            .value;
+        // The compact size button starts dragging after touch slop.
+        await tester.drag(fontSizeButton, const Offset(36, 0));
+        await tester.pump();
+        expect(
+          tester.widget<ReaderSizeButton>(fontSizeButton).onChanged,
+          isNull,
+        );
+        workspace.gate!.complete(false);
+        await desktopUntil(
+          tester,
+          () => find.byType(TextField).evaluate().isNotEmpty,
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          saved.text,
+        );
+        expect(workspace.unsavedCount, greaterThan(0));
+        workspace.gate = null;
+        await tester.tapAt(paper.localToGlobal(const Offset(15, 350)));
+        await desktopUntil(
+          tester,
+          () => find.byType(TextField).evaluate().isEmpty,
+        );
+        saved = workspace.store.snapshot
+            .annotationsFor(page)
+            .whereType<TextAnnotation>()
+            .single;
+        expect(saved.fontSizeFraction, greaterThan(selectedFontBefore));
+        point = paper.localToGlobal(
           textAnnotationFrame(saved, paper.size).center,
         );
         await tester.pump(const Duration(milliseconds: 400));
@@ -541,16 +614,66 @@ void main() {
         await tester.pump();
         expect(find.byType(TextField), findsNothing);
         workspace.gate = Completer<bool>();
-        await tester.tap(find.byTooltip('删除文字'));
+        await tester.tap(find.byKey(const ValueKey('text-action-delete')));
         await tester.pump();
         expect(find.byType(TextField), findsNothing);
         workspace.gate!.complete(false);
-        await tester.pump();
-        await tester.pump();
+        await desktopUntil(
+          tester,
+          () => find.byType(TextField).evaluate().isNotEmpty,
+        );
         expect(find.byType(TextField), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          saved.text,
+        );
         expect(workspace.store.snapshot.annotationsFor(page), hasLength(1));
+        expect(workspace.pendingText.single.value.isDeleted, isTrue);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        expect(find.byType(TextField), findsNothing);
+        expect(
+          workspace
+              .annotationsFor(page)
+              .whereType<TextAnnotation>()
+              .single
+              .text,
+          saved.text,
+        );
+        expect(
+          workspace.pendingText.where((edit) => edit.value.isDeleted),
+          isEmpty,
+        );
+        expect(
+          find.byKey(const ValueKey('text-action-delete')),
+          findsOneWidget,
+        );
         workspace.gate = null;
-        await tester.tap(find.byTooltip('删除文字'));
+        await tester.runAsync(workspace.retryStrokes);
+        expect(
+          workspace.store.snapshot.annotationsFor(page),
+          hasLength(1),
+          reason: 'cancel withdraws the deletion from background retry',
+        );
+        workspace.gate = Completer<bool>();
+        await tester.tap(find.byKey(const ValueKey('text-action-delete')));
+        await tester.pump();
+        expect(find.byType(TextField), findsNothing);
+        workspace.gate!.complete(false);
+        await desktopUntil(
+          tester,
+          () => find.byType(TextField).evaluate().isNotEmpty,
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          saved.text,
+        );
+        expect(workspace.pendingText.single.value.isDeleted, isTrue);
+        workspace.gate = null;
+        // The protected editor has the recovered text; confirming an empty
+        // edit retries deletion through its existing save path.
+        await tester.enterText(find.byType(TextField), '');
+        await tester.tapAt(const Offset(30, 600));
         await desktopUntil(
           tester,
           () => find.byType(TextField).evaluate().isEmpty,
@@ -570,12 +693,21 @@ void main() {
         expect(stage.value.statusBarIconBrightness, Brightness.dark);
         await tester.tap(find.byTooltip('完成批注'));
         await tester.pumpAndSettle();
+        expect(find.byTooltip('批注').hitTestable(), findsOneWidget);
+        expect(find.byTooltip('完成批注'), findsNothing);
+        expect(find.byTooltip('文字批注'), findsNothing);
+        // Exiting annotations keeps the reader header available. Hiding that
+        // header explicitly restores the original full paper viewport.
+        await tester.tapAt(tester.getRect(find.byType(ReaderInput)).center);
+        await tester.pumpAndSettle();
         expect(
           tester.getTopLeft(find.byKey(const ValueKey('reading-viewport'))).dy,
-          24,
+          0,
         );
         expect(tester.takeException(), isNull);
       } finally {
+        final gate = workspace.gate;
+        if (gate != null && !gate.isCompleted) gate.complete(false);
         await _dispose(tester, workspace, dir);
         theme.dispose();
         tester.view.resetPadding();
@@ -588,6 +720,10 @@ void main() {
         );
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           SystemChannels.platform,
+          null,
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          shareChannel,
           null,
         );
       }

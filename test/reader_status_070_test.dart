@@ -1,3 +1,6 @@
+import 'package:score_reader/reader/sharp_file_image.dart';
+import 'package:score_reader/reader/reader_input.dart';
+
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
@@ -12,9 +15,22 @@ import 'package:score_reader/reader/reader_session.dart';
 
 import 'reader_color_070_test.dart' show setup, mount, until, flush, canvasPage;
 
+// Painting is independent of annotation hit testing: v2 disables idle ink.
+Finder _readablePaper() => find.byElementPredicate((element) {
+  final widget = element.widget;
+  if (widget is! SharpFileImage || !widget.active) return false;
+  var visible = true;
+  element.visitAncestorElements((ancestor) {
+    if (ancestor.widget case Opacity(opacity: 0)) visible = false;
+    if (ancestor.widget case Offstage(offstage: true)) visible = false;
+    return visible;
+  });
+  return visible;
+});
+
 void main() {
   testWidgets(
-    'real reader repeated boundary pedals stay silent; hidden tools allow ink and failed save remains discoverable and retryable',
+    'real reader repeated boundary pedals stay silent; selected pen inks on the right page and failed save remains discoverable and retryable',
     (tester) async {
       final (dir, workspace, target) = await setup(tester);
       final state = File(workspace.store.statePath);
@@ -31,8 +47,14 @@ void main() {
         expect(find.textContaining('已经'), findsNothing);
         expect(find.byTooltip('阅读状态'), findsNothing);
         await flush(tester, workspace);
-        await tester.tap(find.byTooltip('收起阅读工具'));
-        await tester.pump(const Duration(milliseconds: 240));
+        if (find.byTooltip('批注').hitTestable().evaluate().isEmpty) {
+          await tester.tapAt(tester.getCenter(find.byType(ReaderInput)));
+          await tester.pump(const Duration(milliseconds: 240));
+        }
+        await tester.tap(find.byTooltip('批注').hitTestable());
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('画笔'));
+        await tester.pumpAndSettle();
         await tester.runAsync(() async {
           await state.rename(saved.path);
           await Directory(state.path).create();
@@ -48,14 +70,14 @@ void main() {
         await pen.up();
         await until(tester, () => workspace.unsavedCount == 1);
         expect(find.textContaining('保存失败'), findsNothing);
-        expect(find.byTooltip('1 笔未保存').hitTestable(), findsOneWidget);
+        expect(find.byTooltip('1 项未保存').hitTestable(), findsOneWidget);
         expect(workspace.pending.single.page.pageNumber, 2);
         for (var i = 0; i < 3; i++) {
           await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
         }
         await tester.pump();
         expect(find.textContaining('已经'), findsNothing);
-        await tester.tap(find.byTooltip('1 笔未保存'));
+        await tester.tap(find.byTooltip('1 项未保存'));
         await tester.pumpAndSettle();
         expect(find.textContaining('保存失败'), findsOneWidget);
         expect(find.text('重试保存'), findsOneWidget);
@@ -142,23 +164,39 @@ void main() {
 
       try {
         await show();
+        await until(tester, () => _readablePaper().evaluate().isNotEmpty);
         await until(
           tester,
-          () => canvasPage(1).hitTestable().evaluate().isNotEmpty,
+          () => workspace.store.readingPosition(a.key)?.pageNumber == 1,
         );
         await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
         await tester.pump();
         await until(tester, () => find.byTooltip('阅读状态').evaluate().isNotEmpty);
         expect(find.textContaining('下一份曲谱暂时无法读取'), findsNothing);
-        expect(canvasPage(1).hitTestable(), findsOneWidget);
-        await tester.tap(find.byTooltip('收起阅读工具'));
+        expect(_readablePaper(), findsOneWidget);
+        expect(tester.getSize(_readablePaper()).isEmpty, isFalse);
+        expect(
+          find.descendant(
+            of: _readablePaper(),
+            matching: find.byWidgetPredicate(
+              (w) => w is RawImage && w.image != null,
+            ),
+          ),
+          findsOneWidget,
+        );
+        await tester.tapAt(tester.getCenter(find.byType(ReaderInput)));
         await tester.pump(const Duration(milliseconds: 240));
         await tester.tap(find.byTooltip('阅读状态'));
         await tester.pumpAndSettle();
         expect(find.textContaining('下一份曲谱暂时无法读取'), findsOneWidget);
         failB = false;
+        expect(
+          find.text('重试翻页'),
+          findsOneWidget,
+          reason: 'load failure must retain an explicit retry action',
+        );
         await tester.tap(find.text('重试翻页'));
-        await until(tester, () => find.text('B.png').evaluate().isNotEmpty);
+        await until(tester, () => find.text('B').evaluate().isNotEmpty);
         await tester.tap(find.byTooltip('关闭状态详情'));
         await tester.pumpAndSettle();
         await show(failFirst: true);

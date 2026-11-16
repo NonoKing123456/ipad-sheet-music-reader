@@ -6,6 +6,9 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:score_reader/reader/annotation_canvas.dart';
+import 'package:score_reader/reader/reader_spreads.dart';
+import 'package:score_reader/reader/reader_page_number_button.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/reader/reader_continuous.dart';
@@ -14,7 +17,7 @@ import 'package:score_reader/reader/reader_stage.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/reader/sharp_pdf_page.dart';
 
-import 'desktop_reader_fixture.dart' show desktopUntil, desktopSettle;
+import 'desktop_reader_085_test.dart' show desktopUntil, desktopSettle;
 
 List<int> widePdf(int count) {
   final objects = <String>[
@@ -274,14 +277,15 @@ void main() {
         await key(LogicalKeyboardKey.arrowDown);
         await key(LogicalKeyboardKey.arrowRight);
         await page(4);
-        await tester.tap(find.byTooltip('跳到页码'));
+        await tester.tap(find.byType(ReaderPageNumberButton));
         await desktopSettle(tester);
-        await tester.tap(find.byType(TextFormField));
+        await tester.tap(find.byType(TextField));
+        await tester.enterText(find.byType(TextField), '4');
         await key(LogicalKeyboardKey.arrowLeft);
         await key(LogicalKeyboardKey.arrowUp);
         await tester.pump();
         expect(presented.last, 4);
-        await tester.tap(find.text('取消'));
+        await tester.testTextInput.receiveAction(TextInputAction.go);
         await desktopSettle(tester);
         await tester.tap(find.text('双页'));
         await desktopUntil(
@@ -294,7 +298,9 @@ void main() {
         await page(3);
         await key(LogicalKeyboardKey.arrowLeft);
         await page(1);
-        await tester.tap(find.text('首页并排'));
+        await tester.tap(
+          find.byKey(const ValueKey('reader-arrangement-button')),
+        );
         await desktopSettle(tester);
         final previous = presented.last;
         await key(LogicalKeyboardKey.arrowDown);
@@ -303,13 +309,21 @@ void main() {
         await key(LogicalKeyboardKey.escape);
         await desktopSettle(tester);
         expect(
-          find.text('首页独立'),
+          find
+              .byKey(
+                const ValueKey((
+                  'reader-arrangement-option',
+                  FirstPageArrangement.alone,
+                )),
+              )
+              .hitTestable(),
           findsNothing,
+          // SUSPECTED-REGRESSION: Escape must dismiss the live arrangement menu.
           reason: 'menu Escape restores the page context',
         );
-        await tester.tap(find.text('首页并排').first);
+        await tester.tap(find.text('1、2页并排').first);
         await desktopSettle(tester);
-        await tester.tap(find.text('首页独立'));
+        await tester.tap(find.text('首页单独'));
         await desktopSettle(tester);
         await key(LogicalKeyboardKey.arrowRight);
         await page(2);
@@ -320,16 +334,53 @@ void main() {
         await tester.tap(find.text('批注'));
         await desktopSettle(tester);
         expect(find.byType(AlertDialog), findsNothing);
-        final card = find.byKey(const ValueKey('annotate-page-3'));
-        final rect = tester.getRect(card);
+        await tester.tap(find.byTooltip('画笔'));
+        await desktopSettle(tester);
+        final inkPage = PageKey(
+          entryId: 'synthetic',
+          revisionId: 'r1',
+          pageNumber: 3,
+        );
+        final paper = find
+            .byWidgetPredicate(
+              (widget) => widget is AnnotationCanvas && widget.page == inkPage,
+            )
+            .hitTestable();
+        final rect = tester.getRect(paper).deflate(8);
         expect(rect.height, greaterThanOrEqualTo(44));
         expect(rect.right, lessThanOrEqualTo(1360 - 12));
-        await tester.tapAt(rect.bottomRight - const Offset(8, 8));
+        final pen = await tester.startGesture(
+          rect.bottomRight - const Offset(8, 8),
+          kind: PointerDeviceKind.mouse,
+        );
+        await pen.moveBy(const Offset(-30, -8));
+        await pen.up();
         await desktopUntil(
           tester,
-          () => find.text('完成').evaluate().isNotEmpty && presented.last == 3,
+          () =>
+              !workspace.saving &&
+              workspace.store.snapshot.strokesFor(inkPage).isNotEmpty,
         );
-        await tester.tap(find.text('完成'));
+        expect(workspace.store.snapshot.strokesFor(inkPage), hasLength(1));
+        expect(
+          workspace.store.snapshot.strokesFor(
+            PageKey(entryId: 'synthetic', revisionId: 'r1', pageNumber: 2),
+          ),
+          isEmpty,
+        );
+        // Direct spread ink does not select the reading bookmark. Preserve the
+        // old selector's explicit page-3 focus for the following mode checks.
+        await tester.tap(find.byType(ReaderPageNumberButton));
+        await desktopSettle(tester);
+        await tester.enterText(find.byType(TextField), '3');
+        await tester.testTextInput.receiveAction(TextInputAction.go);
+        await desktopUntil(
+          tester,
+          () =>
+              find.byTooltip('完成批注').evaluate().isNotEmpty &&
+              workspace.store.snapshot.strokesFor(inkPage).length == 1,
+        );
+        await tester.tap(find.byTooltip('完成批注'));
         await desktopUntil(
           tester,
           () => find.text('2–3 / 20').evaluate().isNotEmpty,

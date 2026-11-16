@@ -1567,6 +1567,7 @@ class _AnnotationTextLayerState extends State<AnnotationTextLayer>
           handle: handle,
           centres: _handleCentres,
           radius: _handleHitRadius,
+          containsInput: (point) => _inside(_inputKey, point),
           child: Listener(
             key: _handleKeys[handle],
             behavior: HitTestBehavior.opaque,
@@ -1773,15 +1774,17 @@ class _NearestTextHandleTarget extends SingleChildRenderObjectWidget {
     required this.handle,
     required this.centres,
     required this.radius,
+    required this.containsInput,
     required super.child,
   });
   final TextHandleKind handle;
   final Map<TextHandleKind, Offset> centres;
   final double radius;
+  final bool Function(Offset) containsInput;
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _RenderNearestTextHandleTarget(handle, centres, radius);
+      _RenderNearestTextHandleTarget(handle, centres, radius, containsInput);
 
   @override
   void updateRenderObject(
@@ -1791,23 +1794,29 @@ class _NearestTextHandleTarget extends SingleChildRenderObjectWidget {
     renderObject
       ..handle = handle
       ..centres = centres
-      ..radius = radius;
+      ..radius = radius
+      ..containsInput = containsInput;
   }
 }
 
 class _RenderNearestTextHandleTarget extends RenderProxyBox {
-  _RenderNearestTextHandleTarget(this.handle, this.centres, this.radius);
+  _RenderNearestTextHandleTarget(
+    this.handle,
+    this.centres,
+    this.radius,
+    this.containsInput,
+  );
   TextHandleKind handle;
   Map<TextHandleKind, Offset> centres;
   double radius;
+  bool Function(Offset) containsInput;
 
   @override
   bool hitTest(BoxHitTestResult result, {required Offset position}) {
-    if (hitTestTextHandle(
-          point: localToGlobal(position),
-          centres: centres,
-          radius: radius,
-        ) !=
+    // Editing text has priority over the inward half of a handle's hot area.
+    final global = localToGlobal(position);
+    if (containsInput(global)) return false;
+    if (hitTestTextHandle(point: global, centres: centres, radius: radius) !=
         handle) {
       return false;
     }

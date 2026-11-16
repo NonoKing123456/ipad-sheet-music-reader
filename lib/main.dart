@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 
 import 'reader/reader_stage.dart';
 import 'library/library_controller.dart';
+import 'library/library_diagnostics.dart';
 import 'library/library_screen.dart';
 import 'library/desktop_navigation_history.dart';
 import 'theme/app_theme.dart';
@@ -15,6 +16,7 @@ import 'theme/device_layout.dart';
 
 void main(List<String> arguments) {
   WidgetsFlutterBinding.ensureInitialized();
+  initializeLibraryDiagnostics();
   final options = LaunchOptions.parse(arguments);
   runApp(
     ScoreReaderApp(

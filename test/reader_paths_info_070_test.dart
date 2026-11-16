@@ -1,3 +1,4 @@
+import 'package:score_reader/library/library_widgets.dart';
 import 'package:crypto/crypto.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:score_reader/library/library_controller.dart';
@@ -106,15 +107,15 @@ void main() {
         );
         await tester.tap(find.text('set'));
         await tester.pumpAndSettle();
-        expect(find.text('谱库根目录'), findsOneWidget);
-        expect(find.text('Band'), findsOneWidget);
+        expect(find.text('谱库 / 谱库根目录'), findsOneWidget);
+        expect(find.text('谱库 / Band'), findsOneWidget);
         expect(find.text('Band/nested.png'), findsNothing);
         await tester.tap(find.text('添加曲谱'));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'nested.png');
         await tester.pump();
-        expect(find.text('nested.png'), findsWidgets);
-        expect(find.text('Band'), findsWidgets);
+        expect(find.text('nested'), findsWidgets);
+        expect(find.text('Band · 已准备'), findsOneWidget);
         expect(find.text('Band/nested.png'), findsNothing);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -163,12 +164,20 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 30));
         });
         await until(tester, () => find.text('root').evaluate().isNotEmpty);
-        expect(find.text('scores · 谱库根目录'), findsOneWidget);
+        expect(
+          tester
+              .widgetList<LibraryFileRow>(find.byType(LibraryFileRow))
+              .singleWhere((row) => row.name == 'root')
+              .subtitle,
+          isNull,
+        );
         expect(find.text('Band'), findsWidgets);
+        await tester.tap(find.byTooltip('搜索'));
+        await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField).first, 'nested.png');
         await tester.pump();
         expect(find.text('nested'), findsOneWidget);
-        expect(find.text('scores · Band'), findsOneWidget);
+        expect(find.text('scores / Band'), findsOneWidget);
         expect(find.text('Band/nested.png'), findsNothing);
         await tester.pumpWidget(const SizedBox());
         sync = SyncController(library: library, workspace: workspace);
@@ -204,12 +213,20 @@ void main() {
           MaterialApp(home: OfflineLibraryScreen(controller: sync)),
         );
         expect(find.text('root'), findsOneWidget);
-        expect(find.textContaining('原谱库 · 谱库根目录'), findsOneWidget);
+        expect(
+          tester
+              .widgetList<LibraryFileRow>(find.byType(LibraryFileRow))
+              .singleWhere((row) => row.name == 'root')
+              .subtitle,
+          isNull,
+        );
         expect(find.text('Band'), findsWidgets);
+        await tester.tap(find.byTooltip('搜索'));
+        await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField).first, 'nested.png');
         await tester.pump();
         expect(find.text('nested'), findsOneWidget);
-        expect(find.textContaining('原谱库 · Band'), findsOneWidget);
+        expect(find.text('${sync.sourceNameFor("b")} / Band'), findsOneWidget);
         expect(find.text('Band/nested.png'), findsNothing);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -248,7 +265,7 @@ void main() {
       try {
         await mount(tester, workspace, target);
         expect(find.textContaining('实际载入：'), findsNothing);
-        await tester.tap(find.byTooltip('更多'));
+        await tester.tap(find.byKey(const ValueKey('reader-title-menu')));
         await tester.pumpAndSettle();
         await tester.tap(find.text('图片信息'));
         await tester.pumpAndSettle();

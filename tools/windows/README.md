@@ -6,13 +6,31 @@
 
 ## 准备并发布
 
+Windows Flutter SDK 的 Material Slider/OverlayPortal 语义修复目前通过本机 framework 补丁提供。`Build-Reader.ps1` 会先校验并幂等应用 Flutter PR #193372 补丁，再调用 Windows release build；需要时可通过 `-FlutterRoot` 指定 SDK 根目录。补丁来源、BSD 许可证、版本锁定与备份说明见 [`tools/flutter-patches/README.md`](../flutter-patches/README.md)。直接运行 Flutter debug app 前，也需先应用该补丁。
+
 在仓库根目录构建，复制完整输出至符合命名规则的版本目录，再运行发布脚本：
 
 ```powershell
-flutter build windows --release --no-pub
+.\tools\windows\Build-Reader.ps1
 Copy-Item -LiteralPath '.\build\windows\x64\runner\Release' -Destination '.\artifacts\reader-update-0.8.10+26-win-x64' -Recurse
 .\tools\windows\Publish-Reader.ps1 -ReleaseDirectory '.\artifacts\reader-update-0.8.10+26-win-x64'
 ```
+
+Flutter SDK 不在 `PATH` 时，可显式传入 SDK 根目录：
+
+```powershell
+.\tools\windows\Build-Reader.ps1 -FlutterRoot 'D:\tools\flutter'
+```
+
+## 运行 Windows 测试
+
+在仓库根目录运行测试时使用 `Test-Reader.ps1`：
+
+```powershell
+.\tools\windows\Test-Reader.ps1 test\desktop_reader_toolbar_ui34_test.dart --reporter expanded --no-pub
+```
+
+该入口会校验并应用固定版本的 Flutter semantics 与 test-profiler 工具补丁，再检查当前 `flutter test --help` 是否包含 profiler 开关；若 tools 快照过期，它会仅备份并删除 `bin/cache/flutter_tools.stamp` 一次，让 Flutter tools 下次启动自行重建，然后传 `--no-enable-dart-profiling` 运行测试。它只关闭 `flutter_tester` 的 Dart CPU 采样器，不会跳过测试、断言或覆盖率。SDK 不在 `PATH` 时可传 `-FlutterRoot 'D:\tools\flutter'`。
 
 复制目标必须是尚不存在的新目录，避免混入旧文件。版本号应与实际 `pubspec.yaml` 一致；这里以 `0.8.10+26` 为例。
 
@@ -47,5 +65,7 @@ GUI 程序不会总在父终端显示 JSON，退出码可判断成功与失败�
 | `ShortcutIdentity.cs` | 创建和核对原生快捷方式身份 |
 | `launcher.rc` | 启动器图标与显示资源 |
 | `Publish-Reader.ps1` | 校验版本、安装入口及切换部署指针 |
+| `Build-Reader.ps1` | 校验/应用 Windows semantics 补丁并构建 release |
+| `Test-Reader.ps1` | 校验/应用 Windows semantics 与 test-profiler 补丁并运行测试 |
 
 此流程是可选的本机安装工具，运行普通应用测试不会安装它。涉及开始菜单或任务栏的真实交互仍需本机验证。

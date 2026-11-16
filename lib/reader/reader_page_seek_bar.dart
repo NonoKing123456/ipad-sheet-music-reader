@@ -143,12 +143,20 @@ class _ReaderPageSeekBarState extends State<ReaderPageSeekBar> {
       final fraction = _pageCount <= 1
           ? 0.0
           : ((page - 1) / (_pageCount - 1)).clamp(0.0, 1.0);
-      final tooltipCenter = (_width - ReaderNavigationTokens.seekTooltipWidth) / 2;
+      final tooltipCenter =
+          (_width - ReaderNavigationTokens.seekTooltipWidth) / 2;
       final tooltipLeft =
-          (fraction * _width - ReaderNavigationTokens.seekTooltipWidth / 2).clamp(
-            math.min(-ScoreSpace.xl, tooltipCenter),
-            math.max(tooltipCenter, _width - ReaderNavigationTokens.seekTooltipWidth + ScoreSpace.xl),
-          ).toDouble();
+          (fraction * _width - ReaderNavigationTokens.seekTooltipWidth / 2)
+              .clamp(
+                math.min(-ScoreSpace.xl, tooltipCenter),
+                math.max(
+                  tooltipCenter,
+                  _width -
+                      ReaderNavigationTokens.seekTooltipWidth +
+                      ScoreSpace.xl,
+                ),
+              )
+              .toDouble();
       return Center(
         heightFactor: 1,
         child: SizedBox(

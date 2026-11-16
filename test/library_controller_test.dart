@@ -174,7 +174,7 @@ void main() {
     fail = true;
     await controller.rescan();
     expect(controller.totalCount, 1);
-    expect(controller.error, contains('已保留上次谱库结果'));
+    expect(controller.error, '刷新失败，请检查连接后重试。');
     expect(controller.scanning, isFalse);
   });
 

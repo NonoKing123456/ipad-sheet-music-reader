@@ -1,5 +1,7 @@
 library;
 
+export 'src/diagnostics.dart' show SwallowedErrorLogger, swallowedErrorLogger;
+
 export 'src/manifest.dart';
 export 'src/replica.dart';
 export 'src/protocol.dart';
@@ -14,4 +16,5 @@ export 'src/songbook.dart';
 export 'src/background_transfer.dart';
 export 'src/score_import.dart';
 
-export 'src/collection_delta.dart' show CollectionVersionSource, CollectionDelta, CollectionRefreshResult;
+export 'src/collection_delta.dart'
+    show CollectionVersionSource, CollectionDelta, CollectionRefreshResult;

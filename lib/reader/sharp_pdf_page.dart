@@ -60,11 +60,13 @@ class SharpPdfPage extends StatefulWidget {
   });
   final PdfPage page;
   final bool active;
+
   /// Hidden incoming desktop pages need a base, not a crop of the outgoing
   /// page's zoom. Other readers retain the existing default behavior.
   final bool allowDetail;
   final TransformationController transform;
   final GlobalKey viewportKey;
+
   /// Decoded pixels are available even for hidden prewarming. The page window
   /// separately acknowledges the selected group's actual paint/presentation.
   final VoidCallback? onRendered;
@@ -106,6 +108,7 @@ class _SharpPdfPageState extends State<SharpPdfPage> {
       _schedule();
     }
   }
+
   String? _error;
   @override
   void initState() {

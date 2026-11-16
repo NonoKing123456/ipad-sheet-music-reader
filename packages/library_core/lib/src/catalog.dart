@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import 'models.dart';
+import 'diagnostics.dart' as diagnostics;
 import 'search.dart';
 
 typedef FileAccessProbe = Future<FileAccess> Function(
@@ -91,7 +92,9 @@ class LibraryCatalog {
   final _searchText = <String, (String, PreparedSearchText)>{};
   final _storageWarnings = <String>[];
   int contentHashOperations = 0, contentHashBytesRead = 0;
-  int scanFileStatChecks = 0, scanDirectoryEnumerations = 0, scanPathTypeChecks = 0;
+  int scanFileStatChecks = 0,
+      scanDirectoryEnumerations = 0,
+      scanPathTypeChecks = 0;
   int catalogReads = 0,
       catalogReadBytes = 0,
       catalogWrites = 0,
@@ -453,8 +456,10 @@ class LibraryCatalog {
       for (final entry in _snapshot.availableEntries) {
         retained.add(entry.id);
         if (_searchText[entry.id]?.$1 != entry.relativePath) {
-          _searchText[entry.id] = (entry.relativePath,
-              PreparedSearchText.withPrefix(prefix, entry.preparedSearchPath));
+          _searchText[entry.id] = (
+            entry.relativePath,
+            PreparedSearchText.withPrefix(prefix, entry.preparedSearchPath)
+          );
         }
       }
       _searchText.removeWhere((id, _) => !retained.contains(id));
@@ -493,8 +498,8 @@ class LibraryCatalog {
         final childFolders = folders[key] ?? [];
         final childEntries = entries[key] ?? [];
         childFolders.sort(compareLibraryPaths);
-        childEntries
-            .sort((a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
+        childEntries.sort(
+            (a, b) => compareLibraryPaths(a.relativePath, b.relativePath));
         _folderListings[key] =
             FolderListing(folders: childFolders, entries: childEntries);
       }
@@ -532,14 +537,18 @@ class LibraryCatalog {
     final scopes = dirtyPaths?.toSet();
     if (scopes != null) {
       for (final path in scopes) {
-        if (path.contains('\\') || path.contains(':') || path.contains('\u0000') || p.posix.isAbsolute(path) ||
+        if (path.contains('\\') ||
+            path.contains(':') ||
+            path.contains('\u0000') ||
+            p.posix.isAbsolute(path) ||
             p.posix.normalize(path) != (path.isEmpty ? '.' : path) ||
             path.split('/').any((part) => part == '..' || part == '.')) {
           throw const FormatException('Invalid dirty path.');
         }
       }
     }
-    bool inDirtyScope(String path) => scopes == null || scopes.any((scope) => _inScope(scope,path));
+    bool inDirtyScope(String path) =>
+        scopes == null || scopes.any((scope) => _inScope(scope, path));
     final observed = <_ObservedFile>[];
     final folders = <String>{''};
     final failedAreas = <String>{};
@@ -553,7 +562,8 @@ class LibraryCatalog {
       List<FileSystemEntity> children;
       try {
         if (selectedChildren == null) scanDirectoryEnumerations++;
-        children = selectedChildren ?? await directory.list(followLinks: false).toList();
+        children = selectedChildren ??
+            await directory.list(followLinks: false).toList();
       } on FileSystemException catch (error) {
         failedAreas.add(relativeDirectory);
         issues.add(ScanIssue(
@@ -649,59 +659,75 @@ class LibraryCatalog {
     final rootType = await FileSystemEntity.type(rootPath, followLinks: false);
     if (rootType != FileSystemEntityType.directory) {
       failedAreas.add('');
-      issues.add(const ScanIssue(
-          '', ScanIssueStage.link, 'Library root is unavailable or became a symbolic link.'));
+      issues.add(const ScanIssue('', ScanIssueStage.link,
+          'Library root is unavailable or became a symbolic link.'));
     } else if (scopes == null || scopes.contains('')) {
       await visit(Directory(rootPath), '');
     } else {
-      final ordered = scopes.toList()..sort((a,b) => a.length.compareTo(b.length));
+      final ordered = scopes.toList()
+        ..sort((a, b) => a.length.compareTo(b.length));
       final visited = <String>[];
       for (final scope in ordered) {
-        if (visited.any((area) => _inScope(area,scope))) continue;
+        if (visited.any((area) => _inScope(area, scope))) continue;
         visited.add(scope);
         var safe = true;
         var current = rootPath;
         final parts = scope.split('/');
         // Check every ancestor without following links before touching a leaf.
-        for (var i=0;i<parts.length;i++) {
+        for (var i = 0; i < parts.length; i++) {
           current = p.join(current, parts[i]);
           scanPathTypeChecks++;
-          final type = await FileSystemEntity.type(current, followLinks:false);
+          final type = await FileSystemEntity.type(current, followLinks: false);
           if (type == FileSystemEntityType.notFound) {
             // Absence needs an accessible parent. Permission or I/O failures
             // protect this scope rather than manufacturing missing tombstones.
             try {
               scanDirectoryEnumerations++;
-              final siblings = await Directory(p.dirname(current)).list(followLinks:false).toList();
-              if (siblings.any((entry) => _relativeKey(p.basename(entry.path)) == _relativeKey(p.basename(current)))) {
-                failedAreas.add(scope); safe = false; break;
+              final siblings = await Directory(p.dirname(current))
+                  .list(followLinks: false)
+                  .toList();
+              if (siblings.any((entry) =>
+                  _relativeKey(p.basename(entry.path)) ==
+                  _relativeKey(p.basename(current)))) {
+                failedAreas.add(scope);
+                safe = false;
+                break;
               }
             } on FileSystemException catch (error) {
               failedAreas.add(scope);
-              issues.add(ScanIssue(scope,ScanIssueStage.enumeration,error.message));
-              safe = false; break;
+              issues.add(
+                  ScanIssue(scope, ScanIssueStage.enumeration, error.message));
+              safe = false;
+              break;
             }
           }
           if (type == FileSystemEntityType.link) {
             failedAreas.add(scope);
-            issues.add(ScanIssue(scope,ScanIssueStage.link,'Symbolic link was not followed.'));
-            safe = false; break;
+            issues.add(ScanIssue(
+                scope, ScanIssueStage.link, 'Symbolic link was not followed.'));
+            safe = false;
+            break;
           }
-          if (i < parts.length-1 && type != FileSystemEntityType.directory) {
+          if (i < parts.length - 1 && type != FileSystemEntityType.directory) {
             if (type != FileSystemEntityType.notFound) {
               failedAreas.add(scope);
-              issues.add(ScanIssue(scope,ScanIssueStage.metadata,'Parent directory is unavailable.'));
+              issues.add(ScanIssue(scope, ScanIssueStage.metadata,
+                  'Parent directory is unavailable.'));
             }
-            safe = false; break;
+            safe = false;
+            break;
           }
-          if (i == parts.length-1) {
-            if (type == FileSystemEntityType.directory) await visit(Directory(current),scope);
+          if (i == parts.length - 1) {
+            if (type == FileSystemEntityType.directory)
+              await visit(Directory(current), scope);
             else if (type == FileSystemEntityType.file) {
               final parent = p.posix.dirname(scope);
-              await visit(Directory(p.dirname(current)),parent == '.' ? '' : parent,[File(current)]);
+              await visit(Directory(p.dirname(current)),
+                  parent == '.' ? '' : parent, [File(current)]);
             } else if (type != FileSystemEntityType.notFound) {
               failedAreas.add(scope);
-              issues.add(ScanIssue(scope,ScanIssueStage.metadata,'File is unavailable.'));
+              issues.add(ScanIssue(
+                  scope, ScanIssueStage.metadata, 'File is unavailable.'));
             }
           }
         }
@@ -717,7 +743,8 @@ class LibraryCatalog {
 
     // Keep directory metadata in areas which could not be enumerated.
     for (final oldFolder in _snapshot.folders) {
-      if (!inDirtyScope(oldFolder) || failedAreas.any((area) => _inScope(area, oldFolder))) {
+      if (!inDirtyScope(oldFolder) ||
+          failedAreas.any((area) => _inScope(area, oldFolder))) {
         folders.add(oldFolder);
       }
     }
@@ -725,7 +752,8 @@ class LibraryCatalog {
     for (final file in observed) {
       var folder = p.posix.dirname(file.relativePath);
       while (folder != '.' && folder.isNotEmpty) {
-        folders.add(folder); folder = p.posix.dirname(folder);
+        folders.add(folder);
+        folder = p.posix.dirname(folder);
       }
     }
     final matchedIds = <String>{};
@@ -785,7 +813,8 @@ class LibraryCatalog {
         _snapshot.entries, (entry) => entry.currentRevision.contentHash);
     final newByHash = _groupObserved(observed, (file) => file.contentHash);
     // Unknown bytes or incomplete folders cannot establish global uniqueness.
-    final contentComplete = (scopes == null || scopes.contains('')) && failedAreas.isEmpty &&
+    final contentComplete = (scopes == null || scopes.contains('')) &&
+        failedAreas.isEmpty &&
         protectedFiles.isEmpty &&
         observed.every((file) =>
             file.contentHash != null &&
@@ -1064,7 +1093,9 @@ class LibraryCatalog {
           try {
             await _decodeSnapshot(primary);
             primaryValid = true;
-          } catch (_) {
+          } catch (error, stack) {
+            diagnostics.reportSwallowedError(
+                'catalog.preWriteValidation', error, stack);
             // Preserve the valid backup when replacing a corrupt primary.
           }
         }

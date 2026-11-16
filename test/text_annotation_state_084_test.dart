@@ -109,6 +109,55 @@ Future<({int status, Map<String, dynamic> json})> rawState(
 }
 
 void main() {
+  test(
+    'cancel pending text deletion only withdraws its idle page and id',
+    () async {
+      final dir = await Directory.systemTemp.createTemp('cancel-text-delete-');
+      final store = await ReaderStateStore.open(
+        statePath: '${dir.path}/state.json',
+      );
+      final workspace = ReaderWorkspace(store);
+      final otherPage = PageKey(
+        entryId: page.entryId,
+        revisionId: page.revisionId,
+        pageNumber: 2,
+      );
+      final original = text('target', '原文字');
+      final deletion = original.withDeletion(true, now);
+      final target = PendingTextEdit(page, deletion, TextEditBase(original));
+      final ordinary = PendingTextEdit(page, original, TextEditBase(original));
+      final other = PendingTextEdit(
+        otherPage,
+        deletion,
+        TextEditBase(original),
+      );
+      final otherId = PendingTextEdit(
+        page,
+        text('other', '另一个').withDeletion(true, now),
+        const TextEditBase(null),
+      );
+      var notifications = 0;
+      workspace.addListener(() => notifications++);
+      try {
+        workspace.pendingText.addAll([target, ordinary, other, otherId]);
+        target.saving = true;
+        expect(workspace.cancelPendingTextDeletion(page, original.id), isFalse);
+        expect(workspace.pendingText, [target, ordinary, other, otherId]);
+        expect(notifications, 0);
+        target.saving = false;
+        expect(workspace.cancelPendingTextDeletion(page, original.id), isTrue);
+        expect(workspace.pendingText, [ordinary, other, otherId]);
+        expect(notifications, 1);
+        expect(workspace.cancelPendingTextDeletion(page, original.id), isFalse);
+        expect(workspace.pendingText, [ordinary, other, otherId]);
+        expect(notifications, 1);
+      } finally {
+        workspace.dispose();
+        await dir.delete(recursive: true);
+      }
+    },
+  );
+
   test('stale text draft after peer edit or deletion preserves both durable semantic branches, including failed pending retry', () async {
     final dir = await Directory.systemTemp.createTemp('text-interleaved-084-');
     try {

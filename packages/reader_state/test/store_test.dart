@@ -297,6 +297,28 @@ void main() {
     expect(store.snapshot.setListById(list.id)!.name, '新曲单');
   });
 
+  test('queued ifAbsent appends share one active item and preserve old entries',
+      () async {
+    final list = await store.createSetList('Rehearsal');
+    await store.addItem(list.id, 'existing-score');
+    final results = await Future.wait([
+      store.addItem(list.id, 'offline-score', ifAbsent: true),
+      store.addItem(list.id, 'offline-score', ifAbsent: true),
+    ]);
+    expect(results[0].id, results[1].id);
+    expect(
+        store.snapshot
+            .setListById(list.id)!
+            .activeItems
+            .map((item) => item.entryId),
+        ['existing-score', 'offline-score']);
+    final reopened = await ReaderStateStore.open(statePath: statePath);
+    expect(reopened.snapshot.setListById(list.id)!.activeItems.length, 2);
+    // Existing callers can still intentionally repeat a score.
+    await store.addItem(list.id, 'offline-score');
+    expect(store.snapshot.setListById(list.id)!.activeItems.length, 3);
+  });
+
   test('deleting set list keeps tombstone and its entry references', () async {
     final list = await store.createSetList('演出');
     await store.addItem(list.id, 'A');

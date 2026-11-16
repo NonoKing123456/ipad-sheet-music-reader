@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:path/path.dart' as p;
+import 'diagnostics.dart' as diagnostics;
 
 String randomId([int bytes = 32]) => base64Url
     .encode(List.generate(bytes, (_) => Random.secure().nextInt(256)))
@@ -110,7 +111,10 @@ Future<void> writeJson(String filePath, Map<String, Object?> json) async {
       try {
         asMap(jsonDecode(await primary.readAsString()));
         valid = true;
-      } catch (_) {}
+      } catch (error, stack) {
+        diagnostics.reportSwallowedError(
+            'sync.preWriteValidation', error, stack);
+      }
       if (valid) {
         if (await backup.exists()) await backup.delete();
         await primary.rename(backup.path);

@@ -216,7 +216,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       if (focus != null && focus != _session.pageKey) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted &&
-              _effectiveViewMode == ReaderViewMode.single &&
+              _viewMode == ReaderViewMode.single &&
               _session.current?.target.key == focus.document) {
             unawaited(_session.seek(focus.pageNumber, gesture: Object()));
           }
@@ -841,9 +841,11 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
-  ReaderViewMode get _effectiveViewMode => _heldFrame?.mode ??
+  ReaderViewMode get _effectiveViewMode =>
+      _heldFrame?.mode ??
       (_editing && _viewMode == ReaderViewMode.continuous
-          ? ReaderViewMode.single : _viewMode);
+          ? ReaderViewMode.single
+          : _viewMode);
   FirstPageArrangement _arrangementFor(String entryId) =>
       widget.allowAnnotations
       ? _viewPreferences?.arrangementFor(entryId) ?? FirstPageArrangement.paired
@@ -1121,7 +1123,22 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
           ),
         ),
       ),
-    if (_session.message != null) _notice(_session.message!),
+    if (_session.message != null)
+      Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _notice(_session.message!),
+          if (_visiblePage != null)
+            TextButton(
+              onPressed: () => _navigate(
+                _direction > 0
+                    ? NavigationDirection.forward
+                    : NavigationDirection.backward,
+              ),
+              child: const Text('重试翻页'),
+            ),
+        ],
+      ),
     if (_navigationWarning != null) _notice(_navigationWarning!),
     if (_pickMessage != null) _notice(_pickMessage!),
     if (_viewPreferenceError != null) _notice(_viewPreferenceError!),
@@ -1339,7 +1356,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       return Center(
         child: _initialLoading || _session.loading
             ? const CircularProgressIndicator()
-            : FilledButton(onPressed: _retryOpen, child: const Text('重新打开')),
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!_isCompact && _session.message != null) ...[
+                    const Text('无法读取这份曲谱'),
+                    _notice(_session.message!),
+                  ],
+                  FilledButton(
+                    onPressed: _retryOpen,
+                    child: const Text('重新打开'),
+                  ),
+                ],
+              ),
       );
     }
     if (mode == ReaderViewMode.continuous) {

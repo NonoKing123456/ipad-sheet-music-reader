@@ -28,6 +28,7 @@ void close(SyncController sync) {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test('trusted app root initializes and reopens without replacing saved settings or reader state', () async {
     final temp = await Directory.systemTemp.createTemp('storage-init-');
     try {

@@ -46,7 +46,7 @@ ReaderMergeResult merge(ReaderSnapshot b, ReaderSnapshot l, ReaderSnapshot r) =>
 
 void main() {
   test(
-      'schema 1 migrates without dropping marks and schema 2 persists conflicts',
+      'schema 1 migrates without dropping marks and schema 3 persists conflicts',
       () async {
     final dir = await Directory.systemTemp.createTemp('reader-migration-');
     addTearDown(() => dir.delete(recursive: true));
@@ -76,7 +76,7 @@ void main() {
         remote: snap(strokes: [stroke('remote')]),
         peerId: 'peer');
     final saved = jsonDecode(await File(path).readAsString()) as Map;
-    expect(saved['schemaVersion'], 2);
+    expect(saved['schemaVersion'], 3);
     final reopened = (await ReaderStateStore.open(statePath: path)).snapshot;
     expect(reopened.strokesFor(page), hasLength(2));
     expect(reopened.strokesFor(page, includeDeleted: true), hasLength(3));
@@ -91,6 +91,31 @@ void main() {
     expect(result.snapshot.strokesFor(page).map((x) => x.id),
         ['base', 'local', 'remote']);
     expect(result.conflicts, isEmpty);
+  });
+  test('resumed additive stroke orders merge without hiding base reorders', () {
+    final base = snap(strokes: [stroke('C')]);
+    final local = snap(strokes: [stroke('C'), stroke('D')]);
+    final remote = snap(strokes: [stroke('S'), stroke('C')]);
+    for (final branches in [
+      [local, remote],
+      [remote, local]
+    ]) {
+      final result = merge(base, branches[0], branches[1]);
+      expect(
+          result.snapshot.strokesFor(page).map((s) => s.id), ['S', 'C', 'D']);
+      expect(result.conflicts, isEmpty);
+    }
+
+    final reorderBase = snap(strokes: [stroke('A'), stroke('B')]);
+    final reordered = snap(strokes: [stroke('B'), stroke('A'), stroke('X')]);
+    final appended = snap(strokes: [stroke('A'), stroke('B'), stroke('Y')]);
+    for (final branches in [
+      [reordered, appended],
+      [appended, reordered]
+    ]) {
+      final result = merge(reorderBase, branches[0], branches[1]);
+      expect(result.conflicts.map((c) => c.kind), ['strokeOrder']);
+    }
   });
   test('tombstone wins an unchanged side and remains addressable', () {
     final b = snap(strokes: [stroke('a')]);

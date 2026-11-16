@@ -5,10 +5,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
+import 'package:score_reader/library/library_widgets.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
 import 'package:score_reader/sync/sync_screen.dart';
+import 'package:score_reader/sync/qr_scanner.dart';
+import 'package:score_reader/theme/app_theme.dart';
 
 class _HeaderController extends SyncController {
   _HeaderController({required super.library, required super.workspace});
@@ -38,6 +41,8 @@ class _HeaderController extends SyncController {
 }
 
 void main() {
+  final appearance = ThemeController();
+  tearDownAll(appearance.dispose);
   void testHeader(String description, WidgetTesterCallback callback) {
     testWidgets(
       description,
@@ -87,25 +92,54 @@ void main() {
   }) async {
     await tester.binding.setSurfaceSize(Size(width, 800));
     await tester.pumpWidget(
-      MaterialApp(
-        debugShowCheckedModeBanner: false,
-        builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(
-            disableAnimations: reduceMotion,
-            textScaler: TextScaler.linear(textScale),
+      ThemeScope(
+        controller: appearance,
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              disableAnimations: reduceMotion,
+              textScaler: TextScaler.linear(textScale),
+            ),
+            child: child!,
           ),
-          child: child!,
+          home: OfflineLibraryScreen(controller: sync, isHome: isHome),
         ),
-        home: OfflineLibraryScreen(controller: sync, isHome: isHome),
       ),
     );
     await tester.pump();
   }
 
-  Finder header() => find.byType(AppBar);
-  Finder refresh() => find.byKey(const ValueKey('offline-refresh-catalog'));
+  Finder header() => find
+      .ancestor(
+        of: find.byType(ThemeAction),
+        matching: find.byWidgetPredicate(
+          (w) => w is SizedBox && w.height == 56,
+        ),
+      )
+      .first;
+  Finder refresh() => find.widgetWithText(LibraryNavigationItem, '立即同步');
   Finder management() => find.byKey(const ValueKey('offline-sync-management'));
   Finder rotation() => find.byKey(const ValueKey('offline-sync-rotation'));
+  Finder setListEntry() => find.byWidgetPredicate(
+    (w) =>
+        (w is LibraryIconButton && w.label == '曲单') ||
+        (w is LibraryGroupLabel && w.text == '曲单'),
+  );
+  void oneHeaderRow(WidgetTester tester) {
+    // v2 replaces AppBar with a single 56dp header, with no bottom toolbar.
+    expect(tester.getSize(header()).height, 56);
+    final bounds = tester.getRect(header());
+    for (final action in ['搜索', '曲单']) {
+      final finder = find.descendant(
+        of: header(),
+        matching: find.byTooltip(action),
+      );
+      if (finder.evaluate().isNotEmpty) {
+        expect(tester.getRect(finder).center.dy, bounds.center.dy);
+      }
+    }
+  }
 
   testHeader(
     'compact signing expiry stays visible and opens its existing details',
@@ -128,11 +162,13 @@ void main() {
       );
       final sync = await fixture(tester)
         ..pairedForTest = true;
-      await show(tester, sync, width: 375);
+      await show(tester, sync, width: 640);
       await tester.pump();
-      expect(find.text('6天'), findsOneWidget);
-      expect(find.byIcon(Icons.schedule), findsOneWidget);
-      await tester.tap(find.byTooltip('查看签名到期时间与续签方式'));
+      expect(find.text('签名7天'), findsOneWidget);
+      expect(tester.getSize(management()).height, greaterThanOrEqualTo(48));
+      await tester.tap(management());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('管理'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.text('签名到期时间'), findsOneWidget);
@@ -140,46 +176,63 @@ void main() {
     },
   );
 
-  testHeader(
-    'idle header refreshes only the catalog once and has one set list entry',
-    (tester) async {
-      final sync = await fixture(tester)
-        ..pairedForTest = true;
-      await show(tester, sync);
-      expect(find.text('更新目录'), findsOneWidget);
-      expect(find.text('同步管理'), findsOneWidget);
-      expect(find.byTooltip('曲单'), findsOneWidget);
-      expect(
-        find.descendant(
-          of: header(),
-          matching: find.byType(PopupMenuButton<String>),
-        ),
-        findsNothing,
-      );
-      expect(find.byTooltip('更多'), findsNothing);
-      expect(tester.widget<AppBar>(header()).bottom, isNull);
-      await tester.tap(refresh());
-      await tester.pump();
-      expect(sync.refreshCalls, 1);
-      expect(sync.synchronizeCalls, 0);
-      expect(sync.cancelCalls, 0);
-      expect(tester.takeException(), isNull);
-    },
-  );
+  testHeader('idle navigation synchronizes once and has one set list entry', (
+    tester,
+  ) async {
+    final sync = await fixture(tester)
+      ..pairedForTest = true;
+    await show(tester, sync, width: 640);
+    expect(find.text('更新目录'), findsNothing);
+    expect(management(), findsOneWidget);
+    expect(setListEntry(), findsOneWidget);
+    expect(
+      find.descendant(
+        of: header(),
+        matching: find.byType(PopupMenuButton<String>),
+      ),
+      findsNothing,
+    );
+    expect(find.byTooltip('更多'), findsNothing);
+    oneHeaderRow(tester);
+    await tester.tap(find.byTooltip('打开来源'));
+    await tester.pumpAndSettle();
+    expect(refresh(), findsOneWidget);
+    await tester.tap(refresh());
+    await tester.pump();
+    expect(sync.refreshCalls, 0);
+    expect(sync.synchronizeCalls, 1);
+    expect(sync.cancelCalls, 0);
+    expect(tester.takeException(), isNull);
+  });
 
   testHeader(
     'unpaired connection opens management without auto scanning or synchronizing',
     (tester) async {
       final sync = await fixture(tester);
-      await show(tester, sync, width: 320);
-      expect(find.text('连接电脑'), findsOneWidget);
+      await show(tester, sync, width: 640);
+      expect(management(), findsOneWidget);
       expect(refresh(), findsNothing);
+      var scans = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        QrScanner.channel,
+        (_) async {
+          scans++;
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          QrScanner.channel,
+          null,
+        ),
+      );
       await tester.tap(management());
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       final screen = tester.widget<SyncScreen>(find.byType(SyncScreen));
       expect(screen.scanOnOpen, isFalse);
       expect(screen.syncOnOpen, isFalse);
+      expect(scans, 0);
       expect(sync.synchronizeCalls, 0);
       expect(tester.takeException(), isNull);
     },
@@ -194,8 +247,11 @@ void main() {
         ..phase = SyncPhase.transferring
         ..processedObjects = 4
         ..totalObjects = 10;
-      await show(tester, sync, width: 375);
-      expect(find.text('下载中 4/10'), findsOneWidget);
+      await show(tester, sync, width: 640);
+      expect(
+        find.descendant(of: management(), matching: rotation()),
+        findsOneWidget,
+      );
       expect(refresh(), findsNothing);
       expect(
         find.descendant(of: header(), matching: find.byIcon(Icons.refresh)),
@@ -209,11 +265,25 @@ void main() {
       await tester.tap(find.byTooltip('搜索'));
       await tester.pump();
       expect(management(), findsOneWidget);
-      expect(find.text('下载中 4/10'), findsOneWidget);
+      expect(
+        find.descendant(of: management(), matching: rotation()),
+        findsOneWidget,
+      );
       await tester.tap(management());
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.byType(SyncScreen), findsOneWidget);
+      // v2 §12 moves detailed progress into the device panel.
+      expect(find.text('下载中 · 4 / 10 份'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(SyncScreen),
+          matching: find.byWidgetPredicate(
+            (w) => w is LinearProgressIndicator && w.value == .4,
+          ),
+        ),
+        findsOneWidget,
+      );
       expect(sync.refreshCalls, 0);
       expect(sync.synchronizeCalls, 0);
       expect(sync.cancelCalls, 0);
@@ -229,7 +299,14 @@ void main() {
         ..backgroundPendingObjects = 7;
       await show(tester, sync, reduceMotion: true);
       expect(find.text('后台下载中 · 余 7 份'), findsOneWidget);
-      expect(refresh(), findsNothing);
+      expect(refresh(), findsOneWidget);
+      await tester.tap(refresh());
+      await tester.pump();
+      expect(
+        sync.synchronizeCalls,
+        0,
+        reason: 'an active queue cannot start overlapping synchronization',
+      );
       final turns = tester.widget<RotationTransition>(rotation()).turns;
       final before = turns.value;
       await tester.pump(const Duration(seconds: 1));
@@ -249,11 +326,11 @@ void main() {
   );
 
   testHeader(
-    'header fits phone and iPad split widths without an extra toolbar row',
+    'header fits supported iPad split widths without an extra toolbar row',
     (tester) async {
       final sync = await fixture(tester)
         ..pairedForTest = true;
-      for (final width in [320.0, 375.0, 600.0, 744.0, 1024.0]) {
+      for (final width in [640.0, 744.0, 1024.0]) {
         for (final home in [true, false]) {
           await show(tester, sync, width: width, isHome: home);
           expect(
@@ -261,8 +338,8 @@ void main() {
             isNull,
             reason: 'idle width=$width home=$home',
           );
-          expect(tester.widget<AppBar>(header()).bottom, isNull);
-          expect(find.byTooltip('曲单'), findsOneWidget);
+          oneHeaderRow(tester);
+          expect(setListEntry(), findsOneWidget);
           sync.busy = true;
           sync.phase = SyncPhase.transferring;
           sync.totalObjects = 100;
@@ -279,7 +356,7 @@ void main() {
           await tester.pump();
         }
       }
-      await show(tester, sync, width: 320, textScale: 2);
+      await show(tester, sync, width: 640, textScale: 2);
       expect(tester.takeException(), isNull);
     },
   );

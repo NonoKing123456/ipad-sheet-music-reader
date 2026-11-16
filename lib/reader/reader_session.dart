@@ -14,6 +14,7 @@ import 'package:pdfrx/pdfrx.dart';
 import 'package:reader_state/reader_state.dart';
 
 import 'reader_workspace.dart';
+import '../library/library_diagnostics.dart';
 import 'reader_spreads.dart';
 
 class ScoreTarget {
@@ -479,8 +480,8 @@ class ReaderSession extends ChangeNotifier {
         return !_disposed && epoch == _epoch && _warmWanted == target.key
             ? cached
             : null;
-      } catch (_) {
-        debugPrint('READER next_prewarm_unavailable');
+      } catch (error, stack) {
+        logLibraryFailure('next_prewarm_unavailable', error, stack);
         return null;
       }
     }
@@ -510,8 +511,8 @@ class ReaderSession extends ChangeNotifier {
         _cache[target.key] = loaded;
         _trimCache();
         return loaded;
-      } catch (_) {
-        debugPrint('READER next_prewarm_unavailable');
+      } catch (error, stack) {
+        logLibraryFailure('next_prewarm_unavailable', error, stack);
         return null;
       } finally {
         if (identical(_warmFuture, job)) {

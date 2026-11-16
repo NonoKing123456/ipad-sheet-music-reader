@@ -9,6 +9,8 @@ import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/sync_controller.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  HttpOverrides.global = null; // These integration tests use loopback HTTP.
   late Directory temporary;
   final controllers = <SyncController>[];
   setUp(() async {
@@ -75,13 +77,16 @@ void main() {
     var reader = await make('reader');
     expect(computer.serving, isFalse);
     await connect(computer, reader);
-    final identity = reader.replica!.manifest!.libraryId;
+    final identity = reader.collection!.index!.id;
     final port = computer.port;
-    final original = reader.replica!.snapshot.availableEntries.single;
+    final original = reader.offlineSnapshot!.availableEntries.single;
     final target = reader.locateOffline(original.id)!;
     expect(target.verifiedImmutable, isTrue);
     expect(target.revisionId, original.currentRevisionId);
-    expect(target.filePath, reader.replica!.absolutePathFor(original));
+    expect(
+      target.filePath,
+      reader.collection!.presentationPathFor(original.id),
+    );
     final localHashReads = reader.replica!.verificationStats.localHashBytesRead;
     await reader.synchronize();
     expect(
@@ -93,7 +98,7 @@ void main() {
     await computer.library.rescan();
     await reader.synchronize();
     expect(
-      reader.replica!.snapshot.availableEntries,
+      reader.offlineSnapshot!.availableEntries,
       hasLength(2),
       reason:
           'running source must resolve the latest catalog after a worker scan',
@@ -102,7 +107,7 @@ void main() {
     await computer.startServer();
     expect(computer.port, port);
     await reader.synchronize();
-    expect(reader.replica!.manifest!.libraryId, identity);
+    expect(reader.collection!.index!.id, identity);
     await computer.stopServer();
     reader.dispose();
     reader.library.dispose();
@@ -112,7 +117,15 @@ void main() {
     reader = reopened;
     expect(reopened.paired, isTrue);
     expect(reopened.hasOfflineLibrary, isTrue);
-    expect(reopened.replica!.search('ancestor'), hasLength(1));
+    expect(
+      reopened.offlineEntries(
+        sourceId: 'legacy',
+        folder: '',
+        query: 'ancestor',
+        withinFolder: false,
+      ),
+      hasLength(1),
+    );
     expect(reopened.replica!.verificationStats.localHashBytesRead, 0);
     expect(
       await File(reopened.locateOffline(original.id)!.filePath).readAsString(),
@@ -126,7 +139,7 @@ void main() {
     expect(reader.phase, SyncPhase.partial);
     expect(reader.message, contains('另一份谱库'));
     expect(
-      reader.replica!.manifest!.libraryId,
+      reader.collection!.index!.id,
       identity,
       reason:
           'different library must not replace the previous complete replica',
@@ -141,7 +154,7 @@ void main() {
     final computer = await make('computer', root: await source('first'));
     final reader = await make('reader');
     await connect(computer, reader);
-    final entry = reader.replica!.snapshot.availableEntries.single;
+    final entry = reader.offlineSnapshot!.availableEntries.single;
     final page = PageKey(
       entryId: entry.id,
       revisionId: entry.currentRevisionId,
@@ -198,7 +211,7 @@ void main() {
       PendingStroke(page, style, [NormalizedPoint(.9, .1)]),
     );
     await reader.synchronize();
-    expect(reader.message, contains('没有开始同步'));
+    expect(reader.message, '批注未保存，请先重试保存。');
     expect(reader.workspace.store.snapshot.generation, generation);
     await reader.workspace.retryStrokes();
     await reader.synchronize();
@@ -211,14 +224,14 @@ void main() {
     final computer = await make('computer', root: root);
     final reader = await make('reader');
     await connect(computer, reader);
-    final original = reader.replica!.snapshot.availableEntries.single;
+    final original = reader.offlineSnapshot!.availableEntries.single;
     await File(p.join(root, 'new.pdf')).writeAsString('new revision bytes');
     await computer.library.rescan();
     var didCancel = false;
     void cancelOnManifest() {
       if (!didCancel &&
           reader.phase == SyncPhase.transferring &&
-          reader.totalObjects == 2) {
+          reader.totalObjects == 1) {
         didCancel = true;
         reader.cancel();
       }
@@ -229,20 +242,24 @@ void main() {
     reader.removeListener(cancelOnManifest);
     expect(didCancel, isTrue);
     expect(reader.phase, SyncPhase.cancelled);
-    expect(reader.replica!.snapshot.availableEntries.single.id, original.id);
-    expect(reader.message, contains('上次完整离线库'));
+    expect(reader.offlineTargets.single.entryId, original.id);
+    expect(
+      await File(reader.locateOffline(original.id)!.filePath).readAsString(),
+      'original',
+    );
+    expect(reader.message, '本次同步已取消。');
     await reader.synchronize();
     expect(reader.phase, SyncPhase.complete);
-    expect(reader.processedObjects, 2);
-    expect(reader.totalObjects, 2);
-    expect(reader.replica!.snapshot.availableEntries, hasLength(2));
+    expect(reader.processedObjects, 1);
+    expect(reader.totalObjects, 1);
+    expect(reader.offlineTargets, hasLength(2));
   });
 
   test('damaged pairing credentials and settings do not block a complete offline library', () async {
     final computer = await make('computer', root: await source('first'));
     var reader = await make('reader');
     await connect(computer, reader);
-    final entry = reader.replica!.snapshot.availableEntries.single;
+    final entry = reader.offlineSnapshot!.availableEntries.single;
     final settingsFile = File(p.join(reader.directory.path, 'settings.json'));
     final settings = jsonDecode(await settingsFile.readAsString()) as Map;
     final peerFile = File(

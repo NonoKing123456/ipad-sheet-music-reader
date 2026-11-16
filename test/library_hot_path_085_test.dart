@@ -25,6 +25,11 @@ Future<void> _cleanup(Directory dir) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final previousHttp = HttpOverrides.current;
+  // This suite exchanges synthetic data over real loopback HTTP.
+  setUp(() => HttpOverrides.global = null);
+  tearDown(() => HttpOverrides.global = previousHttp);
   test('delayed stale scan reload cannot roll a later foreground sibling publication back', () async {
     final dir = await Directory.systemTemp.createTemp('reader-adopt-race-085-');
     final root = await Directory('${dir.path}/scores').create();

@@ -69,8 +69,8 @@ int searchHighlightStart(String text, String query) {
     }
   }
   // Match against the original text so case conversion cannot shift offsets.
-  final literal = RegExp(RegExp.escape(needle),
-      caseSensitive: false, unicode: true);
+  final literal =
+      RegExp(RegExp.escape(needle), caseSensitive: false, unicode: true);
   for (final wordStart in starts) {
     final start = wordStart - firstWord.start;
     if (start >= 0 && literal.matchAsPrefix(text, start) != null) return start;

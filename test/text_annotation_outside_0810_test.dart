@@ -206,7 +206,17 @@ Future<void> _cleanup(
   tester.view.resetDevicePixelRatio();
   tester.view.resetPhysicalSize();
   await tester.binding.setSurfaceSize(null);
-  await tester.runAsync(() => dir.delete(recursive: true));
+  await tester.runAsync(() async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        await dir.delete(recursive: true);
+        break;
+      } on FileSystemException catch (error) {
+        if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    }
+  });
 }
 
 void main() {
@@ -261,12 +271,12 @@ void main() {
           generation,
           reason: 'unchanged confirmation adds no history/write',
         );
-        await tester.tap(find.byTooltip('红色'));
+        await tester.tap(find.byTooltip('赭红'));
         await _until(
           tester,
           () => !workspace.savingAnnotations && !state.controls.saving,
         );
-        expect(_text(workspace, page).argb, 0xffc12b32);
+        expect(_text(workspace, page).argb, 0xff9b5949);
         await _durable(tester, () => workspace.store.undo(page));
         expect(_text(workspace, page).argb, 0xff1c57ac);
         await _durable(tester, () => workspace.store.redo(page));
@@ -279,7 +289,7 @@ void main() {
               .whereType<TextAnnotation>()
               .single
               .argb,
-          0xffc12b32,
+          0xff9b5949,
         );
         await _durable(
           tester,
@@ -294,12 +304,12 @@ void main() {
         await tester.tapAt(state.paperPoint(0, .25, .41));
         await tester.pump();
         expect(
-          find.byTooltip('当前文字颜色'),
+          find.byTooltip('当前颜色'),
           findsOneWidget,
           reason: 'custom/white stored colors remain visible',
         );
         expect(state.controls.argb, 0xffffffff);
-        await tester.tap(find.byTooltip('红色'));
+        await tester.tap(find.byTooltip('赭红'));
         await _until(
           tester,
           () => !workspace.savingAnnotations && !state.controls.saving,
@@ -314,7 +324,7 @@ void main() {
         );
         expect(workspace.store.snapshot.annotationsFor(page), isEmpty);
         await _durable(tester, () => workspace.store.undo(page));
-        expect(_text(workspace, page).argb, 0xffc12b32);
+        expect(_text(workspace, page).argb, 0xff9b5949);
         // Empty new draft is discarded without a record or extra undo.
         final beforeEmpty = workspace.store.snapshot.generation;
         await tester.tapAt(state.paperPoint(0, .3, .75));
@@ -378,6 +388,16 @@ void main() {
               .composing,
           const TextRange(start: 4, end: 5),
         );
+        // Escape first belongs to the IME while composition is active. It must
+        // not discard the annotation editor or the uncommitted Chinese text.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        expect(find.byType(TextField), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          '正在输入中',
+        );
+        expect(readerTextEditorActive, isTrue);
         await tester.enterText(find.byType(TextField), '中文，Hello!\n第二行。');
         expect(find.byKey(const ValueKey('annotation-font')), findsNothing);
         await tester.tap(find.byTooltip('黑色'));
@@ -557,6 +577,130 @@ void main() {
           await tester.runAsync(() => File(stateDir.path).delete());
           await tester.runAsync(() => held!.rename(stateDir.path));
         }
+        await _cleanup(tester, workspace, dir);
+      }
+    },
+  );
+  testWidgets(
+    'dragging the visible transform circle shrinks font, width and control frame together',
+    (tester) async {
+      final dir = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('text-uniform-shrink-'),
+      ))!;
+      final workspace = ReaderWorkspace(
+        (await tester.runAsync(
+          () => ReaderStateStore.open(statePath: '${dir.path}/state.json'),
+        ))!,
+      );
+      final key = GlobalKey<_HarnessState>();
+      try {
+        await _setup(tester, workspace, key);
+        final state = key.currentState!, page = key.currentState!.page(1);
+        final original = workspace.store.newText(
+          text: 'Scale',
+          anchor: NormalizedPoint(.25, .4),
+          argb: 0xff222222,
+          fontSizeFraction: 56 / 1024,
+          widthFraction: .5,
+        );
+        await _durable(tester, () => workspace.store.saveText(page, original));
+        final paper =
+            state.paperKeys.first.currentContext!.findRenderObject()!
+                as RenderBox;
+        final textFrame = textAnnotationFrame(original, paper.size);
+        await tester.tapAt(paper.localToGlobal(textFrame.center));
+        await tester.pump();
+        final control = find.byKey(const ValueKey('text-control-frame'));
+        expect(control, findsOneWidget);
+        final before = tester.getSize(control);
+        final visibleHandle = find.byKey(
+          const ValueKey('text-handle-visual-transform'),
+        );
+        final start = paper.globalToLocal(tester.getCenter(visibleHandle));
+        final target = textFrame.center + (start - textFrame.center) * .75;
+        final pointer = await tester.createGesture();
+        await pointer.down(paper.localToGlobal(start));
+        await pointer.moveTo(paper.localToGlobal(target));
+        await tester.pump();
+        final preview = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .map((widget) => widget.painter)
+            .whereType<AnnotationPainter>()
+            .firstWhere(
+              (painter) =>
+                  painter.annotations.whereType<TextAnnotation>().isNotEmpty,
+            )
+            .annotations
+            .whereType<TextAnnotation>()
+            .single;
+        final fontRatio = preview.fontSizeFraction / original.fontSizeFraction;
+        final widthRatio = preview.widthFraction / original.widthFraction;
+        final after = tester.getSize(control);
+        expect(fontRatio, closeTo(.75, .001));
+        expect(
+          state.controls.fontSizeFraction,
+          closeTo(original.fontSizeFraction * .75, .0001),
+        );
+        expect(widthRatio, closeTo(fontRatio, .001));
+        expect((after.width - 8) / (before.width - 8), closeTo(fontRatio, .01));
+        expect(
+          (after.height - 8) / (before.height - 8),
+          closeTo(fontRatio, .01),
+        );
+        expect(
+          workspace.store.snapshot
+              .annotationsFor(page)
+              .whereType<TextAnnotation>()
+              .single
+              .geometry,
+          original.geometry,
+          reason: 'drag preview stays uncommitted until up',
+        );
+        await pointer.up();
+        await _until(tester, () => !workspace.savingAnnotations);
+        expect(
+          state.controls.fontSizeFraction,
+          closeTo(original.fontSizeFraction * .75, .0001),
+        );
+        expect(
+          _text(workspace, page).fontSizeFraction,
+          closeTo(original.fontSizeFraction * .75, .0001),
+        );
+        await _durable(
+          tester,
+          () => workspace.edit((store) => store.undo(page)),
+        );
+        expect(_text(workspace, page).geometry, original.geometry);
+        await tester.pump();
+        await tester.pump();
+        expect(
+          state.controls.fontSizeFraction,
+          closeTo(original.fontSizeFraction, .0001),
+        );
+        final cancelStart = paper.globalToLocal(
+          tester.getCenter(visibleHandle),
+        );
+        final cancelTarget =
+            textFrame.center + (cancelStart - textFrame.center) * .75;
+        final cancelled = await tester.createGesture();
+        await cancelled.down(paper.localToGlobal(cancelStart));
+        await cancelled.moveTo(paper.localToGlobal(cancelTarget));
+        await tester.pump();
+        expect(
+          state.controls.fontSizeFraction,
+          closeTo(original.fontSizeFraction * .75, .0001),
+        );
+        await cancelled.cancel();
+        await tester.pump();
+        await tester.pump();
+        expect(
+          state.controls.fontSizeFraction,
+          closeTo(original.fontSizeFraction, .0001),
+        );
+        expect(tester.getSize(control).width, closeTo(before.width, .01));
+        expect(tester.getSize(control).height, closeTo(before.height, .01));
+        expect(_text(workspace, page).geometry, original.geometry);
+      } finally {
         await _cleanup(tester, workspace, dir);
       }
     },

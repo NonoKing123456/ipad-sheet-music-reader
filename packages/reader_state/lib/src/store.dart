@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 
 import 'models.dart';
+import 'diagnostics.dart' as diagnostics;
 import 'merge.dart';
 
 class ReaderStateStore {
@@ -541,7 +542,10 @@ class ReaderStateStore {
         try {
           await _decode(primary);
           valid = true;
-        } catch (_) {}
+        } catch (error, stack) {
+          diagnostics.reportSwallowedError(
+              'readerState.preWriteValidation', error, stack);
+        }
         if (valid) {
           if (await backup.exists()) await backup.delete();
           await primary.rename(backup.path);

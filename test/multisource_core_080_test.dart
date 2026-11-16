@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:library_core/library_core.dart';
 import 'package:library_sync/library_sync.dart';
+import 'package:library_sync/src/small_file_batch.dart';
 import 'package:reader_state/reader_state.dart';
 
 class _NoLegacy implements LibrarySource {
@@ -167,7 +168,12 @@ void main() {
       await view.select(
         OfflineRule(sourceId: 'new', folder: '', selected: false),
       );
-      final newerBytes = List<int>.filled(32768, 4);
+      // Keep this partial-object interruption on the streaming path: small
+      // batch frames are buffered in full before the replica receives bytes.
+      final newerBytes = List<int>.filled(
+        SmallFileBatchLimits.objectBytes + 1,
+        4,
+      );
       await file.writeAsBytes(newerBytes);
       await catalog.rescan(metadataOnly: true);
       expect(
@@ -325,8 +331,10 @@ void main() {
 
     try {
       final root = await Directory('${dir.path}/scores').create();
+      // Large files keep this storage-failure check on per-object streaming.
+      final bytes = List<int>.filled(SmallFileBatchLimits.objectBytes + 1, 1);
       for (final name in ['a', 'b', 'c']) {
-        await File('${root.path}/$name.png').writeAsBytes([1, 2, 3]);
+        await File('${root.path}/$name.png').writeAsBytes(bytes);
       }
       final catalog = await LibraryCatalog.open(
         rootPath: root.path,
@@ -422,7 +430,7 @@ void main() {
       );
       expect(
         reopenedObjects.verificationStats.localHashBytesRead,
-        3,
+        bytes.length,
         reason: 'recovery verifies the completed object; a journal record alone never means ready',
       );
       expect(
@@ -445,8 +453,10 @@ void main() {
     final held = Directory('${dir.path}/held-objects');
     try {
       final root = await Directory('${dir.path}/scores').create();
+      // Large files keep this storage-failure check on per-object streaming.
+      final bytes = List<int>.filled(SmallFileBatchLimits.objectBytes + 1, 1);
       for (final name in ['a', 'b', 'c']) {
-        await File('${root.path}/$name.png').writeAsBytes([1, 2, 3]);
+        await File('${root.path}/$name.png').writeAsBytes(bytes);
       }
       final catalog = await LibraryCatalog.open(
         rootPath: root.path,
@@ -815,7 +825,10 @@ void main() {
     try {
       final root = await Directory('${dir.path}/scores').create();
       await File('${root.path}/a.png').writeAsBytes([1, 2, 3]);
-      await File('${root.path}/z.png').writeAsBytes([4, 5, 6]);
+      // The small a.png must finish before the gated streaming object starts.
+      await File(
+        '${root.path}/z.png',
+      ).writeAsBytes(List<int>.filled(SmallFileBatchLimits.objectBytes + 1, 4));
       final catalog = await LibraryCatalog.open(
         rootPath: root.path,
         statePath: '${dir.path}/catalog.json',

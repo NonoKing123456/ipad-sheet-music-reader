@@ -6,6 +6,7 @@ import 'package:library_sync/library_sync.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_screen.dart';
+import 'package:score_reader/library/library_widgets.dart';
 import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
@@ -65,34 +66,52 @@ void main() {
             ),
           );
         });
-        await uiUntil(tester, () => find.text('添加谱库文件夹').evaluate().isNotEmpty);
+        await uiUntil(
+          tester,
+          () => find.byTooltip('打开来源').evaluate().isNotEmpty,
+        );
+        await tester.tap(find.byTooltip('打开来源'));
+        await tester.pumpAndSettle();
+        expect(find.text('添加来源'), findsOneWidget);
         // Finish the screen's asynchronous sync initialization before teardown.
-        await tester.tap(find.byTooltip('离线谱库'));
+        await tester.tap(find.byTooltip('曲库操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('离线谱库'));
         await uiUntil(
           tester,
           () => find.byType(OfflineLibraryScreen).evaluate().isNotEmpty,
         );
         Navigator.of(tester.element(find.byType(OfflineLibraryScreen))).pop();
         await tester.pumpAndSettle();
-        expect(find.text('Scores'), findsOneWidget);
-        expect(find.text('Scores (2)'), findsOneWidget);
+        expect(
+          find.widgetWithText(LibraryNavigationItem, 'Scores'),
+          findsOneWidget,
+        );
+        expect(
+          find.widgetWithText(LibraryNavigationItem, 'Scores (2)'),
+          findsOneWidget,
+        );
         expect(find.text('bar'), findsWidgets);
-        final search = find.byType(TextField).first;
+        await tester.tapAt(const Offset(1000, 400));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('搜索'));
+        await tester.pump();
+        final search = find.byType(TextField);
         await tester.enterText(search, 'Piece');
         await tester.pump();
         expect(
           find.descendant(
-            of: find.byType(ListTile),
-            matching: find.text('Piece'),
+            of: find.byType(LibraryFileRow),
+            matching: find.text('Piece', findRichText: true),
           ),
           findsNWidgets(2),
         );
-        expect(find.text('Scores · foo'), findsOneWidget);
-        expect(find.text('Scores (2) · bar'), findsOneWidget);
+        expect(find.text('Scores / foo'), findsOneWidget);
+        expect(find.text('Scores (2) / bar'), findsOneWidget);
         await tester.enterText(search, 'Scores (2)');
         await tester.pump();
-        expect(find.text('Piece'), findsOneWidget);
-        expect(find.text('Scores · foo'), findsNothing);
+        expect(find.text('Piece', findRichText: true), findsOneWidget);
+        expect(find.text('Scores / foo'), findsNothing);
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -102,7 +121,23 @@ void main() {
         }
         workspace?.dispose();
         await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        final cleanup = Stopwatch()..start();
+        var removed = false;
+        while (!removed) {
+          await tester.pump();
+          await tester.runAsync(() async {
+            try {
+              await dir.delete(recursive: true);
+              removed = true;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 ||
+                  cleanup.elapsed >= const Duration(seconds: 2)) {
+                rethrow;
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 25));
+            }
+          });
+        }
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
@@ -192,13 +227,14 @@ void main() {
         await tester.pump();
         expect(find.text('Root'), findsOneWidget);
         Finder folderRow(String name) => find.byWidgetPredicate(
-          (w) =>
-              w is ListTile &&
-              w.title is Text &&
-              (w.title! as Text).data == name,
+          (w) => w is LibraryFileRow && w.name == name,
         );
         expect(folderRow('foo'), findsOneWidget);
         expect(folderRow('foobar'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('offline-current-folder-menu')),
+        );
+        await tester.pumpAndSettle();
         await tester.tap(find.text('下载整个谱库'));
         await tester.pumpAndSettle();
         expect(find.textContaining('3 份曲谱'), findsOneWidget);
@@ -209,20 +245,31 @@ void main() {
         await tester.pump();
         expect(find.text('Piece'), findsOneWidget);
         expect(find.byTooltip('未下载'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('offline-current-folder-menu')),
+        );
+        await tester.pumpAndSettle();
         await tester.tap(find.text('下载此文件夹'));
         await tester.pumpAndSettle();
         expect(find.textContaining('1 份曲谱'), findsOneWidget);
         await tester.tap(find.widgetWithText(FilledButton, '下载到iPad'));
         await uiUntil(tester, () => reader.offlineCount == 1 && !reader.busy);
         expect(find.byTooltip('已离线'), findsOneWidget);
-        final tile = tester.widget<ListTile>(folderRow('Piece'));
-        expect((tile.subtitle! as Text).maxLines, 1);
-        expect((tile.subtitle! as Text).data, isNot(contains('\n')));
+        final tile = tester.widget<LibraryFileRow>(folderRow('Piece'));
+        final title = tester.widget<Text>(
+          find.descendant(
+            of: folderRow('Piece'),
+            matching: find.text(tile.name),
+          ),
+        );
+        expect(title.maxLines, 1);
+        expect(tile.name, isNot(contains('\n')));
+        expect(tile.subtitle, isNull);
         expect(
           tester.getSize(folderRow('Piece')).height,
           lessThanOrEqualTo(72),
         );
-        expect(find.byIcon(Icons.check_circle), findsOneWidget);
+        expect(find.byTooltip('已离线'), findsOneWidget);
         final item = reader.collection!.index!.entries.singleWhere(
           (e) => e.relativePath == 'foo/Piece.png',
         );
@@ -246,7 +293,13 @@ void main() {
         reader.workspace.refreshFromStore(force: true);
         await tester.pump();
         expect(find.byTooltip('离线旧版可读，有更新待下载'), findsOneWidget);
-        expect(find.byIcon(Icons.update), findsOneWidget);
+        expect(
+          find.descendant(
+            of: folderRow('Piece'),
+            matching: find.byTooltip('离线旧版可读，有更新待下载'),
+          ),
+          findsOneWidget,
+        );
         expect(find.byTooltip('已离线'), findsNothing);
         expect(
           tester.getSize(folderRow('Piece')).height,
@@ -255,7 +308,7 @@ void main() {
         expect(
           find.descendant(
             of: folderRow('Piece'),
-            matching: find.byTooltip('离线选项'),
+            matching: find.byTooltip('曲谱选项'),
           ),
           findsOneWidget,
         );
@@ -307,7 +360,7 @@ void main() {
         final context = tester.element(find.byType(LibraryReaderScreen));
         Navigator.of(context).pop();
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('离线选项'));
+        await tester.tap(find.byTooltip('曲谱选项'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('移除本机下载'));
         await uiUntil(

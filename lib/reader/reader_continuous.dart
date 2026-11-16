@@ -231,8 +231,8 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
   void initState() {
     super.initState();
     widget.retainDocument?.call();
-    _pendingAnchor = widget.initialAnchor ??
-        ReaderScrollAnchor(widget.requestedPage, 0, 0);
+    _pendingAnchor =
+        widget.initialAnchor ?? ReaderScrollAnchor(widget.requestedPage, 0, 0);
     _requestedPresentation = widget.requestedPage;
     _navigationFocus = widget.requestedPage;
     widget.controller._zoom = _zoomCallback;
@@ -310,7 +310,9 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
     _scheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scheduled = false;
-      if (!mounted || _frozen || !_vertical.hasClients || _heights.isEmpty) return;
+      if (!mounted || _frozen || !_vertical.hasClients || _heights.isEmpty) {
+        return;
+      }
       final zoom = _pendingZoom, anchor = _pendingAnchor;
       _pendingZoom = null;
       _pendingAnchor = null;
@@ -407,8 +409,10 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
       if (!_layoutPending &&
           _ready.contains(presented) &&
           _painted.contains(presented) &&
-          (!_limited || _visible.every((page) =>
-              _ready.contains(page) && _painted.contains(page))) &&
+          (!_limited ||
+              _visible.every(
+                (page) => _ready.contains(page) && _painted.contains(page),
+              )) &&
           (presented != _reported || requested != null)) {
         _requestedPresentation = null;
         _reported = presented;
@@ -629,10 +633,7 @@ class _ReaderContinuousViewState extends State<ReaderContinuousView> {
                       height: _heights[index],
                       child: _window.contains(number) || preview
                           ? _ContinuousPaper(
-                              key: ValueKey((
-                                widget.documentKey,
-                                number,
-                              )),
+                              key: ValueKey((widget.documentKey, number)),
                               number: number,
                               preview: preview,
                               active:

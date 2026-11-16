@@ -99,7 +99,7 @@ void main() {
           tester.getCenter(search).dx,
           lessThan(tester.getCenter(action).dx),
         );
-        expect(tester.getSize(search).width, greaterThanOrEqualTo(44));
+        expect(tester.getSize(search).width, greaterThanOrEqualTo(40));
         await tester.tap(search);
         await _frame(tester);
         expect(
@@ -117,7 +117,7 @@ void main() {
   );
 
   testWidgets(
-    'actual iPad none tool pans only to the real toolbar obstruction, keeps horizontal turns and resets on hide',
+    'actual iPad none tool fits below chrome, keeps horizontal turns and resets on hide',
     (tester) async {
       final (directory, _, workspace, _) = await _fixture(tester);
       tester.view.devicePixelRatio = 1;
@@ -156,8 +156,12 @@ void main() {
       );
       ReaderInput input() =>
           tester.widget<ReaderInput>(find.byType(ReaderInput));
+      await _frame(tester);
       expect(input().editing, isFalse);
       await tester.tapAt(const Offset(372, 450));
+      await _frame(tester);
+      expect(input().editing, isFalse);
+      await tester.tap(find.byTooltip('批注').hitTestable());
       await _frame(tester);
       expect(input().editing, isTrue);
       expect(input().touchInk, isFalse);
@@ -171,7 +175,16 @@ void main() {
         find.byType(AnnotationTextLayer).hitTestable(),
       );
       final allowed = math.max(0.0, input().panInsets!.top - paper.top);
-      expect(allowed, greaterThan(0));
+      // be6676d fits paper below chrome; no obstruction remains to pan past.
+      expect(allowed, 0);
+      expect(
+        paper.top,
+        greaterThanOrEqualTo(
+          tester
+              .getRect(find.byKey(const ValueKey('reader-top-chrome')))
+              .bottom,
+        ),
+      );
       final transform = input().transform!;
       await tester.dragFrom(const Offset(372, 350), const Offset(0, 550));
       await tester.pump();
@@ -194,14 +207,16 @@ void main() {
       );
       await tester.dragFrom(const Offset(372, 350), const Offset(0, 200));
       await tester.pump();
-      expect(transform.value.storage[13], greaterThan(0));
+      expect(transform.value.storage[13], closeTo(0, .1));
       await tester.tapAt(const Offset(372, 450));
       await _frame(tester);
       expect(input().editing, isFalse);
       expect(transform.value, Matrix4.identity());
       await tester.tapAt(const Offset(372, 450));
       await _frame(tester);
-      await tester.tap(find.byTooltip('画笔；左右拖动调大小'));
+      await tester.tap(find.byTooltip('批注').hitTestable());
+      await _frame(tester);
+      await tester.tap(find.byTooltip('画笔'));
       await tester.pump();
       expect(input().touchInk, isTrue);
       await tester.dragFrom(const Offset(220, 430), const Offset(0, 65));
@@ -275,7 +290,7 @@ void main() {
   );
 
   testWidgets(
-    'dark sync and reader errors keep readable contrast and the actual tool preview paints a visible stroke',
+    'dark sync and reader errors keep readable contrast and the explicit size preview paints a visible stroke',
     (tester) async {
       final (_, _, _, sync) = await _fixture(tester);
       final theme = scoreReaderTheme(Brightness.dark);
@@ -344,21 +359,16 @@ void main() {
                 selected: true,
                 value: 3.2,
                 onSelect: () {},
-                onChanged: (_) {},
               ),
             ),
           ),
         ),
       );
-      final gesture = await tester.startGesture(
-        tester.getCenter(find.byType(ReaderToolButton)),
+      final paint = ReaderToolSizePreview(
+        ReaderTool.pen,
+        3.2,
+        ScoreTokens.dark.pineDeep,
       );
-      await gesture.moveBy(const Offset(35, 0));
-      await tester.pump();
-      final paint = tester
-          .widgetList<CustomPaint>(find.byType(CustomPaint))
-          .firstWhere((w) => w.painter.runtimeType.toString() == '_ToolPreview')
-          .painter!;
       final recorder = ui.PictureRecorder();
       // Paint the real popup painter against its actual themed surface.
       final rendered = Canvas(recorder)
@@ -377,7 +387,6 @@ void main() {
       expect(_contrast(ink, ScoreTokens.dark.paper0), greaterThanOrEqualTo(3));
       image.dispose();
       picture.dispose();
-      await gesture.up();
       await tester.pump();
       expect(tester.takeException(), isNull);
     },

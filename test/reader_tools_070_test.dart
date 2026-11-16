@@ -1,5 +1,5 @@
-import 'dart:io';
 import 'dart:ui' as ui;
+import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -26,7 +26,7 @@ Future<void> flushInk(WidgetTester tester, ReaderWorkspace workspace) async {
 
 void main() {
   testWidgets(
-    'compact tool icons select on tap, independently drag sizes, cancel restores and pedal stays active',
+    'compact tool icons select on tap while explicit sizing remains external and page keys stay active',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(810, 1080));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -42,19 +42,33 @@ void main() {
             builder: (context, refresh) => ReaderStage(
               onNext: () => turns++,
               top: Material(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    for (final tool in ReaderTool.values)
-                      ReaderToolButton(
-                        key: ValueKey(tool),
-                        tool: tool,
-                        selected: selected == tool,
-                        value: sizes[tool]!,
-                        onSelect: () => refresh(() => selected = tool),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        for (final tool in ReaderTool.values)
+                          ReaderToolButton(
+                            key: ValueKey(tool),
+                            tool: tool,
+                            selected: selected == tool,
+                            value: sizes[tool]!,
+                            onSelect: () => refresh(() => selected = tool),
+                          ),
+                      ],
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: Slider(
+                        key: const ValueKey('explicit-tool-size'),
+                        min: selected.minSize,
+                        max: selected.maxSize,
+                        value: sizes[selected]!,
                         onChanged: (value) =>
-                            refresh(() => sizes[tool] = value),
+                            refresh(() => sizes[selected] = value),
                       ),
+                    ),
                   ],
                 ),
               ),
@@ -67,53 +81,70 @@ void main() {
           ),
         ),
       );
-      expect(find.text('画笔'), findsNothing);
-      expect(find.byType(Slider), findsNothing);
+      expect(find.byTooltip('画笔'), findsOneWidget);
+      expect(find.byType(Slider), findsOneWidget);
       for (final tool in ReaderTool.values) {
-        expect(tester.getSize(find.byKey(ValueKey(tool))), const Size(44, 44));
+        expect(tester.getSize(find.byKey(ValueKey(tool))), const Size(48, 48));
       }
       await tester.tap(find.byKey(const ValueKey(ReaderTool.highlighter)));
       await tester.pump();
       expect(selected, ReaderTool.highlighter);
       expect(sizes[ReaderTool.highlighter], 16);
-      final pen = await tester.startGesture(
-        tester.getCenter(find.byKey(const ValueKey(ReaderTool.pen))),
+      await tester.drag(
+        find.byKey(const ValueKey('explicit-tool-size')),
+        const Offset(70, 0),
       );
-      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 80));
-      await pen.moveBy(const Offset(110, 25));
       await tester.pump();
-      expect(sizes[ReaderTool.pen], greaterThan(12));
-      expect(selected, ReaderTool.pen);
-      expect(sizes[ReaderTool.highlighter], 16);
+      expect(sizes[ReaderTool.highlighter], greaterThan(16));
+      expect(sizes[ReaderTool.pen], 3.2);
+      await tester.tap(find.byKey(const ValueKey(ReaderTool.pen)));
+      await tester.pump();
+      await tester.drag(
+        find.byKey(const ValueKey('explicit-tool-size')),
+        const Offset(55, 0),
+      );
+      await tester.pump();
+      expect(sizes[ReaderTool.pen], greaterThan(3.2));
+      expect(sizes[ReaderTool.highlighter], greaterThan(16));
       await tester.sendKeyDownEvent(LogicalKeyboardKey.pageDown);
       await tester.sendKeyRepeatEvent(LogicalKeyboardKey.pageDown);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.pageDown);
       expect(turns, 1);
-      await pen.up();
-      await tester.pump();
       expect(paperDowns, 0);
       final before = sizes[ReaderTool.pen]!;
-      final cancel = await tester.startGesture(
-        tester.getCenter(find.byKey(const ValueKey(ReaderTool.pen))),
-      );
-      await cancel.moveBy(const Offset(-70, 0));
-      await tester.pump();
-      expect(sizes[ReaderTool.pen], lessThan(before));
-      await cancel.cancel();
-      await tester.pump();
-      expect(sizes[ReaderTool.pen], closeTo(before, .0001));
+      expect(before, greaterThan(3.2));
       final semantics = tester.ensureSemantics();
-      final node = tester.getSemantics(find.bySemanticsLabel('橡皮'));
-      tester.binding.performSemanticsAction(
-        ui.SemanticsActionEvent(
-          viewId: tester.view.viewId,
-          nodeId: node.id,
-          type: ui.SemanticsAction.increase,
+      final eraserKey = const ValueKey(ReaderTool.eraser);
+      final eraserSemantics = find.descendant(
+        of: find.byKey(eraserKey),
+        matching: find.byWidgetPredicate(
+          (widget) => widget is Semantics && widget.properties.label == '橡皮',
         ),
       );
+      final node = tester.getSemantics(eraserSemantics);
+      expect(node.label, '橡皮');
+      expect(node.flagsCollection.isButton, isTrue);
+      expect(node.flagsCollection.isSelected, ui.Tristate.isFalse);
+      // v2 puts the actionable semantics on the inner native TextButton.
+      final tapNode = tester.getSemantics(
+        find.descendant(
+          of: find.byKey(eraserKey),
+          matching: find.byType(TextButton),
+        ),
+      );
+      tapNode.owner!.performAction(tapNode.id, ui.SemanticsAction.tap);
       await tester.pump();
-      expect(sizes[ReaderTool.eraser], greaterThan(14.6));
+      expect(selected, ReaderTool.eraser);
+      expect(sizes[ReaderTool.eraser], 14.6);
       expect(sizes[ReaderTool.pen], before);
+      final selectedNode = tester.getSemantics(eraserSemantics);
+      expect(selectedNode.flagsCollection.isSelected, ui.Tristate.isTrue);
+      expect(
+        tester
+            .widget<Slider>(find.byKey(const ValueKey('explicit-tool-size')))
+            .value,
+        14.6,
+      );
       semantics.dispose();
       await tester.pumpWidget(const SizedBox());
     },
@@ -242,7 +273,17 @@ void main() {
         await flushInk(tester, workspace);
         workspace.dispose();
         await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),

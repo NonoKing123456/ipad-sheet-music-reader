@@ -560,7 +560,9 @@ class _ReaderStageState extends State<ReaderStage>
                           ? const SizedBox.shrink()
                           : _animatedTools(
                               Padding(
-                                padding: const EdgeInsets.only(bottom: ScoreLayout.dotsBottom),
+                                padding: const EdgeInsets.only(
+                                  bottom: ScoreLayout.dotsBottom,
+                                ),
                                 child: widget.bottom,
                               ),
                               const Offset(0, 1),

@@ -163,6 +163,7 @@ class CatalogRelay {
             if (fault == PageFault.repeated) page['offset'] = 0;
             bytes = utf8.encode(jsonEncode(page));
           } else if (fault == PageFault.expire) {
+            // Hold the first page past the real 1s snapshot TTL to inject expiry.
             await Future<void>.delayed(const Duration(milliseconds: 1500));
           }
         }
@@ -355,7 +356,25 @@ void main() {
         await tester.runAsync(() => workspace.flushPositions());
         workspace.dispose();
         library.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        var removed = false;
+        final cleanup = Stopwatch()..start();
+        while (!removed) {
+          await tester.pump();
+          await tester.runAsync(() async {
+            // Native reader disposal and watched-directory cancellation release
+            // Windows handles asynchronously; only retry sharing violations.
+            try {
+              await dir.delete(recursive: true);
+              removed = true;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 ||
+                  cleanup.elapsed >= const Duration(seconds: 2)) {
+                rethrow;
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 25));
+            }
+          });
+        }
         await tester.binding.setSurfaceSize(null);
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           pathChannel,
@@ -565,7 +584,11 @@ void main() {
         })).status,
         409,
       );
-      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      final expiryWait = Stopwatch()..start();
+      while (server.activeCatalogSnapshots != 0 &&
+          expiryWait.elapsed < const Duration(seconds: 10)) {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
       expect(
         server.activeCatalogSnapshots,
         0,

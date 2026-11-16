@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../reader/reader_session.dart';
+import '../library/library_diagnostics.dart';
 
 typedef ImportCopy = Future<void> Function(String source, String destination);
 
@@ -251,6 +252,11 @@ class ExternalImportStore extends ChangeNotifier {
   final Directory directory;
   final ImportCopy copyToNewFile;
   final _records = <String, ImportedScore>{};
+  final _failedRecordIds = <String>{};
+  List<String> get failedRecordIds => List.unmodifiable(_failedRecordIds);
+  String? get recoveryWarning => _failedRecordIds.isEmpty
+      ? null
+      : '${_failedRecordIds.length} 条导入记录暂时无法恢复，原稿和待传记录已保留；请稍后重新加载。';
   Future<void> _tail = Future<void>.value();
   bool _disposed = false;
   List<ImportedScore> get records =>
@@ -317,14 +323,18 @@ class ExternalImportStore extends ChangeNotifier {
         final score = ImportedScore.fromJson(
           jsonDecode(await record.readAsString()) as Map<String, dynamic>,
         );
-        if (score.id != p.basename(entity.path)) continue;
+        if (score.id != p.basename(entity.path)) {
+          throw const FormatException('Import record identity mismatch');
+        }
         // A killed reader is a recoverable draft, never an automatic deletion.
         _records[score.id] = score.disposition == ImportDisposition.temporary
             ? score.changed(disposition: ImportDisposition.retained)
             : score;
         if (score.saved) await cleanupSavedPayload(score.id);
+        _failedRecordIds.remove(score.id);
       } catch (_) {
-        // Keep unreadable records/copies on disk for recovery; do not erase them.
+        // Keep unreadable records/copies on disk and visible for later recovery.
+        _failedRecordIds.add(p.basename(entity.path));
       }
     }
     _changed();
@@ -338,6 +348,7 @@ class ExternalImportStore extends ChangeNotifier {
     await temp.writeAsString(jsonEncode(score.toJson()), flush: true);
     await temp.rename(target.path);
     _records[score.id] = score;
+    _failedRecordIds.remove(score.id);
     _changed();
   }
 
@@ -415,7 +426,8 @@ class ExternalImportStore extends ChangeNotifier {
     try {
       final temporary = File(draftPath(score!));
       if (await temporary.exists()) await temporary.delete();
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('import.savedTempCleanup', error, stack);
       /* A cleanup failure must not turn a completed save into failure. */
     }
   }

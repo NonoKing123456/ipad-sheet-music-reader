@@ -11,7 +11,7 @@
 | Dart SDK 约束 | `^3.13.0` |
 | Windows | Windows x64、Visual Studio C++ 桌面开发组件、Windows SDK |
 | iOS 本地构建 | macOS、Xcode `26.6` |
-| iOS 云构建 | `macos-26-intel` x86_64 主机、同 Xcode `26.6`，设备目标仍为 iOS / arm64 |
+| iOS 云构建 | `macos-26-intel`、Xcode `26.6`，设备目标 iOS / arm64 |
 | 依赖版本 | 根 `pubspec.lock`，按锁文件解析 |
 
 这些是当前项目配置，不是对最新工具版本的推荐。升级 SDK、Xcode 或锁文件应单独审查。以下命令在仓库根目录运行，`flutter`、`dart` 应在 PATH 中。
@@ -26,9 +26,12 @@ flutter analyze lib test tool
 ## Windows 开发与发布
 
 ```powershell
+.\tools\flutter-patches\apply-193372.ps1
 flutter run -d windows
-flutter build windows --release --no-pub
+.\tools\windows\Build-Reader.ps1
 ```
+
+Windows 构建使用 Flutter 3.47.8 加官方 PR #193372 的语义树修复。构建入口会核对 SDK 版本及补丁前后文件指纹，防止漏带修复；SDK 不在 PATH 时传 `-FlutterRoot <SDK目录>`。来源、许可证与回退说明见 [补丁说明](../tools/flutter-patches/README.md)。
 
 发布输出为 `build/windows/x64/runner/Release/`。必须分发整个目录，包含 EXE、DLL、`data/` 和原生资产，不能只发 `score_reader.exe`。
 
@@ -36,7 +39,7 @@ flutter build windows --release --no-pub
 
 ```powershell
 .\tool\prepare_windows_links.ps1
-flutter build windows --release --no-pub
+.\tools\windows\Build-Reader.ps1
 ```
 
 辅助工具要求 `.flutter-plugins-dependencies` 已由依赖解析生成，只操作项目内插件链接，不调整系统设置。如果依赖解析本身失败，先修复依赖错误。
@@ -50,6 +53,16 @@ flutter build windows --release --no-pub
 不同实例不可共享状态目录。固定启动器和开始菜单入口的可选部署见 [Windows 发布工具](../tools/windows/README.md)。普通构建、静态分析和测试不会自动安装启动器或改动已有部署。
 
 ## 测试
+
+Windows 上运行 Flutter 测试请使用包装入口：
+
+```powershell
+.\tools\windows\Test-Reader.ps1 test\desktop_reader_toolbar_ui34_test.dart --reporter expanded --no-pub
+```
+
+该入口确保 `flutter test` 使用本机 test-profiler 开关，并通过 `flutter test --help` 检查当前工具快照是否认识该选项。若缓存快照过期，它只备份并失效 `bin/cache/flutter_tools.stamp`，再让 Flutter tools 按原流程重建后复查；不会删除其他缓存。`--no-enable-dart-profiling` 仅关闭 Dart CPU 采样器，测试、断言和覆盖率仍照常运行。不要将它与 `--no-impeller` 混为一谈。
+
+其他平台或无需 Windows profiler workaround 时，可直接运行：
 
 ```sh
 flutter test --no-pub --concurrency=1
@@ -70,7 +83,7 @@ dart test
 
 部分已公开历史测试尚未与当前界面、数据格式和协议对齐，本次没有全量通过。已知结果和待排查位置见 [验证记录](VALIDATION.md)。
 
-Windows / Dart 3.13 曾出现测试宿主原生采样崩溃。如果日志表现为进程崩溃而非断言失败，应保留崩溃日志区分原因；不要用关闭断言或修改产品逻辑掩盖。实际测试结果按运行环境记录。
+Windows / Dart 3.13 的已知测试宿主问题来自 Dart CPU 采样器原生栈遍历；应用 `Test-Reader.ps1` 会禁用该采样器，不会跳过失败用例。如果不使用包装入口，日志表现为进程崩溃而非断言失败时，应保留崩溃日志区分原因；不要关闭断言或修改产品逻辑掩盖。实际测试结果按运行环境记录。
 
 ## iOS 本地构建
 
@@ -124,6 +137,7 @@ xcrun swiftc -swift-version 5 -parse-as-library \
 
 - 自动触发条件是 `main` 的工作流文件自身发生变更；普通文档和应用源码提交不自动触发 iOS 云构建。
 - 单次上限 25 分钟，使用既有固定工具链，不通过更换付费 runner 解决失败。
+- 从 iPad `0.8.10+37` 起，云构建应用仓库内的 Flutter PR #193372 semantics 补丁，并核对应用前后的源码指纹，与已验收的 Windows 修复保持一致。补丁来源和许可见 [说明](../tools/flutter-patches/README.md)。
 - 检查存储边界、图像解码、签名日期解析和嵌套 Mach-O 的 iOS / arm64。
 - 产物发布为预发布，不设为最新正式版，不使用 Actions artifact 保存安装包。
 - `REVIEWED_SOURCE_SHA256` 记录既有人工审核归档，不能当作当前整个仓库的哈希。实际来源以 `build-info.txt` 中的 Git 提交及对应源码为准。

@@ -15,6 +15,7 @@ import 'package:reader_state/reader_state.dart' show DocumentKey;
 import 'package:path/path.dart' as p;
 
 import '../library/library_controller.dart';
+import '../library/library_diagnostics.dart';
 import '../library/score_path_label.dart';
 import '../library/page_count_service.dart';
 import '../songbook/songbook_service.dart';
@@ -322,7 +323,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           !failed) {
         failed = !await _autoSynchronize();
       }
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.autoSync', error, stack);
       failed = true;
     } finally {
       _dailyRunning = false;
@@ -385,7 +387,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         await imports.completeMirror(saved.id);
       } on ImportSaveConflict {
         // This item needs a new name; other confirmed intents may continue.
-      } catch (_) {
+      } catch (error, stack) {
+        logLibraryFailure('sync.pendingImportUpload', error, stack);
         return false;
       }
     }
@@ -415,7 +418,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       return true;
     } on SyncCancelled {
       return true;
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.readerStateProbe', error, stack);
       return false;
     } finally {
       busy = false;
@@ -450,7 +454,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           _selectionNeedsSync;
     } on SyncCancelled {
       return true;
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.statusProbe', error, stack);
       return false;
     } finally {
       busy = false;
@@ -563,7 +568,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       backgroundPausedObjects = activity['paused'] as int? ?? 0;
       backgroundStorageBlocked = activity['storageBlocked'] == true;
       _changed();
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.backgroundActivity', error, stack);
       /* Import/sync reports any protected-storage failure. */
     }
   }
@@ -672,7 +678,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     } catch (failure) {
       // Optional directory metadata must never prevent existing saved ink and
       // setlists from reaching their established reader-state transaction.
-      debugPrint('Songbook metadata exchange deferred (${failure.runtimeType}).');
+      debugPrint(
+        'Songbook metadata exchange deferred (${failure.runtimeType}).',
+      );
       return false;
     }
   }
@@ -736,7 +744,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           }
         }
       };
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.signingWriterInit', error, stack);
       // Another running instance may own the writer lease. Read its committed
       // snapshot through the same current-server/authentication boundary.
     }
@@ -1027,7 +1036,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
             _signingRetryAt = null;
             _signingRetries = 0;
           }
-        } catch (_) {
+        } catch (error, stack) {
+          logLibraryFailure('sync.signingReport', error, stack);
           if (identical(client, _client) && sequence == _signingSequence) {
             if (_signingRetries > 0) {
               _signingRetryAt = DateTime.now().add(
@@ -1189,7 +1199,11 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         ids = directory.idsInFolder(sourceId, folder);
       } else {
         final key = (
-          directory, directory.structureRevision, sourceId, folder, query,
+          directory,
+          directory.structureRevision,
+          sourceId,
+          folder,
+          query,
           withinFolder,
         );
         if (key != _directorySearchKey) {
@@ -1705,10 +1719,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       }
     } on SyncCancelled {
       // Foreground work or suspension retries this uncommitted batch later.
-    } on FileSystemException {
+    } on FileSystemException catch (error, stack) {
+      logLibraryFailure('sync.offlineVerificationRetry', error, stack);
       // Protected data and transient I/O do not revoke the last readable state.
       retryDelay = const Duration(seconds: 5);
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('sync.recoveryCheckpointRetry', error, stack);
       // Preserve local content and the recovery journal if a checkpoint fails.
       retryDelay = const Duration(seconds: 5);
     } finally {
@@ -1756,7 +1772,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       try {
         _decodeSettings(await _settingsFile.readAsString());
         await _settingsFile.copy('${_settingsFile.path}.bak');
-      } catch (_) {
+      } catch (error, stack) {
+        logLibraryFailure('sync.settingsBackupCopy', error, stack);
         // Preserve a valid backup after recovering from a broken primary.
         await _settingsFile.rename('${_settingsFile.path}.corrupt.${_newId()}');
       }
@@ -1949,10 +1966,13 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         if (_disposed || library.rootPath != root) {
           throw const SyncProtocolException('Server changed.', 409);
         }
-        return songbooks.exchange(request, allowed: (key) {
-          final entry = library.snapshot?.entryById(key.entryId);
-          return entry != null && entry.currentRevisionId == key.revisionId;
-        });
+        return songbooks.exchange(
+          request,
+          allowed: (key) {
+            final entry = library.snapshot?.entryById(key.entryId);
+            return entry != null && entry.currentRevisionId == key.revisionId;
+          },
+        );
       };
       started.onPageMetadata = (keys) async {
         final result = <PageMetadataKey, int>{};
@@ -2533,7 +2553,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         message = '批注正在保存，请稍后同步。';
         return;
       }
-      phase = contentPartial || !songbooksSynced ? SyncPhase.partial : SyncPhase.complete;
+      phase = contentPartial || !songbooksSynced
+          ? SyncPhase.partial
+          : SyncPhase.complete;
       message = contentPartial
           ? '部分曲谱未下载，请重试。'
           : !songbooksSynced

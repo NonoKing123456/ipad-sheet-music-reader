@@ -17,6 +17,10 @@ Future<void> idleLibrary(LibraryController library) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  final previousHttp = HttpOverrides.current;
+  setUp(() => HttpOverrides.global = null);
+  tearDown(() => HttpOverrides.global = previousHttp);
   test('app live service stays bound to legacy source while browsing additions; new sources start at zero transfer and a bad selected file does not block saved ink exchange', () async {
     final dir = await Directory.systemTemp.createTemp('multi-app-sync-');
     final controllers = <SyncController>[];
@@ -148,7 +152,8 @@ void main() {
       expect(reader.phase, SyncPhase.partial);
       expect(reader.locateOffline(other.entryId), isNotNull);
       expect(reader.workspace.store.snapshot.strokesFor(page), hasLength(1));
-      expect(reader.message, contains('已保存的批注和曲单交换完成'));
+      // 6c6b6d6 shortened the partial-download message; saved ink is checked above.
+      expect(reader.message, '部分曲谱未下载，请重试。');
       expect(reader.locateOffline(legacyId)!.revisionId, legacy.revisionId);
       expect(p.equals(computer.library.rootPath!, old.path), isTrue);
     } finally {

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 import 'manifest.dart';
+import 'diagnostics.dart' as diagnostics;
 import 'collection_delta.dart';
 
 /// Additive v2 metadata. A known file can have no hash and no downloaded bytes.
@@ -167,9 +168,8 @@ class CollectionDirectoryIndex {
       final folder = p.posix.dirname(item.relativePath);
       (_byFolder[(item.sourceId, folder == '.' ? '' : folder)] ??= [])
           .add(item.entryId);
-      searchText[item.entryId] =
-          PreparedSearchText.physicalPath(
-              '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}');
+      searchText[item.entryId] = PreparedSearchText.physicalPath(
+          '${sourceNames[item.sourceId] ?? ''}/${item.relativePath}');
       update(item, readable[item.entryId], ready);
     }
     availableIds.sort(_compareIds);
@@ -221,7 +221,9 @@ class CollectionDirectoryIndex {
     final descriptor = _descriptors.remove(id);
     if (descriptor == null) return;
     structureRevision++;
-    availableIds.remove(id); missingIds.remove(id); searchText.remove(id);
+    availableIds.remove(id);
+    missingIds.remove(id);
+    searchText.remove(id);
     final folderPath = p.posix.dirname(descriptor.$2);
     _byFolder[(descriptor.$1, folderPath == '.' ? '' : folderPath)]?.remove(id);
     final prior = _contributions.remove(id);
@@ -229,9 +231,14 @@ class CollectionDirectoryIndex {
       readableCount -= prior.$2 ? 1 : 0;
       var folder = folderPath == '.' ? '' : folderPath;
       while (true) {
-        final key = (descriptor.$1, folder), before = _counts[(descriptor.$1, folder)]!;
-        _counts[key] = (before.$1 - 1, before.$2 - (prior.$1 ? 1 : 0),
-          before.$3 - (prior.$2 ? 1 : 0), before.$4 - (prior.$3 ? 1 : 0));
+        final key = (descriptor.$1, folder),
+            before = _counts[(descriptor.$1, folder)]!;
+        _counts[key] = (
+          before.$1 - 1,
+          before.$2 - (prior.$1 ? 1 : 0),
+          before.$3 - (prior.$2 ? 1 : 0),
+          before.$4 - (prior.$3 ? 1 : 0)
+        );
         if (folder.isEmpty) break;
         final slash = folder.lastIndexOf('/');
         folder = slash < 0 ? '' : folder.substring(0, slash);
@@ -431,11 +438,19 @@ class CatalogCollectionSource
 
   @override
   String get catalogVersion => jsonEncode([
-    id, legacyLibraryId,
-    for (final s in bindings()) [s.id, s.name, s.online,
-      s.catalog.rootPath, s.catalog.statePath, s.catalog.snapshot.generation,
-      s.catalog.snapshot.savedUtc.microsecondsSinceEpoch]
-  ]);
+        id,
+        legacyLibraryId,
+        for (final s in bindings())
+          [
+            s.id,
+            s.name,
+            s.online,
+            s.catalog.rootPath,
+            s.catalog.statePath,
+            s.catalog.snapshot.generation,
+            s.catalog.snapshot.savedUtc.microsecondsSinceEpoch
+          ]
+      ]);
 
   @override
   Future<CollectionIndex> index() async {
@@ -507,7 +522,11 @@ class CatalogCollectionSource
       for (final request in valid.entries) {
         try {
           ready[request.key] = await prepareEntry!(request.key, request.value);
-        } catch (_) {/* Preserve the host's legacy coordination contract. */}
+        } catch (error, stack) {
+          diagnostics.reportSwallowedError(
+              'sync.legacyPrepareItem', error, stack);
+          /* Preserve the host's legacy coordination contract. */
+        }
       }
     } else {
       final groups = <LibraryCatalog, Map<String, String>>{};

@@ -160,23 +160,29 @@ class HostScoreImportStore {
 
   /// A durable receipt is sufficient to acknowledge a retried operation. No
   /// upload bytes, existing score hash or source catalogue scan is needed.
-  Future<ScoreImportReceipt?> lookup(String peerId, ScoreImportRequest request) async {
+  Future<ScoreImportReceipt?> lookup(
+      String peerId, ScoreImportRequest request) async {
     final (_, root, _) = await _destination(request);
-    final key = sha256.convert(utf8.encode('$peerId/${request.operationId}')).toString();
+    final key = sha256
+        .convert(utf8.encode('$peerId/${request.operationId}'))
+        .toString();
     final recordPath = p.join(directory, '$key.json');
     assertSafePath(directory, recordPath);
     final record = await readJson(recordPath);
     if (record == null) return null;
-    final fingerprint = sha256.convert(utf8.encode(jsonEncode(request.toJson()))).toString();
+    final fingerprint =
+        sha256.convert(utf8.encode(jsonEncode(request.toJson()))).toString();
     if (record['fingerprint'] != fingerprint ||
         record['root'] != (Platform.isWindows ? root.toLowerCase() : root) ||
         record['collectionId'] != collectionId) {
       throw const ScoreImportFailure('import_operation_conflict', 409);
     }
-    if (record['receipt'] != null) return ScoreImportReceipt.fromJson(asMap(record['receipt']));
+    if (record['receipt'] != null)
+      return ScoreImportReceipt.fromJson(asMap(record['receipt']));
     // The copy was durable but indexing/receipt was interrupted. Finish from
     // the host file through the existing integrity and identity checks.
-    if (record['state'] == 'created') return receive(peerId, request, const Stream.empty());
+    if (record['state'] == 'created')
+      return receive(peerId, request, const Stream.empty());
     return null;
   }
 

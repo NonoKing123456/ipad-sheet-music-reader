@@ -29,6 +29,7 @@ final class CountIo extends IOOverrides {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   test('400 offline targets and repeated snapshot/source-status builds perform zero synchronous filesystem checks', () async {
     final temp = await Directory.systemTemp.createTemp('presentation-400-');
     final library = LibraryController(dataDirectory: temp, watchSource: false);

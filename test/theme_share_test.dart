@@ -7,6 +7,8 @@ import 'package:path/path.dart' as p;
 import 'package:share_plus/share_plus.dart';
 import 'package:score_reader/sharing/score_share.dart';
 import 'package:score_reader/theme/app_theme.dart';
+import 'package:score_reader/theme/tokens.dart';
+import 'package:score_reader/theme/reader_icons.dart';
 import 'package:score_reader/library/page_count_service.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
 
@@ -41,6 +43,63 @@ Future<void> _waitForThemeSaved(
 }
 
 void main() {
+  test('shell theme disables ripple and retains light/dark token surfaces', () {
+    final light = scoreReaderTheme(Brightness.light);
+    final dark = scoreReaderTheme(Brightness.dark);
+    expect(light.splashFactory, NoSplash.splashFactory);
+    expect(dark.splashFactory, NoSplash.splashFactory);
+    expect(light.scaffoldBackgroundColor, ScoreTokens.light.paper1);
+    expect(dark.scaffoldBackgroundColor, ScoreTokens.dark.paper1);
+  });
+
+  test('shell emphasis text colors meet 4.5:1 contrast in both themes', () {
+    final light = scoreReaderTheme(Brightness.light).colorScheme;
+    final dark = scoreReaderTheme(Brightness.dark).colorScheme;
+    for (final (scheme, name) in [(light, 'light'), (dark, 'dark')]) {
+      _expectTextContrast(scheme.primary, scheme.surface, '$name primary text');
+      _expectTextContrast(
+        scheme.secondary,
+        scheme.surface,
+        '$name secondary text',
+      );
+      _expectTextContrast(
+        scheme.tertiary,
+        scheme.surface,
+        '$name tertiary text',
+      );
+      _expectTextContrast(
+        scheme.onPrimary,
+        scheme.primary,
+        '$name primary fill',
+      );
+      _expectTextContrast(
+        scheme.onSecondary,
+        scheme.secondary,
+        '$name secondary fill',
+      );
+      _expectTextContrast(
+        scheme.onTertiary,
+        scheme.tertiary,
+        '$name tertiary fill',
+      );
+      _expectTextContrast(
+        scheme.onPrimaryContainer,
+        scheme.primaryContainer,
+        '$name primary container',
+      );
+      _expectTextContrast(
+        scheme.onSecondaryContainer,
+        scheme.secondaryContainer,
+        '$name secondary container',
+      );
+      _expectTextContrast(
+        scheme.onTertiaryContainer,
+        scheme.tertiaryContainer,
+        '$name tertiary container',
+      );
+    }
+  });
+
   test(
     'appearance defaults to system, persists changes and ignores damaged data',
     () async {
@@ -158,29 +217,29 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('theme-action'))).height,
         greaterThanOrEqualTo(44),
       );
-      IconData actionIcon() =>
+      ReaderGlyph actionIcon() =>
           (tester
                       .widget<IconButton>(
                         find.byKey(const ValueKey('theme-action')),
                       )
                       .icon
-                  as Icon)
-              .icon!;
-      expect(actionIcon(), Icons.dark_mode_outlined);
+                  as ReaderIcon)
+              .glyph;
+      expect(actionIcon(), ReaderGlyph.sun);
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
       await tester.pumpAndSettle();
       expect(controller.mode, ThemeMode.system);
-      expect(actionIcon(), Icons.light_mode_outlined);
+      expect(actionIcon(), ReaderGlyph.moon);
       tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
       await tester.pumpAndSettle();
-      expect(actionIcon(), Icons.dark_mode_outlined);
+      expect(actionIcon(), ReaderGlyph.sun);
       await tester.runAsync(() async {
         await tester.tap(find.byTooltip('切换到浅色'));
         await Future<void>.delayed(const Duration(milliseconds: 20));
       });
       await tester.pumpAndSettle();
       expect(controller.mode, ThemeMode.light);
-      expect(actionIcon(), Icons.light_mode_outlined);
+      expect(actionIcon(), ReaderGlyph.moon);
       expect(
         Theme.of(tester.element(find.byType(Scaffold))).brightness,
         Brightness.light,
@@ -213,7 +272,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         actionIcon(),
-        Icons.dark_mode_outlined,
+        ReaderGlyph.sun,
         reason: 'a click opts out of system mode',
       );
       await tester.tap(find.byKey(const ValueKey('theme-action')));
@@ -331,5 +390,21 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       await tester.binding.setSurfaceSize(null);
     },
+  );
+}
+
+void _expectTextContrast(Color foreground, Color background, String role) {
+  final foregroundLuminance = foreground.computeLuminance();
+  final backgroundLuminance = background.computeLuminance();
+  final lighter = foregroundLuminance > backgroundLuminance
+      ? foregroundLuminance
+      : backgroundLuminance;
+  final darker = foregroundLuminance > backgroundLuminance
+      ? backgroundLuminance
+      : foregroundLuminance;
+  expect(
+    (lighter + 0.05) / (darker + 0.05),
+    greaterThanOrEqualTo(4.5),
+    reason: role,
   );
 }

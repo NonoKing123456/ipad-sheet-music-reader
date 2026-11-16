@@ -9,6 +9,7 @@ import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/directory_navigation.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_screen.dart';
+import 'package:score_reader/library/library_widgets.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
@@ -39,10 +40,13 @@ Future<void> until(WidgetTester tester, bool Function() done) async {
 
 void main() {
   testWidgets(
-    'directory magnifier expands only AppBar, closes to same folder, keeps scope and has full 48px parent and direct refresh',
+    'directory magnifier expands only the header, closes to same folder, keeps scope and has full 48px parent and direct refresh at supported minimum sizes',
     (tester) async {
       final ipad = defaultTargetPlatform == TargetPlatform.iOS;
-      await tester.binding.setSurfaceSize(const Size(390, 844));
+      // Approved v2.1 §3.1: iPad W>=640; Windows client >=720x560.
+      await tester.binding.setSurfaceSize(
+        ipad ? const Size(640, 844) : const Size(720, 560),
+      );
       final dir = (await tester.runAsync(
         () => Directory.systemTemp.createTemp('directory-nav-084-'),
       ))!;
@@ -146,9 +150,21 @@ void main() {
         expect(find.textContaining('已离线 '), findsNothing);
         final parent = find.byKey(const ValueKey('directory-parent-button'));
         expect(tester.getSize(parent).height, 48);
-        expect(find.text('上一级 · Gig'), findsOneWidget);
+        String currentCrumb() => tester
+            .widget<Text>(
+              find.byKey(const ValueKey('directory-breadcrumb-current')),
+            )
+            .data!;
+        expect(currentCrumb(), 'Nested');
+        expect(
+          find.byKey(const ValueKey('directory-breadcrumb-Gig')),
+          findsOneWidget,
+        );
         if (ipad) {
-          await tester.tap(find.byTooltip('更新目录与所选内容'));
+          // ba4cfc6 moved this direct synchronization action to navigation.
+          await tester.tap(find.byTooltip('打开来源'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('立即同步'));
           await tester.pump();
           expect(sync!.refreshes, 1);
           expect(
@@ -156,6 +172,8 @@ void main() {
             findsNothing,
             reason: 'refresh updates directly',
           );
+          await tester.tapAt(const Offset(630, 600));
+          await tester.pumpAndSettle();
         } else {
           await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
           await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
@@ -169,7 +187,7 @@ void main() {
         expect(find.byType(DirectorySearchField), findsOneWidget);
         expect(
           find.descendant(
-            of: find.byType(AppBar),
+            of: find.byWidgetPredicate((w) => w is SizedBox && w.height == 56),
             matching: find.byType(TextField),
           ),
           findsOneWidget,
@@ -177,38 +195,59 @@ void main() {
         expect(find.byType(TextField), findsOneWidget);
         await tester.enterText(find.byType(TextField), 'Blue');
         await tester.pump();
-        expect(find.text('Blue First'), findsOneWidget);
-        expect(find.text('Blue Elsewhere'), findsOneWidget);
-        expect(find.text('Blue OtherSource'), findsOneWidget);
-        await tester.tap(find.byType(Checkbox));
+        Finder result(String title) => find.text(title, findRichText: true);
+        expect(result('Blue First'), findsOneWidget);
+        expect(result('Blue Elsewhere'), findsOneWidget);
+        expect(result('Blue OtherSource'), findsOneWidget);
+        await tester.tap(find.byTooltip('搜索范围'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(CheckedPopupMenuItem<bool>));
+        await tester.pumpAndSettle();
         await tester.pump();
-        expect(find.text('Blue First'), findsOneWidget);
-        expect(find.text('Blue Elsewhere'), findsNothing);
-        expect(find.text('Blue OtherSource'), findsNothing);
+        expect(result('Blue First'), findsOneWidget);
+        expect(result('Blue Elsewhere'), findsNothing);
+        expect(result('Blue OtherSource'), findsNothing);
         await tester.tap(find.byTooltip('关闭搜索'));
         await tester.pump();
         expect(find.byType(TextField), findsNothing);
-        expect(find.text('上一级 · Gig'), findsOneWidget);
+        expect(currentCrumb(), 'Nested');
+        expect(
+          find.byKey(const ValueKey('directory-breadcrumb-Gig')),
+          findsOneWidget,
+        );
         if (!ipad) {
           expect(library.currentFolder, 'Gig/Nested');
           expect(library.query, isEmpty);
         }
-        final rect = tester.getRect(parent);
-        await tester.tapAt(Offset(rect.right - 12, rect.center.dy));
+        await tester.tap(parent);
         await tester.pump();
-        expect(find.text('Nested'), findsOneWidget);
+        expect(currentCrumb(), 'Gig');
         if (!ipad) {
           expect(library.currentFolder, 'Gig');
-          await tester.tap(find.byTooltip('刷新谱库'));
+          await tester.tap(find.byTooltip('打开来源'));
+          await tester.pumpAndSettle();
+          await tester.scrollUntilVisible(
+            find.byTooltip('曲库操作'),
+            160,
+            scrollable: find
+                .descendant(
+                  of: find.byType(LibrarySidebar),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          );
+          await tester.tap(find.byTooltip('曲库操作'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('刷新谱库'));
           await until(tester, () => !library.scanning);
         }
         expect(
           tester.takeException(),
           isNull,
-          reason: '390px layout must not overflow',
+          reason: 'supported minimum layout must not overflow',
         );
         debugPrint(
-          'DIRECTORY_UI_084 platform=${ipad ? 'iPad' : 'Windows'} appbar_search_only=true full_parent48=true scope_cross_source_preserved=true close_restores_folder=true direct_refresh=true narrow390_no_overflow=true',
+          'DIRECTORY_UI_084 platform=${ipad ? 'iPad' : 'Windows'} header_search_only=true full_parent48=true scope_cross_source_preserved=true close_restores_folder=true direct_refresh=true supported_minimum_no_overflow=true',
         );
       } finally {
         await tester.pumpWidget(const SizedBox());

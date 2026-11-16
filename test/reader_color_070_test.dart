@@ -19,6 +19,23 @@ import 'package:score_reader/reader/sharp_pdf_page.dart';
 import 'package:score_reader/reader/reader_tool_button.dart';
 
 const paperLeft = Color(0xffede3b7), paperRight = Color(0xffbee5d4);
+
+Future<void> setReaderTestViewport(
+  WidgetTester tester,
+  Size logicalSize,
+) async {
+  const dpr = 3.0;
+  tester.view.devicePixelRatio = dpr;
+  tester.view.physicalSize = logicalSize * dpr;
+  await tester.binding.setSurfaceSize(logicalSize);
+}
+
+Future<void> resetReaderTestViewport(WidgetTester tester) async {
+  await tester.binding.setSurfaceSize(null);
+  tester.view.resetPhysicalSize();
+  tester.view.resetDevicePixelRatio();
+}
+
 Future<void> until(WidgetTester tester, bool Function() ready) async {
   for (var i = 0; i < 200; i++) {
     await tester.pump(const Duration(milliseconds: 16));
@@ -108,8 +125,9 @@ Future<void> mount(
   ReaderWorkspace workspace,
   ScoreTarget target, {
   PaperColorSampler? sampler,
+  ValueChanged<PageKey>? onPresented,
 }) async {
-  await tester.binding.setSurfaceSize(const Size(810, 1080));
+  await setReaderTestViewport(tester, const Size(810, 1080));
   await tester.runAsync(() async {
     await tester.pumpWidget(
       MaterialApp(
@@ -118,6 +136,7 @@ Future<void> mount(
           locate: (_) => target,
           initialTarget: target,
           colorSampler: sampler,
+          onPresented: onPresented,
           loader: (t) async =>
               LoadedScore(target: t, pageCount: 2, imageAspect: .8),
         ),
@@ -125,29 +144,37 @@ Future<void> mount(
     );
     await Future<void>.delayed(const Duration(milliseconds: 25));
   });
-  await until(tester, () => canvasPage(1).hitTestable().evaluate().isNotEmpty);
+  await until(
+    tester,
+    () =>
+        canvasPage(1).evaluate().isNotEmpty &&
+        workspace.store.readingPosition(target.key)?.pageNumber == 1,
+  );
   await flush(tester, workspace);
 }
 
 Future<void> openTools(WidgetTester tester) async {
-  final buttons = find.byType(ReaderSampleColorButton).hitTestable();
-  if (buttons.evaluate().isEmpty) {
+  // v2 separates showing the reader header from entering annotation mode.
+  if (find.byTooltip('批注').hitTestable().evaluate().isEmpty &&
+      find.byType(ReaderSampleColorButton).hitTestable().evaluate().isEmpty) {
     await tester.tapAt(const Offset(405, 540));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 220));
+    await tester.pumpAndSettle();
   }
+  if (find.byTooltip('批注').hitTestable().evaluate().isNotEmpty) {
+    await tester.tap(find.byTooltip('批注').hitTestable());
+    await tester.pumpAndSettle();
+  }
+  expect(
+    tester.widget<ReaderInput>(find.byType(ReaderInput)).editing,
+    isTrue,
+    reason: 'the fixture must enter real annotation mode before using tools',
+  );
+  expect(find.byType(ReaderSampleColorButton).hitTestable(), findsOneWidget);
 }
 
 Future<void> beginNewSample(WidgetTester tester) async {
-  final button = tester.widget<ReaderSampleColorButton>(
-    find.byType(ReaderSampleColorButton),
-  );
   await tester.tap(find.byType(ReaderSampleColorButton));
   await tester.pumpAndSettle();
-  if (button.sample != null && !button.picking) {
-    await tester.tap(find.text('重新吸色'));
-    await tester.pumpAndSettle();
-  }
 }
 
 void main() {
@@ -192,6 +219,8 @@ void main() {
         );
         expect(workspace.store.snapshot.strokesFor(page), hasLength(1));
         expect(find.byType(PaperColorPickLayer), findsNothing);
+        await tester.tap(find.byKey(const ValueKey(ReaderTool.pen)));
+        await tester.pump();
         box = tester.renderObject<RenderBox>(canvasPage(1));
         final pen = await tester.startGesture(
           box.localToGlobal(Offset(box.size.width * .6, box.size.height * .55)),
@@ -240,8 +269,18 @@ void main() {
         await tester.pumpWidget(const SizedBox());
         await flush(tester, workspace);
         workspace.dispose();
-        await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await resetReaderTestViewport(tester);
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
@@ -279,7 +318,10 @@ void main() {
         );
         expect(tester.widget<AnnotationCanvas>(canvasPage(1)).style.argb, old);
         await start();
-        await tester.tap(find.byTooltip('蓝色'));
+        await tester.tap(find.byTooltip('颜色'));
+        // The gated sample intentionally keeps its progress animation alive.
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.tap(find.byTooltip('颜色 4'));
         await tester.pump();
         final manual = tester
             .widget<AnnotationCanvas>(canvasPage(1))
@@ -298,6 +340,12 @@ void main() {
         await start();
         await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
         await until(tester, () => find.text('2 / 2').evaluate().isNotEmpty);
+        await until(
+          tester,
+          () =>
+              canvasPage(2).evaluate().isNotEmpty &&
+              workspace.store.readingPosition(target.key)?.pageNumber == 2,
+        );
         sampler.release.complete();
         await tester.pump();
         await tester.pump();
@@ -305,6 +353,9 @@ void main() {
           tester.widget<AnnotationCanvas>(canvasPage(2)).style.argb,
           manual,
         );
+        // v2 cancels sampling on page changes as well as rejecting stale results.
+        expect(find.byTooltip('取消吸色'), findsNothing);
+        await tester.pumpAndSettle();
         sampler.fail = true;
         await tester.tap(find.byTooltip('吸取谱面底色'));
         await tester.pump();
@@ -335,8 +386,18 @@ void main() {
         await tester.pumpWidget(const SizedBox());
         await flush(tester, workspace);
         workspace.dispose();
-        await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await resetReaderTestViewport(tester);
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
@@ -384,7 +445,17 @@ void main() {
         expect(sampler.sourceCount, 0);
         transform.dispose();
         workspace.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
   );

@@ -257,3 +257,12 @@
 !/lib/recent/recent_reading_list.dart
 !/lib/recent/recent_reading_store.dart
 !/lib/reader/reader_presentation_policy.dart
+
+# Exact release57 reviewed source/test/tool additions
+!/lib/library/library_diagnostics.dart
+!/packages/library_core/lib/src/diagnostics.dart
+!/packages/library_sync/lib/src/diagnostics.dart
+!/packages/reader_state/lib/src/diagnostics.dart
+!/test/desktop_reader_085_test.dart
+!/test/support/sdk_paths.dart
+!/tools/check.ps1

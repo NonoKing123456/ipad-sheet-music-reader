@@ -404,6 +404,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   Widget _folderDownloadMenu({
+    Key? key,
     required String sourceId,
     required String folder,
   }) {
@@ -412,6 +413,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       folder: folder,
     );
     return PopupMenuButton<String>(
+      key: key,
       style: libraryIconButtonStyle(context),
       constraints: const BoxConstraints.tightFor(width: ScoreLayout.menuWidth),
       tooltip: '文件夹选项',
@@ -501,12 +503,14 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           const [''];
       final folder = folders.contains(_folder) ? _folder : '';
       final searching = _query.trim().isNotEmpty;
-      final entries = _recentOpen ? <LibraryEntry>[] : sync.offlineEntries(
-        sourceId: _activeSourceId,
-        folder: folder,
-        query: _query,
-        withinFolder: _withinFolder,
-      );
+      final entries = _recentOpen
+          ? <LibraryEntry>[]
+          : sync.offlineEntries(
+              sourceId: _activeSourceId,
+              folder: folder,
+              query: _query,
+              withinFolder: _withinFolder,
+            );
       _ensureHierarchy(folders);
       final children = searching ? <String>[] : _hierarchy!.childrenOf(folder);
       final ipad = DeviceLayoutScope.isCompact(context);
@@ -566,18 +570,30 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                         separatorBuilder: (_, _) =>
                                             const SizedBox(width: 8),
                                         itemBuilder: (_, index) {
-                                          if (index == 1 || sync.offlineSources.isEmpty) {
+                                          if (index == 1 ||
+                                              sync.offlineSources.isEmpty) {
                                             return RecentNavigationItem(
                                               compact: true,
                                               selected: _recentOpen,
                                               onTap: _showRecent,
                                             );
                                           }
-                                          final sources = [...sync.offlineSources]
-                                            ..sort((a, b) => a.id == _activeSourceId ? -1 : b.id == _activeSourceId ? 1 : 0);
-                                          final source = sources[index == 0 ? 0 : index - 1];
+                                          final sources =
+                                              [...sync.offlineSources]..sort(
+                                                (a, b) =>
+                                                    a.id == _activeSourceId
+                                                    ? -1
+                                                    : b.id == _activeSourceId
+                                                    ? 1
+                                                    : 0,
+                                              );
+                                          final source =
+                                              sources[index == 0
+                                                  ? 0
+                                                  : index - 1];
                                           final selected =
-                                              !_recentOpen && source.id == _activeSourceId;
+                                              !_recentOpen &&
+                                              source.id == _activeSourceId;
                                           return Center(
                                             child: TextButton(
                                               onPressed: () =>
@@ -621,407 +637,407 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                     child: _recentOpen
                                         ? _recentContent()
                                         : LibraryOutsideTapListener(
-                                      enabled: _searchOpen,
-                                      onTap: () => scheduleMicrotask(() {
-                                        if (mounted &&
-                                            _searchOpen &&
-                                            (ModalRoute.of(context)
-                                                    ?.isCurrent ??
-                                                true)) {
-                                          _closeSearch();
-                                        }
-                                      }),
-                                      child: Column(
-                                        children: [
-                                          if (!wide)
-                                            Padding(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal:
-                                                        ScoreLayout.listMargin,
-                                                  ),
-                                              child: DirectoryBreadcrumbs(
-                                                rootLabel: _sourceName,
-                                                currentPath: folder,
-                                                onNavigate: _selectFolder,
-                                              ),
-                                            ),
-                                          if (searching)
-                                            LibrarySearchContext(
-                                              count: entries.length,
-                                              withinFolder: _withinFolder,
-                                              onScopeChanged: (value) =>
-                                                  setState(
-                                                    () => _withinFolder = value,
-                                                  ),
-                                            ),
-                                          if (sync.initializationError != null)
-                                            _notice(sync.initializationError!),
-                                          if (sync.busy)
-                                            const LinearProgressIndicator(
-                                              minHeight: 2,
-                                            ),
-                                          if (sync.message != null &&
-                                              sync.message !=
-                                                  _dismissedMessage &&
-                                              [
-                                                SyncPhase.partial,
-                                                SyncPhase.failed,
-                                                SyncPhase.cancelled,
-                                              ].contains(sync.phase))
-                                            _notice(
-                                              sync.message!,
-                                              action: TextButton(
-                                                onPressed: sync.busy
-                                                    ? null
-                                                    : () => unawaited(
-                                                        sync.synchronize(),
-                                                      ),
-                                                child: const Text('重试'),
-                                              ),
-                                              dismiss: () => setState(
-                                                () => _dismissedMessage =
-                                                    sync.message,
-                                              ),
-                                            ),
-                                          if (sync.workspace.unsavedCount > 0)
-                                            _notice(
-                                              '${sync.workspace.unsavedCount} 项批注未保存',
-                                              action: TextButton(
-                                                onPressed: () => unawaited(
-                                                  sync.workspace.retryStrokes(),
-                                                ),
-                                                child: const Text('重试保存'),
-                                              ),
-                                            ),
-                                          Expanded(
-                                            child: Padding(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal:
-                                                        ScoreLayout.listMargin,
-                                                  ),
-                                              child: Column(
-                                                children: [
-                                                  const LibraryColumnHeader(),
-                                                  Expanded(
-                                                    child:
-                                                        entries.isEmpty &&
-                                                            children.isEmpty &&
-                                                            hits.isEmpty
-                                                        ? Center(
-                                                            child: Text(
-                                                              searching
-                                                                  ? '未找到曲谱'
-                                                                  : '这个文件夹里还没有曲谱',
-                                                              style: ScoreText
-                                                                  .body
-                                                                  .copyWith(
-                                                                    color: ScoreTokens.of(
-                                                                      context,
-                                                                    ).ink500,
-                                                                  ),
-                                                            ),
-                                                          )
-                                                        : ListView.builder(
-                                                            key: PageStorageKey(
-                                                              (
-                                                                _activeSourceId,
-                                                                folder,
-                                                                _query,
+                                            enabled: _searchOpen,
+                                            onTap: () => scheduleMicrotask(() {
+                                              if (mounted &&
+                                                  _searchOpen &&
+                                                  (ModalRoute.of(context)
+                                                          ?.isCurrent ??
+                                                      true)) {
+                                                _closeSearch();
+                                              }
+                                            }),
+                                            child: Column(
+                                              children: [
+                                                if (!wide)
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal:
+                                                              ScoreLayout
+                                                                  .listMargin,
+                                                        ),
+                                                    child: Row(
+                                                      children: [
+                                                        Expanded(
+                                                          child:
+                                                              DirectoryBreadcrumbs(
+                                                                rootLabel:
+                                                                    _sourceName,
+                                                                currentPath:
+                                                                    folder,
+                                                                onNavigate:
+                                                                    _selectFolder,
                                                               ),
+                                                        ),
+                                                        ?_currentFolderMenu(
+                                                          folder,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                if (searching)
+                                                  LibrarySearchContext(
+                                                    count: entries.length,
+                                                    withinFolder: _withinFolder,
+                                                    onScopeChanged: (value) =>
+                                                        setState(
+                                                          () => _withinFolder =
+                                                              value,
+                                                        ),
+                                                  ),
+                                                if (sync.initializationError !=
+                                                    null)
+                                                  _notice(
+                                                    sync.initializationError!,
+                                                  ),
+                                                if (sync.busy)
+                                                  const LinearProgressIndicator(
+                                                    minHeight: 2,
+                                                  ),
+                                                if (sync.message != null &&
+                                                    sync.message !=
+                                                        _dismissedMessage &&
+                                                    [
+                                                      SyncPhase.partial,
+                                                      SyncPhase.failed,
+                                                      SyncPhase.cancelled,
+                                                    ].contains(sync.phase))
+                                                  _notice(
+                                                    sync.message!,
+                                                    action: TextButton(
+                                                      onPressed: sync.busy
+                                                          ? null
+                                                          : () => unawaited(
+                                                              sync.synchronize(),
                                                             ),
-                                                            padding:
-                                                                EdgeInsets.zero,
-                                                            itemCount:
-                                                                entries.length +
-                                                                children
-                                                                    .length +
-                                                                (searching
-                                                                    ? 2 + hits.length
-                                                                    : 0),
-                                                            itemBuilder: (context, index) {
-                                                              if (searching) {
-                                                                if (index ==
-                                                                    0) {
-                                                                  return songbookResultHeading(
-                                                                    context,
-                                                                    '独立文件 · ${entries.length}',
-                                                                  );
-                                                                }
-                                                                index--;
-                                                                if (index ==
-                                                                    entries
-                                                                        .length) {
-                                                                  return songbookResultHeading(
-                                                                    context,
-                                                                    '谱本内曲目 · ${hits.length}',
-                                                                  );
-                                                                }
-                                                                if (index >
-                                                                    entries
-                                                                        .length) {
-                                                                  final hit =
-                                                                      hits[index -
-                                                                          entries
-                                                                              .length -
-                                                                          1];
-                                                                  final entry = sync
-                                                                      .offlineSnapshot!
-                                                                      .entryById(
-                                                                        hit
-                                                                            .key
-                                                                            .entryId,
-                                                                      )!;
-                                                                  return SongbookSearchResultRow(
-                                                                    hit: hit,
-                                                                    pathLabel:
-                                                                        '${sync.sourceNameFor(entry.id)} / ${entry.relativePath}',
-                                                                    onOpen: () {
-                                                                      if (!hit
-                                                                          .item
-                                                                          .canNavigate) {
-                                                                        ScaffoldMessenger.of(
-                                                                          context,
-                                                                        ).showSnackBar(
-                                                                          const SnackBar(
-                                                                            content: Text(
-                                                                              '文件已更新，请打开目录核对 PDF 页码。',
-                                                                            ),
-                                                                          ),
-                                                                        );
-                                                                        return;
-                                                                      }
-                                                                      unawaited(
-                                                                        _open(
-                                                                          entry,
-                                                                          pageNumber: hit
-                                                                              .item
-                                                                              .pageNumber,
-                                                                          expectedRevisionId: hit
-                                                                              .key
-                                                                              .revisionId,
-                                                                        ),
-                                                                      );
-                                                                    },
-                                                                  );
-                                                                }
-                                                              }
-                                                              if (index <
+                                                      child: const Text('重试'),
+                                                    ),
+                                                    dismiss: () => setState(
+                                                      () => _dismissedMessage =
+                                                          sync.message,
+                                                    ),
+                                                  ),
+                                                if (sync
+                                                        .workspace
+                                                        .unsavedCount >
+                                                    0)
+                                                  _notice(
+                                                    '${sync.workspace.unsavedCount} 项批注未保存',
+                                                    action: TextButton(
+                                                      onPressed: () =>
+                                                          unawaited(
+                                                            sync.workspace
+                                                                .retryStrokes(),
+                                                          ),
+                                                      child: const Text('重试保存'),
+                                                    ),
+                                                  ),
+                                                Expanded(
+                                                  child: Padding(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal:
+                                                              ScoreLayout
+                                                                  .listMargin,
+                                                        ),
+                                                    child: Column(
+                                                      children: [
+                                                        const LibraryColumnHeader(),
+                                                        Expanded(
+                                                          child:
+                                                              entries.isEmpty &&
                                                                   children
-                                                                      .length) {
-                                                                final child =
-                                                                    children[index];
-                                                                final status = sync
-                                                                    .folderOfflineStatus(
-                                                                      sourceId:
-                                                                          _activeSourceId!,
-                                                                      folder:
-                                                                          child,
-                                                                    );
-                                                                return LibraryFileRow(
-                                                                  key: ValueKey(
-                                                                    'offline-library-folder-$child',
-                                                                  ),
-                                                                  leading:
-                                                                      _OfflineFolderIcon(
-                                                                        status:
-                                                                            status,
-                                                                      ),
-                                                                  name: p.posix
-                                                                      .basename(
-                                                                        child,
-                                                                      ),
-                                                                  subtitle:
-                                                                      '${status.total} 项',
-                                                                  action: _folderDownloadMenu(
-                                                                    sourceId:
-                                                                        _activeSourceId!,
-                                                                    folder:
-                                                                        child,
-                                                                  ),
-                                                                  onTap: () =>
-                                                                      _selectFolder(
-                                                                        child,
-                                                                      ),
-                                                                );
-                                                              }
-                                                              final entry =
-                                                                  entries[index -
-                                                                      children
-                                                                          .length];
-                                                              final ready =
-                                                                  entry
-                                                                      .availability ==
-                                                                  ContentAvailability
-                                                                      .ready;
-                                                              final pending =
-                                                                  ready &&
-                                                                  sync.hasPendingVersion(
-                                                                    entry.id,
-                                                                  );
-                                                              return LibraryFileRow(
-                                                                key: ValueKey(
-                                                                  'offline-library-file-${entry.id}',
-                                                                ),
-                                                                leading: _OfflineStatusIcon(
-                                                                  availability:
-                                                                      entry
-                                                                          .availability,
-                                                                  pendingVersion:
-                                                                      pending,
-                                                                  path: entry
-                                                                      .relativePath,
-                                                                ),
-                                                                name: physicalFileDisplayName(
-                                                                  p.posix.basename(entry.relativePath),
-                                                                ),
-                                                                query: searching
-                                                                    ? _query
-                                                                    : '',
-                                                                subtitle:
+                                                                      .isEmpty &&
+                                                                  hits.isEmpty
+                                                              ? Center(
+                                                                  child: Text(
                                                                     searching
-                                                                    ? '${sync.sourceNameFor(entry.id)} / ${scoreParentFolder(entry.relativePath)}'
-                                                                    : null,
-                                                                metadata: LibraryFileMetadata(
-                                                                  entryId:
-                                                                      entry.id,
-                                                                  revisionId: entry
-                                                                      .currentRevisionId,
-                                                                  path: entry
-                                                                      .relativePath,
-                                                                  service: sync
-                                                                      .pageCounts,
-                                                                ),
-                                                                action: Builder(
-                                                                  builder: (shareContext) => PopupMenuButton<String>(
-                                                                    style:
-                                                                        libraryIconButtonStyle(
+                                                                        ? '未找到曲谱'
+                                                                        : '这个文件夹里还没有曲谱',
+                                                                    style: ScoreText
+                                                                        .body
+                                                                        .copyWith(
+                                                                          color: ScoreTokens.of(
+                                                                            context,
+                                                                          ).ink500,
+                                                                        ),
+                                                                  ),
+                                                                )
+                                                              : ListView.builder(
+                                                                  key: PageStorageKey((
+                                                                    _activeSourceId,
+                                                                    folder,
+                                                                    _query,
+                                                                  )),
+                                                                  padding:
+                                                                      EdgeInsets
+                                                                          .zero,
+                                                                  itemCount:
+                                                                      entries
+                                                                          .length +
+                                                                      children
+                                                                          .length +
+                                                                      (searching
+                                                                          ? 2 + hits.length
+                                                                          : 0),
+                                                                  itemBuilder: (context, index) {
+                                                                    if (searching) {
+                                                                      if (index ==
+                                                                          0) {
+                                                                        return songbookResultHeading(
                                                                           context,
+                                                                          '独立文件 · ${entries.length}',
+                                                                        );
+                                                                      }
+                                                                      index--;
+                                                                      if (index ==
+                                                                          entries
+                                                                              .length) {
+                                                                        return songbookResultHeading(
+                                                                          context,
+                                                                          '谱本内曲目 · ${hits.length}',
+                                                                        );
+                                                                      }
+                                                                      if (index >
+                                                                          entries
+                                                                              .length) {
+                                                                        final hit =
+                                                                            hits[index -
+                                                                                entries.length -
+                                                                                1];
+                                                                        final entry = sync
+                                                                            .offlineSnapshot!
+                                                                            .entryById(
+                                                                              hit.key.entryId,
+                                                                            )!;
+                                                                        return SongbookSearchResultRow(
+                                                                          hit:
+                                                                              hit,
+                                                                          pathLabel:
+                                                                              '${sync.sourceNameFor(entry.id)} / ${entry.relativePath}',
+                                                                          onOpen: () {
+                                                                            if (!hit.item.canNavigate) {
+                                                                              ScaffoldMessenger.of(
+                                                                                context,
+                                                                              ).showSnackBar(
+                                                                                const SnackBar(
+                                                                                  content: Text(
+                                                                                    '文件已更新，请打开目录核对 PDF 页码。',
+                                                                                  ),
+                                                                                ),
+                                                                              );
+                                                                              return;
+                                                                            }
+                                                                            unawaited(
+                                                                              _open(
+                                                                                entry,
+                                                                                pageNumber: hit.item.pageNumber,
+                                                                                expectedRevisionId: hit.key.revisionId,
+                                                                              ),
+                                                                            );
+                                                                          },
+                                                                        );
+                                                                      }
+                                                                    }
+                                                                    if (index <
+                                                                        children
+                                                                            .length) {
+                                                                      final child =
+                                                                          children[index];
+                                                                      final status = sync.folderOfflineStatus(
+                                                                        sourceId:
+                                                                            _activeSourceId!,
+                                                                        folder:
+                                                                            child,
+                                                                      );
+                                                                      return LibraryFileRow(
+                                                                        key: ValueKey(
+                                                                          'offline-library-folder-$child',
                                                                         ),
-                                                                    constraints:
-                                                                        const BoxConstraints.tightFor(
-                                                                          width:
-                                                                              ScoreLayout.menuWidth,
+                                                                        leading: _OfflineFolderIcon(
+                                                                          status:
+                                                                              status,
                                                                         ),
-                                                                    tooltip:
-                                                                        '曲谱选项',
-                                                                    icon: const ReaderIcon(
-                                                                      ReaderGlyph
-                                                                          .more,
-                                                                    ),
-                                                                    padding:
-                                                                        EdgeInsets
-                                                                            .zero,
-                                                                    enabled: !_sharingEntries
-                                                                        .contains(
+                                                                        name: p
+                                                                            .posix
+                                                                            .basename(
+                                                                              child,
+                                                                            ),
+                                                                        subtitle:
+                                                                            '${status.total} 项',
+                                                                        action: _folderDownloadMenu(
+                                                                          sourceId:
+                                                                              _activeSourceId!,
+                                                                          folder:
+                                                                              child,
+                                                                        ),
+                                                                        onTap: () =>
+                                                                            _selectFolder(
+                                                                              child,
+                                                                            ),
+                                                                      );
+                                                                    }
+                                                                    final entry =
+                                                                        entries[index -
+                                                                            children.length];
+                                                                    final ready =
+                                                                        entry
+                                                                            .availability ==
+                                                                        ContentAvailability
+                                                                            .ready;
+                                                                    final pending =
+                                                                        ready &&
+                                                                        sync.hasPendingVersion(
                                                                           entry
                                                                               .id,
+                                                                        );
+                                                                    return LibraryFileRow(
+                                                                      key: ValueKey(
+                                                                        'offline-library-file-${entry.id}',
+                                                                      ),
+                                                                      leading: _OfflineStatusIcon(
+                                                                        availability:
+                                                                            entry.availability,
+                                                                        pendingVersion:
+                                                                            pending,
+                                                                        path: entry
+                                                                            .relativePath,
+                                                                      ),
+                                                                      name: physicalFileDisplayName(
+                                                                        p.posix.basename(
+                                                                          entry
+                                                                              .relativePath,
                                                                         ),
-                                                                    onSelected: (value) {
-                                                                      if (value ==
-                                                                          'add') {
-                                                                        unawaited(
-                                                                          showAddToSetList(
+                                                                      ),
+                                                                      query:
+                                                                          searching
+                                                                          ? _query
+                                                                          : '',
+                                                                      subtitle:
+                                                                          searching
+                                                                          ? '${sync.sourceNameFor(entry.id)} / ${scoreParentFolder(entry.relativePath)}'
+                                                                          : null,
+                                                                      metadata: LibraryFileMetadata(
+                                                                        entryId:
+                                                                            entry.id,
+                                                                        revisionId:
+                                                                            entry.currentRevisionId,
+                                                                        path: entry
+                                                                            .relativePath,
+                                                                        service:
+                                                                            sync.pageCounts,
+                                                                      ),
+                                                                      action: Builder(
+                                                                        builder: (shareContext) => PopupMenuButton<String>(
+                                                                          style: libraryIconButtonStyle(
                                                                             context,
-                                                                            workspace:
-                                                                                sync.workspace,
-                                                                            entryId:
-                                                                                entry.id,
-                                                                            displayPath:
-                                                                                entry.relativePath,
                                                                           ),
-                                                                        );
-                                                                      } else if (value ==
-                                                                          'location') {
-                                                                        _pathDetails(
-                                                                          entry,
-                                                                        );
-                                                                      } else {
-                                                                        unawaited(
-                                                                          value ==
-                                                                                  'share'
-                                                                              ? _shareEntry(shareContext, entry)
-                                                                              : value == 'download'
-                                                                              ? _download(entry: entry)
-                                                                              : value == 'remove'
-                                                                              ? sync.removeOfflineDownload(entry.id)
-                                                                              : sync.selectOffline(
-                                                                                  OfflineRule(sourceId: sync.sourceIdFor(entry.id)!, entryId: entry.id, selected: false),
+                                                                          constraints: const BoxConstraints.tightFor(
+                                                                            width:
+                                                                                ScoreLayout.menuWidth,
+                                                                          ),
+                                                                          tooltip: '曲谱选项',
+                                                                          icon: const ReaderIcon(
+                                                                            ReaderGlyph.more,
+                                                                          ),
+                                                                          padding:
+                                                                              EdgeInsets.zero,
+                                                                          enabled: !_sharingEntries.contains(
+                                                                            entry.id,
+                                                                          ),
+                                                                          onSelected: (value) {
+                                                                            if (value ==
+                                                                                'add') {
+                                                                              unawaited(
+                                                                                showAddToSetList(
+                                                                                  context,
+                                                                                  workspace: sync.workspace,
+                                                                                  entryId: entry.id,
+                                                                                  displayPath: entry.relativePath,
                                                                                 ),
-                                                                        );
-                                                                      }
-                                                                    },
-                                                                    itemBuilder: (_) => [
-                                                                      const PopupMenuItem(
-                                                                        value: 'add',
-                                                                        child:
-                                                                            Text(
-                                                                              '加入曲单',
-                                                                            ),
-                                                                      ),
-                                                                      PopupMenuItem(
-                                                                        value: 'share',
-                                                                        enabled:
-                                                                            ready,
-                                                                        child: Text(
-                                                                          ready
-                                                                              ? '分享'
-                                                                              : '下载后可分享',
-                                                                        ),
-                                                                      ),
-                                                                      const PopupMenuItem(
-                                                                        value: 'location',
-                                                                        child:
-                                                                            Text(
-                                                                              '查看位置',
-                                                                            ),
-                                                                      ),
-                                                                      if (!ready ||
-                                                                          pending)
-                                                                        PopupMenuItem(
-                                                                          value: 'download',
-                                                                          child: Text(
-                                                                            pending
-                                                                                ? '更新下载'
-                                                                                : '下载到 iPad',
-                                                                          ),
-                                                                        ),
-                                                                      const PopupMenuItem(
-                                                                        value: 'unselect',
-                                                                        child:
-                                                                            Text(
-                                                                              '取消离线选择',
-                                                                            ),
-                                                                      ),
-                                                                      if (ready)
-                                                                        const PopupMenuItem(
-                                                                          value: 'remove',
-                                                                          child:
-                                                                              Text(
-                                                                                '移除本机下载',
+                                                                              );
+                                                                            } else if (value ==
+                                                                                'location') {
+                                                                              _pathDetails(
+                                                                                entry,
+                                                                              );
+                                                                            } else {
+                                                                              unawaited(
+                                                                                value ==
+                                                                                        'share'
+                                                                                    ? _shareEntry(shareContext, entry)
+                                                                                    : value == 'download'
+                                                                                    ? _download(entry: entry)
+                                                                                    : value == 'remove'
+                                                                                    ? sync.removeOfflineDownload(entry.id)
+                                                                                    : sync.selectOffline(
+                                                                                        OfflineRule(sourceId: sync.sourceIdFor(entry.id)!, entryId: entry.id, selected: false),
+                                                                                      ),
+                                                                              );
+                                                                            }
+                                                                          },
+                                                                          itemBuilder: (_) => [
+                                                                            const PopupMenuItem(
+                                                                              value: 'add',
+                                                                              child: Text(
+                                                                                '加入曲单',
                                                                               ),
+                                                                            ),
+                                                                            PopupMenuItem(
+                                                                              value: 'share',
+                                                                              enabled: ready,
+                                                                              child: Text(
+                                                                                ready ? '分享' : '下载后可分享',
+                                                                              ),
+                                                                            ),
+                                                                            const PopupMenuItem(
+                                                                              value: 'location',
+                                                                              child: Text(
+                                                                                '查看位置',
+                                                                              ),
+                                                                            ),
+                                                                            if (!ready ||
+                                                                                pending)
+                                                                              PopupMenuItem(
+                                                                                value: 'download',
+                                                                                child: Text(
+                                                                                  pending ? '更新下载' : '下载到 iPad',
+                                                                                ),
+                                                                              ),
+                                                                            const PopupMenuItem(
+                                                                              value: 'unselect',
+                                                                              child: Text(
+                                                                                '取消离线选择',
+                                                                              ),
+                                                                            ),
+                                                                            if (ready)
+                                                                              const PopupMenuItem(
+                                                                                value: 'remove',
+                                                                                child: Text(
+                                                                                  '移除本机下载',
+                                                                                ),
+                                                                              ),
+                                                                          ],
                                                                         ),
-                                                                    ],
-                                                                  ),
-                                                                ),
-                                                                onTap: () =>
-                                                                    unawaited(
-                                                                      _open(
-                                                                        entry,
                                                                       ),
-                                                                    ),
-                                                              );
-                                                            },
-                                                          ),
+                                                                      onTap: () =>
+                                                                          unawaited(
+                                                                            _open(
+                                                                              entry,
+                                                                            ),
+                                                                          ),
+                                                                    );
+                                                                  },
+                                                                ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
-                                                ],
-                                              ),
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                        ],
-                                      ),
-                                    ),
                                   ),
                                 ],
                               ),
@@ -1051,7 +1067,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       _searchOpen = false;
     });
     _searchFocus.unfocus();
-    if (navigationContext != null && Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
+    if (navigationContext != null &&
+        Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
       Navigator.pop(navigationContext);
     }
   }
@@ -1071,12 +1088,15 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       final sources = sync.offlineSources;
       final sourceName = sync.activeCollection != null
           ? sync.sourceNameFor(entry.id)
-          : sources.isEmpty ? '谱库' : sources.first.name;
+          : sources.isEmpty
+          ? '谱库'
+          : sources.first.name;
       return RecentDisplay(
         entry.relativePath,
         '$sourceName · ${scoreParentFolder(entry.relativePath)}',
         entry.availability == ContentAvailability.ready
-            ? RecentAvailability.ready : RecentAvailability.cloud,
+            ? RecentAvailability.ready
+            : RecentAvailability.cloud,
         revisionId: entry.currentRevisionId,
       );
     },
@@ -1110,7 +1130,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
               ],
               Expanded(
                 child: _recentOpen
-                    ? Text('最近阅读', style: ScoreText.title.copyWith(color: ScoreTokens.of(context).ink900))
+                    ? Text(
+                        '最近阅读',
+                        style: ScoreText.title.copyWith(
+                          color: ScoreTokens.of(context).ink900,
+                        ),
+                      )
                     : _searchOpen
                     ? DirectorySearchField(
                         controller: _search,
@@ -1154,10 +1179,28 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                 const SizedBox(width: 8),
                 _deviceSummary(compact: true),
               ],
+              if (wide) ?_currentFolderMenu(folder),
             ],
           ),
         ),
       );
+
+  /// Download action for the folder being browsed, the source root included.
+  /// It sits beside the breadcrumbs: in the header when wide, otherwise in
+  /// the narrow breadcrumb row, so it never crowds the compact header.
+  Widget? _currentFolderMenu(String folder) =>
+      !_recentOpen &&
+          _activeSourceId != null &&
+          widget.controller.needsOfflineDownload(
+            sourceId: _activeSourceId!,
+            folder: folder,
+          )
+      ? _folderDownloadMenu(
+          key: const ValueKey('offline-current-folder-menu'),
+          sourceId: _activeSourceId!,
+          folder: folder,
+        )
+      : null;
 
   Widget _deviceSummary({bool compact = false}) {
     final sync = widget.controller;

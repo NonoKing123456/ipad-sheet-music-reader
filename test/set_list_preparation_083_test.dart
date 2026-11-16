@@ -31,6 +31,46 @@ Future<void> _until083(WidgetTester tester, bool Function() done) async {
   await tester.pump();
 }
 
+Future<void> _catalogStatus083(
+  WidgetTester tester,
+  String title,
+  String status,
+) async {
+  // v2 §11 keeps the header to title/count; the existing add picker reports
+  // each item's preparation state, including already included items.
+  await tester.tap(find.text('添加曲谱'));
+  await tester.pumpAndSettle();
+  expect(
+    find.descendant(
+      of: find.widgetWithText(ListTile, title),
+      matching: find.textContaining(status),
+    ),
+    findsOneWidget,
+  );
+  await tester.tap(find.text('完成'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _cleanup083(WidgetTester tester, Directory dir) async {
+  final clock = Stopwatch()..start();
+  var removed = false;
+  while (!removed) {
+    await tester.pump();
+    await tester.runAsync(() async {
+      try {
+        await dir.delete(recursive: true);
+        removed = true;
+      } on FileSystemException catch (error) {
+        if (error.osError?.errorCode != 32 ||
+            clock.elapsed >= const Duration(seconds: 2)) {
+          rethrow;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+    });
+  }
+}
+
 void main() {
   testWidgets(
     'Windows metadata-only scores can be named and added before opening; explicit set-list preparation hashes only its targets',
@@ -93,10 +133,10 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('添加曲谱'));
         await tester.pumpAndSettle();
-        expect(find.text('A.PNG'), findsOneWidget);
-        expect(find.text('B.PNG'), findsOneWidget);
+        expect(find.text('A'), findsOneWidget);
+        expect(find.text('B'), findsOneWidget);
         expect(find.textContaining('待准备'), findsWidgets);
-        await tester.tap(find.text('A.PNG'));
+        await tester.tap(find.text('A'));
         await _until083(
           tester,
           () =>
@@ -108,7 +148,8 @@ void main() {
         );
         await tester.tap(find.text('完成'));
         await tester.pumpAndSettle();
-        expect(find.textContaining('1 份未准备'), findsOneWidget);
+        expect(find.text('1 首 · 按演出顺序排列'), findsOneWidget);
+        await _catalogStatus083(tester, 'A', '待准备');
         expect(find.byType(LibraryReaderScreen), findsNothing);
         await tester.tap(find.text('准备本曲单'));
         await tester.pumpAndSettle();
@@ -138,7 +179,7 @@ void main() {
               .entryId,
           a.id,
         );
-        expect(find.textContaining('0 份未准备'), findsOneWidget);
+        await _catalogStatus083(tester, 'A', '已准备');
         expect(find.text('准备本曲单'), findsNothing);
         expect(find.byType(LibraryReaderScreen), findsNothing);
         expect(tester.takeException(), isNull);
@@ -150,7 +191,7 @@ void main() {
         await tester.runAsync(() => workspace.flushPositions());
         workspace.dispose();
         library.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await _cleanup083(tester, dir);
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
@@ -240,6 +281,9 @@ void main() {
             OfflineRule(sourceId: b.sourceId, folder: 'other', selected: true),
           ),
         );
+        // Release 49 schedules this selected folder automatically. Pause that
+        // separate job so this test measures only explicit set-list preparation.
+        reader.cancel();
         final rulesBefore = jsonEncode(reader.collection!.selection.toJson());
         await tester.pumpWidget(
           MaterialApp(
@@ -252,22 +296,43 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('添加曲谱'));
         await tester.pumpAndSettle();
-        expect(find.text('A.PNG'), findsOneWidget);
-        expect(find.text('B.PNG'), findsOneWidget);
-        expect(find.text('C.PNG'), findsOneWidget);
-        for (var i = 1; i <= 2; i++) {
-          await tester.tap(find.text('A.PNG'));
-          await _until083(
-            tester,
-            () =>
-                reader.workspace.store.snapshot
-                    .setListById(list.id)!
-                    .activeItems
-                    .length ==
-                i,
-          );
-        }
-        await tester.tap(find.text('C.PNG'));
+        expect(find.text('A'), findsOneWidget);
+        expect(find.text('B'), findsOneWidget);
+        expect(find.text('C'), findsOneWidget);
+        await tester.tap(find.text('A'));
+        await _until083(
+          tester,
+          () =>
+              reader.workspace.store.snapshot
+                  .setListById(list.id)!
+                  .activeItems
+                  .length ==
+              1,
+        );
+        await tester.tap(find.text('A'));
+        await _until083(tester, () => !reader.workspace.saving);
+        expect(
+          reader.workspace.store.snapshot.setListById(list.id)!.activeItems,
+          hasLength(1),
+          reason: 'v2 §11: adding an included score again creates no duplicate',
+        );
+        // Retain coverage for duplicate entries in an existing legacy list:
+        // the current picker cannot create them, but preparation must dedupe them.
+        await tester.runAsync(
+          () => reader.workspace.edit(
+            (store) => store.addItem(list.id, a.entryId),
+          ),
+        );
+        await _until083(
+          tester,
+          () =>
+              reader.workspace.store.snapshot
+                  .setListById(list.id)!
+                  .activeItems
+                  .length ==
+              2,
+        );
+        await tester.tap(find.text('C'));
         await _until083(
           tester,
           () =>
@@ -282,12 +347,14 @@ void main() {
         await tester.pumpAndSettle();
         await _until083(
           tester,
-          () => find.textContaining('2 份未准备').evaluate().isNotEmpty,
+          () => find.text('3 首 · 按演出顺序排列').evaluate().isNotEmpty,
         );
         debugPrint(
           'SET_CATALOG_INITIAL_083 unique=${reader.workspace.store.snapshot.setListById(list.id)!.activeItems.map((i) => i.entryId).toSet().length} states=${reader.offlineScoreCatalog.map((e) => e.state.name).join(',')} summaries=${tester.widgetList<Text>(find.byType(Text)).map((t) => t.data).whereType<String>().where((t) => t.contains('未准备')).join('|')}',
         );
-        expect(find.textContaining('2 份未准备'), findsOneWidget);
+        expect(find.text('3 首 · 按演出顺序排列'), findsOneWidget);
+        await _catalogStatus083(tester, 'A', '未下载');
+        await _catalogStatus083(tester, 'C', '未下载');
         expect(find.textContaining('暂时缺失'), findsNothing);
         expect(find.textContaining('Scores · show'), findsWidgets);
         await tester.runAsync(() async {
@@ -313,6 +380,7 @@ void main() {
               !reader.busy &&
               reader.offlineCount == 1,
         );
+        reader.cancel();
         expect(reader.collection!.readableItemFor(b.entryId), isNull);
         expect(reader.collection!.selection.includes(b), isTrue);
         expect(
@@ -321,14 +389,14 @@ void main() {
               .state,
           ScoreContentState.missing,
         );
-        expect(find.text('C.PNG'), findsOneWidget);
-        expect(find.textContaining('源曲谱缺失'), findsWidgets);
-        expect(find.textContaining('1 份未准备'), findsOneWidget);
+        expect(find.text('C'), findsOneWidget);
+        await _catalogStatus083(tester, 'C', '源曲谱缺失');
+        expect(find.textContaining('本曲单仍有1份未准备'), findsOneWidget);
         expect(
           reader.workspace.store.snapshot.setListById(list.id)!.activeItems,
           hasLength(3),
         );
-        await tester.binding.setSurfaceSize(const Size(390, 844));
+        await tester.binding.setSurfaceSize(const Size(640, 844));
         await tester.pump();
         expect(
           tester.takeException(),
@@ -395,6 +463,7 @@ void main() {
               .then((_) => refreshed = true),
         );
         await _until083(tester, () => refreshed);
+        reader.cancel();
         expect(
           reader.offlineScoreCatalog
               .singleWhere((entry) => entry.entryId == a.entryId)
@@ -402,8 +471,8 @@ void main() {
           ScoreContentState.readableOld,
         );
         expect(reader.locateOffline(a.entryId)!.revisionId, oldRevision);
-        expect(find.textContaining('旧版可读'), findsWidgets);
-        await tester.tap(find.text('A.PNG').first);
+        await _catalogStatus083(tester, 'A', '旧版可读');
+        await tester.tap(find.text('A').first);
         await _until083(
           tester,
           () =>

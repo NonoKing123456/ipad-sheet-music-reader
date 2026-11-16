@@ -85,7 +85,9 @@ void main() {
       expect(reader.hasUnsavedEdits, isTrue);
       final remoteGeneration = computer.workspace.store.snapshot.generation;
       await reader.synchronize();
-      expect(reader.message, contains('没有开始同步'));
+      // Match the current production copy; the assertions below prove the
+      // unsaved operation still prevents any peer mutation until retry.
+      expect(reader.message, '批注未保存，请先重试保存。');
       expect(computer.workspace.store.snapshot.generation, remoteGeneration);
       expect(computer.workspace.store.snapshot.strokesFor(page), hasLength(1));
       await File(stateDirectory.path).delete();

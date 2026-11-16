@@ -15,7 +15,7 @@ import 'package:score_reader/reader/reader_stage.dart';
 import 'package:score_reader/reader/desktop_reader.dart';
 
 import 'reader_fixture.dart';
-import 'desktop_reader_fixture.dart' show desktopUntil, desktopSettle;
+import 'desktop_reader_085_test.dart' show desktopUntil, desktopSettle;
 
 class _DesktopPicker extends FileSelectorPlatform {
   String? path;
@@ -29,7 +29,7 @@ class _DesktopPicker extends FileSelectorPlatform {
 
 void main() {
   testWidgets(
-    'main initial path and chooser reuse registered PageKey; true external file uses the same read-only reader without new notes or bookmarks',
+    'main initial path and chooser reuse registered PageKey; external file becomes an import draft without changing registered notes or catalog',
     (tester) async {
       await tester.binding.setSurfaceSize(const Size(1360, 900));
       final dir = (await tester.runAsync(
@@ -102,10 +102,12 @@ void main() {
         );
         expect(find.byType(DesktopReaderShell), findsOneWidget);
         expect(find.byType(ReaderScreen), findsNothing);
-        await tester.tap(find.byTooltip('返回目录'));
+        await tester.tap(find.byTooltip('返回曲库'));
         await desktopSettle(tester);
         picker.path = known;
-        await tester.tap(find.byTooltip('打开单份曲谱'));
+        await tester.tap(find.byTooltip('曲库操作'));
+        await desktopSettle(tester);
+        await tester.tap(find.text('打开单份曲谱'));
         await desktopUntil(
           tester,
           () => find.byType(LibraryReaderScreen).evaluate().isNotEmpty,
@@ -115,23 +117,36 @@ void main() {
           reader().workspace.store.snapshot.strokesFor(expected),
           hasLength(1),
         );
-        await tester.tap(find.byTooltip('返回目录'));
+        await tester.tap(find.byTooltip('返回曲库'));
         await desktopSettle(tester);
         picker.path = outside;
-        await tester.tap(find.byTooltip('打开单份曲谱'));
+        await tester.tap(find.byTooltip('曲库操作'));
+        await desktopSettle(tester);
+        await tester.tap(find.text('打开单份曲谱'));
         await desktopUntil(
           tester,
           () =>
               find.byType(LibraryReaderScreen).evaluate().isNotEmpty &&
-              !reader().allowAnnotations,
+              reader().initialTarget.entryId.startsWith('import-'),
         );
         await desktopSettle(tester);
         expect(find.byType(DesktopReaderShell), findsOneWidget);
         expect(find.byType(ReaderScreen), findsNothing);
-        expect(find.widgetWithText(OutlinedButton, '批注'), findsNothing);
+        await desktopUntil(
+          tester,
+          () =>
+              reader().workspace.store.readingPosition(
+                reader().initialTarget.key,
+              ) !=
+              null,
+        );
+        expect(find.byTooltip('批注'), findsOneWidget);
+        expect(reader().allowAnnotations, isTrue);
         expect(
-          reader().workspace.store.readingPosition(reader().initialTarget.key),
-          isNull,
+          reader().workspace.store
+              .readingPosition(reader().initialTarget.key)!
+              .pageNumber,
+          1,
         );
         expect(
           reader().workspace.store.snapshot.strokesFor(expected),

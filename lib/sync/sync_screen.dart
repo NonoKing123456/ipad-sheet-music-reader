@@ -637,6 +637,7 @@ class _SyncScreenState extends State<SyncScreen> {
   );
 
   Widget _diagnostics(SyncController sync) => ExpansionTile(
+    key: const PageStorageKey('device-sync-diagnostics'),
     onExpansionChanged: (value) => setState(() => _diagnosticsOpen = value),
     trailing: ReaderIcon(
       _diagnosticsOpen ? ReaderGlyph.chevronUp : ReaderGlyph.chevronDown,
@@ -654,6 +655,7 @@ class _SyncScreenState extends State<SyncScreen> {
           ),
       ],
       TextField(
+        key: const PageStorageKey('device-sync-address'),
         controller: _address,
         enabled: !sync.busy,
         keyboardType: TextInputType.url,
@@ -665,6 +667,7 @@ class _SyncScreenState extends State<SyncScreen> {
       ),
       const SizedBox(height: ScoreSpace.sm),
       TextField(
+        key: const PageStorageKey('device-sync-code'),
         controller: _code,
         enabled: !sync.busy,
         keyboardType: TextInputType.number,

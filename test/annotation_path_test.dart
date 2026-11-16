@@ -6,7 +6,7 @@ import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/reader/annotation_canvas.dart';
 
 void main() {
-  test('swept eraser clips sparse paths locally, preserves styles, one commit and atomic undo/redo survive schema2 roundtrip and bidirectional merge', () async {
+  test('swept eraser clips sparse paths locally, preserves styles, one commit and atomic undo/redo survive current and schema2 roundtrips and bidirectional merge', () async {
     final dir = await Directory.systemTemp.createTemp('path-erase-');
     try {
       final store = await ReaderStateStore.open(
@@ -79,8 +79,18 @@ void main() {
       await store.redo(page);
       expect(store.snapshot.strokesFor(page), hasLength(5));
       final reopened = await ReaderStateStore.open(statePath: store.statePath);
-      expect(reopened.snapshot.toJson()['schemaVersion'], 2);
+      // 2fd9b01 introduced schema 3 for inline text; eraser history is unchanged.
+      expect(reopened.snapshot.toJson()['schemaVersion'], 3);
       expect(reopened.snapshot.strokesFor(page), hasLength(5));
+      final legacy = ReaderSnapshot.fromJson({
+        ...reopened.snapshot.toJson(),
+        'schemaVersion': 2,
+      });
+      expect(
+        legacy.strokesFor(page).map((stroke) => stroke.id).toSet(),
+        reopened.snapshot.strokesFor(page).map((stroke) => stroke.id).toSet(),
+      );
+
       final merged = mergeReaderSnapshots(
         base: base,
         local: base,

@@ -166,6 +166,8 @@ class _LibraryScreenState extends State<LibraryScreen>
           return;
         }
         _imports = imports;
+        final warning = imports.recoveryWarning;
+        if (warning != null) _message(warning);
         for (final score in imports.records.where((s) => s.mirrorPending)) {
           final workspace = await _prepareReader();
           await mirrorImportAnnotations(
@@ -946,16 +948,25 @@ class _LibraryScreenState extends State<LibraryScreen>
                                       );
                                     }
                                     final sources = [...library.sources]
-                                      ..sort((a, b) => a.id == library.selectedSourceId ? -1 : b.id == library.selectedSourceId ? 1 : 0);
-                                    final source = sources[index == 0 ? 0 : index - 1];
+                                      ..sort(
+                                        (a, b) =>
+                                            a.id == library.selectedSourceId
+                                            ? -1
+                                            : b.id == library.selectedSourceId
+                                            ? 1
+                                            : 0,
+                                      );
+                                    final source =
+                                        sources[index == 0 ? 0 : index - 1];
                                     return Center(
                                       child: TextButton(
                                         onPressed: () =>
                                             _selectSource(library, source.id),
                                         style: TextButton.styleFrom(
                                           backgroundColor:
-                                              !_recentOpen && source.id ==
-                                                  library.selectedSourceId
+                                              !_recentOpen &&
+                                                  source.id ==
+                                                      library.selectedSourceId
                                               ? ScoreTokens.of(context).pineWash
                                               : ScoreTokens.of(context).paper0,
                                           padding: const EdgeInsets.symmetric(
@@ -1003,6 +1014,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                                       onTap: () => scheduleMicrotask(() {
                                         if (mounted &&
                                             _searchOpen &&
+                                            !_openingReader &&
                                             (ModalRoute.of(context)
                                                     ?.isCurrent ??
                                                 true)) {
@@ -1044,7 +1056,8 @@ class _LibraryScreenState extends State<LibraryScreen>
     });
     _searchFocus.unfocus();
     _recordDirectory();
-    if (navigationContext != null && Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
+    if (navigationContext != null &&
+        Scaffold.maybeOf(navigationContext)?.isDrawerOpen == true) {
       Navigator.pop(navigationContext);
     }
   }
@@ -1152,6 +1165,8 @@ class _LibraryScreenState extends State<LibraryScreen>
               const SizedBox(width: 8),
               _deviceSummary(compact: true),
             ],
+            if (library != null && library.rootPath == null)
+              _libraryOperations(library),
           ],
         ),
       ),
@@ -1368,56 +1383,58 @@ class _LibraryScreenState extends State<LibraryScreen>
               onTap: () => unawaited(_openSetLists(initialCreate: true)),
             );
           case LibraryNavKind.operations:
-            return PopupMenuButton<String>(
-              tooltip: '曲库操作',
-              icon: const ReaderIcon(ReaderGlyph.more),
-              style: libraryIconButtonStyle(context),
-              constraints: const BoxConstraints.tightFor(
-                width: ScoreLayout.menuWidth,
-              ),
-              onSelected: (value) {
-                switch (value) {
-                  case 'single':
-                    unawaited(_openSingle());
-                  case 'refresh':
-                    unawaited(library.rescan());
-                  case 'verify':
-                    unawaited(library.rescan(verifyAll: true));
-                  case 'offline':
-                    unawaited(_openOffline());
-                  case 'imports':
-                    unawaited(_openImports());
-                  case 'layout':
-                    DeviceLayoutScope.maybeOf(context)?.toggle();
-                }
-              },
-              itemBuilder: (_) => [
-                const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
-                const PopupMenuItem(value: 'imports', child: Text('本机导入与暂存')),
-                PopupMenuItem(
-                  value: 'refresh',
-                  enabled: !library.scanning,
-                  child: const Text('刷新谱库'),
-                ),
-                PopupMenuItem(
-                  value: 'verify',
-                  enabled: !library.scanning,
-                  child: const Text('完整校验此谱库内容'),
-                ),
-                const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
-                if (defaultTargetPlatform == TargetPlatform.windows)
-                  const PopupMenuItem(
-                    value: 'layout',
-                    child: Text('切换 iPad 预览'),
-                  ),
-              ],
-            );
+            return _libraryOperations(library);
           default:
             return const SizedBox.shrink();
         }
       },
     );
   }
+
+  Widget _libraryOperations(LibraryController library) =>
+      PopupMenuButton<String>(
+        tooltip: '曲库操作',
+        icon: const ReaderIcon(ReaderGlyph.more),
+        style: libraryIconButtonStyle(context),
+        constraints: const BoxConstraints.tightFor(
+          width: ScoreLayout.menuWidth,
+        ),
+        onSelected: (value) {
+          switch (value) {
+            case 'single':
+              unawaited(_openSingle());
+            case 'refresh':
+              unawaited(library.rescan());
+            case 'verify':
+              unawaited(library.rescan(verifyAll: true));
+            case 'offline':
+              unawaited(_openOffline());
+            case 'imports':
+              unawaited(_openImports());
+            case 'layout':
+              DeviceLayoutScope.maybeOf(context)?.toggle();
+          }
+        },
+        itemBuilder: (_) => [
+          const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
+          const PopupMenuItem(value: 'imports', child: Text('本机导入与暂存')),
+          if (library.rootPath != null)
+            PopupMenuItem(
+              value: 'refresh',
+              enabled: !library.scanning,
+              child: const Text('刷新谱库'),
+            ),
+          if (library.rootPath != null)
+            PopupMenuItem(
+              value: 'verify',
+              enabled: !library.scanning,
+              child: const Text('完整校验此谱库内容'),
+            ),
+          const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
+          if (defaultTargetPlatform == TargetPlatform.windows)
+            const PopupMenuItem(value: 'layout', child: Text('切换 iPad 预览')),
+        ],
+      );
 
   Widget _folderNode(LibraryController library, String folder, int depth) {
     final children = _hierarchy!.childrenOf(folder);

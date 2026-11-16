@@ -9,9 +9,10 @@ import 'package:score_reader/reader/annotation_canvas.dart';
 import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/reader/reader_input.dart';
 import 'package:score_reader/reader/reader_page_seek_bar.dart';
-import 'package:score_reader/reader/reader_screen.dart';
 import 'package:score_reader/reader/reader_session.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
+import 'package:score_reader/reader/reader_tool_button.dart';
+import 'package:score_reader/theme/device_layout.dart';
 
 import 'reader_fixture.dart';
 
@@ -100,10 +101,17 @@ void main() {
   });
 
   testWidgets(
-    'actual overlay live-seeks before up for touch/mouse without ink; bottom stylus first point and mid-scrub pen preserve actual PageKey; hidden controls restore page gestures',
+    'iPad dots live-seek with touch and mouse; pen keeps page ownership and hidden controls restore page gestures',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(810, 1080));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+      const surface = Size(810, 1080);
+      tester.view.physicalSize = surface;
+      tester.view.devicePixelRatio = 1;
+      await tester.binding.setSurfaceSize(surface);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+        return tester.binding.setSurfaceSize(null);
+      });
       final dir = (await tester.runAsync(
         () => Directory.systemTemp.createTemp('seek-overlay-082-'),
       ))!;
@@ -117,6 +125,8 @@ void main() {
         () => ReaderStateStore.open(statePath: '${dir.path}/state.json'),
       ))!;
       final workspace = ReaderWorkspace(store);
+      final layout = DeviceLayoutController(simulateIpad: true);
+      var presented = false;
       final target = ScoreTarget(
         entryId: 'synthetic',
         revisionId: 'r1',
@@ -138,41 +148,53 @@ void main() {
           .toList();
       try {
         await tester.pumpWidget(
-          MaterialApp(
-            home: LibraryReaderScreen(
-              workspace: workspace,
-              locate: (_) => target,
-              initialTarget: target,
-              loader: (t) async =>
-                  LoadedScore(target: t, pageCount: 820, imageAspect: .75),
+          DeviceLayoutScope(
+            controller: layout,
+            child: MaterialApp(
+              home: LibraryReaderScreen(
+                workspace: workspace,
+                locate: (_) => target,
+                initialTarget: target,
+                onPresented: (_) => presented = true,
+                loader: (t) async =>
+                    LoadedScore(target: t, pageCount: 820, imageAspect: .75),
+              ),
             ),
           ),
         );
         await _until(
           tester,
-          () => find.byType(ReaderPageSeekBar).evaluate().isNotEmpty,
+          () =>
+              presented && find.byType(AnnotationCanvas).evaluate().isNotEmpty,
         );
-        await _until(
-          tester,
-          () => find.byType(AnnotationCanvas).evaluate().isNotEmpty,
-        );
+        await tester.tapAt(tester.getRect(find.byType(ReaderInput)).center);
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('批注'), findsOneWidget);
+        expect(find.byTooltip('完成批注'), findsNothing);
+        await tester.tap(find.byTooltip('批注'));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('完成批注'), findsOneWidget);
         final first = region();
+        expect(
+          first.bottom,
+          lessThanOrEqualTo(surface.height),
+          reason: 'expanded page dots must be on screen',
+        );
         final finger = await tester.startGesture(
           Offset(first.left + 10, first.center.dy),
           pointer: 31,
           kind: PointerDeviceKind.touch,
         );
-        await finger.moveTo(Offset(first.right - 10, first.center.dy));
+        await finger.moveTo(Offset(first.right - .001, first.center.dy));
         await _until(tester, () => visible() == 820);
-        expect(
-          tester
-              .widgetList<CustomPaint>(find.byType(CustomPaint))
-              .map((w) => w.painter)
-              .whereType<ReaderPageDotsPainter>()
-              .single
-              .dotCount,
-          60,
+        final seekBar = tester.widget<ReaderPageSeekBar>(
+          find.byType(ReaderPageSeekBar),
         );
+        final actualDotBound = readerSeekDotCount(
+          820,
+          tester.getSize(find.byKey(seekBar.hitRegionKey!)).width,
+        );
+        expect(actualDotBound, inInclusiveRange(1, 60));
         expect(
           find.byType(AnnotationCanvas).evaluate().length,
           lessThanOrEqualTo(5),
@@ -198,6 +220,10 @@ void main() {
             .transform!;
         expect(transform.value, Matrix4.identity());
         final bottom = region().center;
+        // Pen contact hides the page indicator. Starting within its transparent
+        // hit area must still deliver the first stylus point to the paper.
+        await tester.tap(find.byKey(const ValueKey(ReaderTool.pen)));
+        await tester.pump();
         final pen = await tester.startGesture(
           bottom,
           pointer: 33,
@@ -217,110 +243,125 @@ void main() {
         );
         await pen.moveBy(const Offset(6, -12));
         await pen.up();
-        await _until(
-          tester,
-          () =>
-              !workspace.saving &&
-              find.byType(ReaderPageSeekBar).evaluate().isNotEmpty,
-        );
+        await _until(tester, () => !workspace.saving);
         final captured = PageKey(
           entryId: target.entryId,
           revisionId: target.revisionId,
           pageNumber: 411,
         );
         expect(store.snapshot.strokesFor(captured), hasLength(1));
-        final third = region();
-        final scrub = await tester.startGesture(
-          third.center,
-          pointer: 34,
-          kind: PointerDeviceKind.touch,
-        );
-        await scrub.moveTo(Offset(third.right - 10, third.center.dy));
-        // No frame has submitted this pending target. Actual pen-down cancels it.
-        final writing = await tester.startGesture(
-          const Offset(400, 500),
-          pointer: 35,
-          kind: PointerDeviceKind.stylus,
-        );
-        await tester.pump();
-        expect(find.byType(ReaderPageSeekBar), findsNothing);
-        await writing.moveBy(const Offset(15, 10));
-        await writing.up();
-        await scrub.cancel();
-        await _until(
-          tester,
-          () =>
-              !workspace.saving &&
-              find.byType(ReaderPageSeekBar).evaluate().isNotEmpty,
-        );
-        expect(visible(), 411);
-        expect(store.snapshot.strokesFor(captured), hasLength(2));
-        expect(ink(), hasLength(2));
+        expect(store.readingPosition(target.key)?.pageNumber, 411);
+        expect(ink(), hasLength(1));
         expect(find.textContaining('%'), findsNothing);
-        expect(find.byTooltip('恢复整页'), findsOneWidget);
-        final oldRegion = region();
-        await tester.tap(find.byTooltip('收起阅读工具'));
-        await tester.pump(const Duration(milliseconds: 220));
-        expect(find.byType(ReaderPageSeekBar), findsNothing);
-        await tester.tapAt(Offset(oldRegion.right - 10, oldRegion.center.dy));
+        await tester.tap(find.byTooltip('完成批注'));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('批注'), findsOneWidget);
+        // Completion exits annotation mode; the center tap hides reader controls.
+        await tester.tapAt(tester.getRect(find.byType(ReaderInput)).center);
+        await tester.pumpAndSettle();
+        final input = tester.getRect(find.byType(ReaderInput));
+        expect(
+          find.byType(ReaderPageSeekBar),
+          findsNothing,
+          reason:
+              'quiet mode removes navigation until tools are opened (7f163cf)',
+        );
+        await tester.tapAt(Offset(input.right - 10, input.center.dy));
         await _until(
           tester,
           () => store.readingPosition(target.key)?.pageNumber == 412,
         );
         expect(tester.takeException(), isNull);
         debugPrint(
-          'SEEK_OVERLAY_082 touch_mouse_live=true no_unintended_ink=true first_bottom_pen_captured=true mid_scrub_pen_page=411 dots_bound=60 hidden_region_restores_navigation=true',
+          'SEEK_OVERLAY_082 touch_mouse_live=true no_unintended_ink=true first_bottom_pen_captured=true annotation_page=411 dots_bound=$actualDotBound hidden_tools_restore_right_page_gesture=true',
         );
       } finally {
         await tester.pumpWidget(const SizedBox());
         await _until(tester, () => !workspace.saving);
         workspace.dispose();
+        layout.dispose();
         await tester.runAsync(() => dir.delete(recursive: true));
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
   );
 
-  testWidgets(
-    'standalone single page uses the same transparent dots and top zoom controls with no percent',
-    (tester) async {
-      final dir = (await tester.runAsync(
-        () => Directory.systemTemp.createTemp('seek-single-082-'),
-      ))!;
-      await writeSyntheticPaper(tester, '${dir.path}/synthetic.PNG');
-      try {
-        await tester.pumpWidget(
-          MaterialApp(
-            home: ReaderScreen(initialPath: '${dir.path}/synthetic.PNG'),
+  testWidgets('simulated iPad single page keeps its page indicator inert', (
+    tester,
+  ) async {
+    const surface = Size(810, 1080);
+    tester.view.physicalSize = surface;
+    tester.view.devicePixelRatio = 1;
+    await tester.binding.setSurfaceSize(surface);
+    final dir = (await tester.runAsync(
+      () => Directory.systemTemp.createTemp('seek-single-082-'),
+    ))!;
+    await writeSyntheticPaper(tester, '${dir.path}/synthetic.PNG');
+    final store = (await tester.runAsync(
+      () => ReaderStateStore.open(statePath: '${dir.path}/state.json'),
+    ))!;
+    final workspace = ReaderWorkspace(store);
+    final target = ScoreTarget(
+      entryId: 'single-seek',
+      revisionId: 'r1',
+      filePath: '${dir.path}/synthetic.PNG',
+      displayPath: 'synthetic.PNG',
+    );
+    final layout = DeviceLayoutController(simulateIpad: true);
+    var presented = false;
+    try {
+      await tester.pumpWidget(
+        DeviceLayoutScope(
+          controller: layout,
+          child: MaterialApp(
+            home: LibraryReaderScreen(
+              workspace: workspace,
+              locate: (_) => target,
+              initialTarget: target,
+              onPresented: (_) => presented = true,
+              loader: (t) async =>
+                  LoadedScore(target: t, pageCount: 1, imageAspect: .75),
+            ),
           ),
+        ),
+      );
+      await _until(tester, () => presented);
+      await tester.tapAt(tester.getRect(find.byType(ReaderInput)).center);
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('批注'), findsOneWidget);
+      expect(find.byTooltip('完成批注'), findsNothing);
+      await tester.tap(find.byTooltip('批注'));
+      await tester.pumpAndSettle();
+      final dots = tester.widget<ReaderPageSeekBar>(
+        find.byType(ReaderPageSeekBar),
+      );
+      expect(dots.pageCount, 1);
+      expect(dots.currentPage, 1);
+      expect(find.textContaining('%'), findsNothing);
+      await tester.drag(find.byType(ReaderPageSeekBar), const Offset(200, 0));
+      await tester.pump();
+      expect(
+        tester
+            .widget<ReaderPageSeekBar>(find.byType(ReaderPageSeekBar))
+            .currentPage,
+        1,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      while (workspace.saving) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 5)),
         );
-        await _until(
-          tester,
-          () => find.byType(ReaderPageSeekBar).evaluate().isNotEmpty,
-        );
-        final dots = tester.widget<ReaderPageSeekBar>(
-          find.byType(ReaderPageSeekBar),
-        );
-        expect(dots.pageCount, 1);
-        expect(dots.currentPage, 1);
-        expect(find.byTooltip('恢复整页'), findsOneWidget);
-        expect(find.textContaining('%'), findsNothing);
-        await tester.drag(find.byType(ReaderPageSeekBar), const Offset(200, 0));
-        await tester.pump();
-        expect(
-          tester
-              .widget<ReaderPageSeekBar>(find.byType(ReaderPageSeekBar))
-              .currentPage,
-          1,
-        );
-        expect(tester.takeException(), isNull);
-      } finally {
-        await tester.pumpWidget(const SizedBox());
-        await tester.runAsync(() => dir.delete(recursive: true));
       }
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.windows),
-  );
+      workspace.dispose();
+      layout.dispose();
+      await tester.runAsync(() => dir.delete(recursive: true));
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      await tester.binding.setSurfaceSize(null);
+    }
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets(
     'same-frame cancel then down schedules latest; normal up then pedal then down retains accepted ended seek',
@@ -391,8 +432,12 @@ void main() {
           ),
         );
         final rect = tester.getRect(find.byKey(region));
-        final left = rect.center - const Offset(12, 0),
-            right = rect.center + const Offset(12, 0);
+        // Use the ends of the seek region so this test genuinely requests
+        // page 1 -> page 5. A 24px wiggle around the midpoint only maps to an
+        // interior page and made the lifecycle assertion depend on an
+        // impossible endpoint request.
+        final left = rect.centerLeft + const Offset(10, 0),
+            right = rect.centerRight - const Offset(10, 0);
         void down(int pointer, Offset point) =>
             tester.binding.handlePointerEvent(
               PointerDownEvent(
@@ -424,15 +469,18 @@ void main() {
         down(72, left);
         move(72, right);
         await tester.pump();
-        expect(accepted.map((event) => event.$1), [5]);
+        // Live callbacks are synchronous. The first gesture was accepted then
+        // cancelled before the session drained; only the second may navigate.
+        expect(accepted.map((event) => event.$1), [5, 5]);
+        expect(cancelled, contains(same(accepted.first.$2)));
         await _until(tester, () => session.page == 5);
         up(72, right);
-        final ended = accepted.single.$2;
+        final ended = accepted.last.$2;
         final pedal = session.turn(NavigationDirection.forward);
         await _until(tester, () => loadingB);
         down(73, rect.center);
         up(73, rect.center);
-        expect(accepted.map((event) => event.$1), [5, 3]);
+        expect(accepted.map((event) => event.$1), [5, 5, 3]);
         expect(cancelled, isNot(contains(same(ended))));
         gate.complete();
         await _until(

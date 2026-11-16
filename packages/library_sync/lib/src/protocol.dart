@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:reader_state/reader_state.dart';
 import 'manifest.dart';
+import 'diagnostics.dart' as diagnostics;
 import 'replica.dart';
 import 'storage.dart';
 import 'collection.dart';
@@ -43,7 +44,10 @@ class _DifferentLibrary implements Exception {}
 
 LibrarySyncFailure _libraryFailure(Object error) {
   if (error is SyncCancelled) return LibrarySyncFailure.cancelled;
-  if (error is _DifferentLibrary) return LibrarySyncFailure.differentLibrary;
+  if (error is _DifferentLibrary ||
+      (error is StateError &&
+          error.message == 'Collection belongs to another computer.'))
+    return LibrarySyncFailure.differentLibrary;
   if (error is LibraryContentIntegrityException)
     return LibrarySyncFailure.integrity;
   if (error is SocketException ||
@@ -312,13 +316,15 @@ class SyncServer {
       onSigningStatus;
   Future<Map<PageMetadataKey, int>> Function(List<PageMetadataKey>)?
       onPageMetadata;
-  Future<Map<String, Object?>> Function(Map<String, dynamic>)? onSongbookMetadata;
+  Future<Map<String, Object?>> Function(Map<String, dynamic>)?
+      onSongbookMetadata;
   Future<ScoreImportReceipt> Function(
           String peerId, ScoreImportRequest metadata, Stream<List<int>> bytes)?
       onScoreImport;
-  Future<ScoreImportReceipt?> Function(String peerId, ScoreImportRequest metadata)?
-      onScoreImportReceipt;
-  late final _changeJournal = CollectionChangeJournal(p.join(stateDirectory, 'catalog-changes-v1.json'));
+  Future<ScoreImportReceipt?> Function(
+      String peerId, ScoreImportRequest metadata)? onScoreImportReceipt;
+  late final _changeJournal = CollectionChangeJournal(
+      p.join(stateDirectory, 'catalog-changes-v1.json'));
   final _readerEpoch = randomId();
   Set<String> get authenticatedPeerIds => _peerIds(_state);
   static Set<String> _peerIds(Map<String, dynamic> state) => {
@@ -333,7 +339,9 @@ class SyncServer {
     try {
       final state = await readJson(p.join(directory, 'peers.json'));
       return state == null || state['schema'] != 1 ? {} : _peerIds(state);
-    } catch (_) {
+    } catch (error, stack) {
+      diagnostics.reportSwallowedError(
+          'sync.authenticatedPeersRead', error, stack);
       return {};
     }
   }
@@ -500,19 +508,24 @@ class SyncServer {
         final receivedAt = DateTime.now().toUtc();
         await onSigningStatus!(peerId, status, receivedAt);
         await _reply(request.response, {'accepted': true});
-      } else if (request.method == 'POST' && path == '/v2/score-import-receipt' &&
+      } else if (request.method == 'POST' &&
+          path == '/v2/score-import-receipt' &&
           onScoreImportReceipt != null) {
         final body = await _readBody(request, ioTimeout, 12288);
-        final receipt = await onScoreImportReceipt!(peerId, ScoreImportRequest.fromJson(body));
+        final receipt = await onScoreImportReceipt!(
+            peerId, ScoreImportRequest.fromJson(body));
         await _reply(request.response, {'receipt': receipt?.toJson()});
       } else if (request.method == 'GET' && path == '/state-head') {
-        await _reply(request.response, {'protocol': 1,
-          'version': '$_readerEpoch:${readerStore.snapshot.generation}'});
+        await _reply(request.response, {
+          'protocol': 1,
+          'version': '$_readerEpoch:${readerStore.snapshot.generation}'
+        });
       } else if (request.method == 'GET' && path == '/state-capabilities') {
         await _reply(request.response,
             {'readerStateMaxSchema': ReaderSnapshot.schemaVersion});
       } else if (request.method == 'POST' &&
-          path == '/collection/songbook-index' && onSongbookMetadata != null) {
+          path == '/collection/songbook-index' &&
+          onSongbookMetadata != null) {
         final body = await _readBody(request, ioTimeout, 4 * 1024 * 1024);
         await _reply(request.response, await onSongbookMetadata!(body));
       } else if (request.method == 'POST' &&
@@ -537,15 +550,19 @@ class SyncServer {
           (path == '/v2/catalog-head' || path == '/v2/catalog-changes')) {
         await _changeJournal.refresh(collection!);
         if (path == '/v2/catalog-head') {
-          await _reply(request.response, {'protocol': 1,
-            'collectionId': _changeJournal.index.id, 'cursor': _changeJournal.cursor});
+          await _reply(request.response, {
+            'protocol': 1,
+            'collectionId': _changeJournal.index.id,
+            'cursor': _changeJournal.cursor
+          });
         } else {
           final since = request.uri.queryParameters['since'];
           if (since == null || since.length > 128) {
             throw const SyncProtocolException('Invalid catalogue cursor.', 400);
           }
           final delta = _changeJournal.changes(since);
-          if (delta == null) throw const SyncProtocolException('Catalogue cursor expired.', 410);
+          if (delta == null)
+            throw const SyncProtocolException('Catalogue cursor expired.', 410);
           await _reply(request.response, delta.toJson());
         }
       } else if (collection != null &&
@@ -728,7 +745,8 @@ class SyncServer {
         } else {
           total += item.length;
         }
-      } catch (_) {
+      } catch (error, stack) {
+        diagnostics.reportSwallowedError('sync.batchPrepareItem', error, stack);
         status = 409;
         item = null;
       }
@@ -944,30 +962,39 @@ class SyncClient {
       sha256.convert(utf8.encode('$baseUri/$peerId')).toString();
   String get backgroundTransferNamespace => _transferNamespace;
 
-  ScoreImportReceipt _validatedImportReceipt(Map<String, dynamic> body, ScoreImportRequest metadata) {
+  ScoreImportReceipt _validatedImportReceipt(
+      Map<String, dynamic> body, ScoreImportRequest metadata) {
     final receipt = ScoreImportReceipt.fromJson(body);
     if (receipt.operationId != metadata.operationId ||
         receipt.item.sourceId != metadata.sourceId ||
         receipt.item.relativePath != metadata.relativePath ||
-        receipt.item.hash != metadata.hash || receipt.item.length != metadata.length) {
+        receipt.item.hash != metadata.hash ||
+        receipt.item.length != metadata.length) {
       throw const FormatException('Computer returned another imported score.');
     }
     return receipt;
   }
 
-  Future<ScoreImportReceipt?> lookupScoreImportReceipt(ScoreImportRequest metadata,
+  Future<ScoreImportReceipt?> lookupScoreImportReceipt(
+      ScoreImportRequest metadata,
       {SyncCancellation? cancellation}) async {
     final http = HttpClient()..connectionTimeout = ioTimeout;
     void cancel() => http.close(force: true);
     cancellation?.addListener(cancel);
     try {
       cancellation?.check();
-      final body = await _json(http, '/v2/score-import-receipt', body: metadata.toJson());
-      return body['receipt'] == null ? null : _validatedImportReceipt(asMap(body['receipt']), metadata);
+      final body = await _json(http, '/v2/score-import-receipt',
+          body: metadata.toJson());
+      return body['receipt'] == null
+          ? null
+          : _validatedImportReceipt(asMap(body['receipt']), metadata);
     } on SyncProtocolException catch (error) {
       if (error.status != 404) rethrow;
       return null;
-    } finally { cancellation?.removeListener(cancel); http.close(force: true); }
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+    }
   }
 
   /// Explicit paired-device upload; it never touches the background download queue.
@@ -978,7 +1005,8 @@ class SyncClient {
     cancellation?.addListener(cancel);
     try {
       cancellation?.check();
-      final confirmed = await lookupScoreImportReceipt(metadata, cancellation: cancellation);
+      final confirmed =
+          await lookupScoreImportReceipt(metadata, cancellation: cancellation);
       if (confirmed != null) return confirmed;
       final request = await http
           .postUrl(baseUri.resolve('/v2/score-import'))
@@ -1036,7 +1064,10 @@ class SyncClient {
       cancellation?.check();
       final head = await _json(http, '/v2/catalog-head');
       final id = head['collectionId'];
-      if (head['protocol'] != 1 || id is! String || id.isEmpty || id.length > 256) {
+      if (head['protocol'] != 1 ||
+          id is! String ||
+          id.isEmpty ||
+          id.length > 256) {
         throw const FormatException('Invalid catalogue identity.');
       }
       return id;
@@ -1052,49 +1083,76 @@ class SyncClient {
   /// Metadata only; daily polling never reconciles the native download queue.
   Future<void> refreshCollectionIndex(ReplicaCollectionView replica,
       {SyncCancellation? cancellation}) async {
-    await refreshCollectionDelta(replica, cancellation: cancellation, allowLegacyRefresh: true);
+    await refreshCollectionDelta(replica,
+        cancellation: cancellation, allowLegacyRefresh: true);
   }
 
-  Future<CollectionRefreshResult> refreshCollectionDelta(ReplicaCollectionView replica,
-      {SyncCancellation? cancellation, bool allowLegacyRefresh = false}) async {
+  Future<CollectionRefreshResult> refreshCollectionDelta(
+      ReplicaCollectionView replica,
+      {SyncCancellation? cancellation,
+      bool allowLegacyRefresh = false}) async {
     final http = HttpClient()..connectionTimeout = ioTimeout;
     void cancel() => http.close(force: true);
     cancellation?.addListener(cancel);
-    try { return await _refreshCollectionDelta(http, replica, cancellation, allowLegacyRefresh: allowLegacyRefresh); }
-    finally { cancellation?.removeListener(cancel); http.close(force: true); }
+    try {
+      return await _refreshCollectionDelta(http, replica, cancellation,
+          allowLegacyRefresh: allowLegacyRefresh);
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+    }
   }
 
   Future<CollectionRefreshResult> _refreshCollectionDelta(HttpClient http,
-      ReplicaCollectionView replica, SyncCancellation? cancellation, {bool allowLegacyRefresh = true}) async {
+      ReplicaCollectionView replica, SyncCancellation? cancellation,
+      {bool allowLegacyRefresh = true}) async {
     cancellation?.check();
-    if (!allowLegacyRefresh && _catalogDeltasAvailable == false &&
-        _lastLegacyCatalogRefresh != null && replica.index != null &&
-        DateTime.now().difference(_lastLegacyCatalogRefresh!) < const Duration(minutes: 5)) {
-      return lastCollectionRefresh = const CollectionRefreshResult({}, unchanged: true);
+    if (!allowLegacyRefresh &&
+        _catalogDeltasAvailable == false &&
+        _lastLegacyCatalogRefresh != null &&
+        replica.index != null &&
+        DateTime.now().difference(_lastLegacyCatalogRefresh!) <
+            const Duration(minutes: 5)) {
+      return lastCollectionRefresh =
+          const CollectionRefreshResult({}, unchanged: true);
     }
     Map<String, dynamic>? head;
-    try { head = await _json(http, '/v2/catalog-head'); _catalogDeltasAvailable = true; }
-    on SyncProtocolException catch (error) {
+    try {
+      head = await _json(http, '/v2/catalog-head');
+      _catalogDeltasAvailable = true;
+    } on SyncProtocolException catch (error) {
       if (error.status != 404) rethrow;
       _catalogDeltasAvailable = false;
     }
-    if (head != null && (head['protocol'] != 1 || head['cursor'] is! String ||
-        (head['cursor'] as String).isEmpty || (head['cursor'] as String).length > 128 ||
-        head['collectionId'] is! String)) {
+    if (head != null &&
+        (head['protocol'] != 1 ||
+            head['cursor'] is! String ||
+            (head['cursor'] as String).isEmpty ||
+            (head['cursor'] as String).length > 128 ||
+            head['collectionId'] is! String)) {
       throw const FormatException('Invalid catalogue head.');
     }
-    if (head != null && replica.deltaOwner == _transferNamespace &&
-        replica.index?.id == head['collectionId'] && replica.deltaCursor == head['cursor']) {
-      return lastCollectionRefresh = const CollectionRefreshResult({}, unchanged: true);
+    if (head != null &&
+        replica.deltaOwner == _transferNamespace &&
+        replica.index?.id == head['collectionId'] &&
+        replica.deltaCursor == head['cursor']) {
+      return lastCollectionRefresh =
+          const CollectionRefreshResult({}, unchanged: true);
     }
-    if (head != null && replica.deltaOwner == _transferNamespace && replica.deltaCursor != null &&
+    if (head != null &&
+        replica.deltaOwner == _transferNamespace &&
+        replica.deltaCursor != null &&
         replica.index?.id == head['collectionId']) {
       try {
         final response = await _request(http, 'GET', '/v2/catalog-changes',
             query: {'since': replica.deltaCursor!});
-        final delta = CollectionDelta.fromJson(await _readBody(response, ioTimeout, 512 * 1024));
+        final delta = CollectionDelta.fromJson(
+            await _readBody(response, ioTimeout, 512 * 1024));
         cancellation?.check();
-        final changed = {for (final item in delta.upserts) item.entryId, ...delta.removed};
+        final changed = {
+          for (final item in delta.upserts) item.entryId,
+          ...delta.removed
+        };
         await replica.applyDelta(delta, owner: _transferNamespace);
         return lastCollectionRefresh = CollectionRefreshResult(changed);
       } on SyncProtocolException catch (error) {
@@ -1107,26 +1165,31 @@ class SyncClient {
       final index = await _collectionIndex(http, cancellation);
       if (head != null) {
         final after = await _json(http, '/v2/catalog-head');
-        if (after['cursor'] != head['cursor'] || after['collectionId'] != index.id) {
-          head = after; continue;
+        if (after['cursor'] != head['cursor'] ||
+            after['collectionId'] != index.id) {
+          head = after;
+          continue;
         }
       }
       final before = replica.index;
       final changed = <String>{
         for (final item in index.entries)
           if (before?.entry(item.entryId) == null ||
-              !sameCatalogItem(before!.entry(item.entryId)!, item)) item.entryId,
+              !sameCatalogItem(before!.entry(item.entryId)!, item))
+            item.entryId,
         for (final item in before?.entries ?? const <CatalogItem>[])
           if (index.entry(item.entryId) == null) item.entryId
       };
       cancellation?.check();
-      await replica.updateIndex(index, cursor: head?['cursor'] as String?,
+      await replica.updateIndex(index,
+          cursor: head?['cursor'] as String?,
           owner: head == null ? null : _transferNamespace);
       if (head == null) _lastLegacyCatalogRefresh = DateTime.now();
-      return lastCollectionRefresh = CollectionRefreshResult(changed, fullFallback: true,
-          unchanged: changed.isEmpty);
+      return lastCollectionRefresh = CollectionRefreshResult(changed,
+          fullFallback: true, unchanged: changed.isEmpty);
     }
-    throw const SyncProtocolException('Catalogue changed during baseline transfer.', 409);
+    throw const SyncProtocolException(
+        'Catalogue changed during baseline transfer.', 409);
   }
 
   /// Lightweight reader-state publication, independent of annotation volume.
@@ -1136,13 +1199,18 @@ class SyncClient {
     cancellation?.addListener(cancel);
     try {
       final head = await _json(http, '/state-head');
-      if (head['protocol'] != 1 || head['version'] is! String ||
-          (head['version'] as String).length > 256) throw const FormatException('Invalid state head.');
+      if (head['protocol'] != 1 ||
+          head['version'] is! String ||
+          (head['version'] as String).length > 256)
+        throw const FormatException('Invalid state head.');
       return head['version'] as String;
     } on SyncProtocolException catch (error) {
       if (error.status != 404) rethrow;
       return null;
-    } finally { cancellation?.removeListener(cancel); http.close(force: true); }
+    } finally {
+      cancellation?.removeListener(cancel);
+      http.close(force: true);
+    }
   }
 
   /// Import completed system downloads even when the paired PC is now offline.
@@ -1296,14 +1364,18 @@ class SyncClient {
     final response = await request.close().timeout(ioTimeout);
     if (response.statusCode != 200) {
       String? code;
-      if (response.statusCode == 426 || path == '/v2/score-import-receipt' ||
+      if (response.statusCode == 426 ||
+          path == '/v2/score-import-receipt' ||
           (readLibraryFailure && response.statusCode == 503)) {
         try {
           final error = await _readBody(response, ioTimeout, maxJsonBytes);
           if (error['code'] == 'source_not_ready') code = 'source_not_ready';
-          if (path == '/v2/score-import-receipt' && const {
-            'import_operation_conflict', 'import_source_unavailable', 'import_integrity'
-          }.contains(error['code'])) code = error['code'] as String;
+          if (path == '/v2/score-import-receipt' &&
+              const {
+                'import_operation_conflict',
+                'import_source_unavailable',
+                'import_integrity'
+              }.contains(error['code'])) code = error['code'] as String;
           if (response.statusCode == 426 &&
               error['code'] == 'reader_upgrade_required')
             code = 'reader_upgrade_required';
@@ -1348,10 +1420,13 @@ class SyncClient {
   }
 
   /// Optional authenticated index metadata; a legacy peer's 404 is unsupported.
-  Future<Map<String, dynamic>?> songbookMetadata(Map<String, Object?> page) async {
+  Future<Map<String, dynamic>?> songbookMetadata(
+      Map<String, Object?> page) async {
     final http = HttpClient()..connectionTimeout = ioTimeout;
     try {
-      final response = await _request(http, 'POST', '/collection/songbook-index', body: page);
+      final response = await _request(
+          http, 'POST', '/collection/songbook-index',
+          body: page);
       return await _readBody(response, ioTimeout, 4 * 1024 * 1024);
     } on SyncProtocolException catch (error) {
       if (error.status == 404) return null;
@@ -1424,7 +1499,10 @@ class SyncClient {
       // errors, and never wait for an observer to complete or release a lease.
       unawaited(Future<void>.sync(
               () => onProgress(LibrarySyncProgress(phase, processed, total)))
-          .then<void>((_) {}, onError: (Object _, StackTrace __) {}));
+          .then<void>((_) {}, onError: (Object error, StackTrace stack) {
+        diagnostics.reportSwallowedError(
+            'sync.libraryProgressObserver', error, stack);
+      }));
     }
 
     final http = HttpClient()..connectionTimeout = ioTimeout;
@@ -1554,7 +1632,10 @@ class SyncClient {
       if (onProgress != null) {
         unawaited(Future<void>.sync(() => onProgress(LibrarySyncProgress(
                 LibrarySyncPhase.transferring, processed, total)))
-            .catchError((Object _) {}));
+            .catchError((Object error, StackTrace stack) {
+          diagnostics.reportSwallowedError(
+              'sync.collectionProgressObserver', error, stack);
+        }));
       }
     }
 
@@ -1562,7 +1643,9 @@ class SyncClient {
       await recoverBackgroundCollection(replica);
       CollectionIndex index;
       try {
-        if (refreshIndex) await _refreshCollectionDelta(http, replica, cancellation, allowLegacyRefresh: !changedOnly);
+        if (refreshIndex)
+          await _refreshCollectionDelta(http, replica, cancellation,
+              allowLegacyRefresh: !changedOnly);
         index = replica.index!;
       } on SyncProtocolException catch (e) {
         if (e.status != 404) rethrow;
@@ -1581,9 +1664,12 @@ class SyncClient {
         return result;
       }
       cancellation?.check();
-      final scoped = changedOnly && onlyEntryIds == null ? replica.pendingDeltaEntryIds : null;
-      final candidates = scoped == null ? replica.currentItems :
-          scoped.map(replica.itemFor).whereType<CatalogItem>();
+      final scoped = changedOnly && onlyEntryIds == null
+          ? replica.pendingDeltaEntryIds
+          : null;
+      final candidates = scoped == null
+          ? replica.currentItems
+          : scoped.map(replica.itemFor).whereType<CatalogItem>();
       final targets = candidates
           .where((e) =>
               !e.missing &&
@@ -1591,11 +1677,13 @@ class SyncClient {
               replica.selection.includes(e) &&
               !replica.isReady(e))
           .toList();
-      final eligible = onlyEntryIds == null ? <String>{} : {
-        for (final id in onlyEntryIds)
-          if (replica.itemFor(id) case final item?)
-            if (!item.missing && replica.selection.includes(item)) id
-      };
+      final eligible = onlyEntryIds == null
+          ? <String>{}
+          : {
+              for (final id in onlyEntryIds)
+                if (replica.itemFor(id) case final item?)
+                  if (!item.missing && replica.selection.includes(item)) id
+            };
       final unavailable = onlyEntryIds?.difference(eligible).length ?? 0;
       final total = targets.length + unavailable;
       failed = unavailable > 0;
@@ -1607,7 +1695,9 @@ class SyncClient {
           return item != null && replica.isReady(item);
         }).toList());
         await replica.flush();
-        return LibrarySyncResult(failed ? LibrarySyncStatus.partial : LibrarySyncStatus.complete, 0,
+        return LibrarySyncResult(
+            failed ? LibrarySyncStatus.partial : LibrarySyncStatus.complete,
+            0,
             failed ? 'Some selected files are unavailable.' : null,
             failed ? LibrarySyncFailure.sourceNotReady : null);
       }
@@ -1813,9 +1903,11 @@ class SyncClient {
           }
           if (!replica.isReady(item)) replica.rememberResolved(item);
           replica.completeDeltaEntries([item.entryId]);
-        } catch (error) {
+        } catch (error, stack) {
           if (error is SyncCancelled || cancellation?.isCancelled == true)
             rethrow;
+          diagnostics.reportSwallowedError(
+              'sync.singleFileDownload', error, stack);
           failed = true;
           if (error is SocketException ||
               error is TimeoutException ||
@@ -1939,7 +2031,8 @@ class SyncClient {
       state['pending'] = null;
       await writeJson(_statePath, state);
       final version = response['version'];
-      lastReaderStateVersion = version is String && version.length <= 256 ? version : null;
+      lastReaderStateVersion =
+          version is String && version.length <= 256 ? version : null;
       return result;
     } finally {
       cancellation?.removeListener(cancel);

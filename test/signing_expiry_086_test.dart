@@ -14,6 +14,7 @@ import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/signing/signing_expiry_chip.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
+import 'package:score_reader/sync/sync_screen.dart';
 
 class SigningTestSync extends SyncController {
   SigningTestSync({required super.library, required super.workspace});
@@ -75,7 +76,7 @@ void main() {
   });
 
   testWidgets(
-    'home signature leaf refreshes on resume, keeps search controls and no full-library work; Windows never reads or shows it',
+    'home signature leaf refreshes on resume, keeps search controls and no full-library work; Windows only shows paired status without native reads',
     (tester) async {
       final ios = defaultTargetPlatform == TargetPlatform.iOS;
       await tester.binding.setSurfaceSize(const Size(810, 1080));
@@ -142,17 +143,24 @@ void main() {
         );
         await signingFrames(tester);
         if (!ios) {
-          expect(find.byType(SigningExpiryChip), findsNothing);
+          final chip = tester.widget<SigningExpiryChip>(
+            find.byType(SigningExpiryChip),
+          );
+          expect(chip.pairedDevice, isTrue);
+          expect(chip.summaryOnly, isTrue);
+          expect(find.text('未取得签名日期'), findsOneWidget);
           expect(nativeCalls, 0);
           debugPrint(
-            'SIGNING_EXPIRY_086 non_iOS_native_calls=0 chip_visible=false',
+            'SIGNING_EXPIRY_086 non_iOS_native_calls=0 paired_summary_only=true',
           );
           return;
         }
         expect(nativeCalls, 1);
-        expect(find.text('签名剩余3天'), findsOneWidget);
+        expect(find.text('签名4天'), findsOneWidget);
         expect(
-          tester.getSize(find.widgetWithText(TextButton, '签名剩余3天')).height,
+          tester
+              .getSize(find.byKey(const ValueKey('offline-sync-management')))
+              .height,
           greaterThanOrEqualTo(44),
         );
         final baselineNotifications = notifications;
@@ -160,7 +168,10 @@ void main() {
             baselineCatalogs = sync.fullCatalogs;
         expect(baselineFullSnapshots, 0);
         expect(baselineCatalogs, 0);
-        await tester.tap(find.text('签名剩余3天'));
+        await tester.tap(find.byKey(const ValueKey('offline-sync-management')));
+        await signingFrames(tester);
+        expect(find.byType(SyncScreen), findsOneWidget);
+        await tester.tap(find.text('管理'));
         await signingFrames(tester);
         expect(
           find.text(SigningExpiry(expiration).exactLocalTime),
@@ -170,18 +181,24 @@ void main() {
         expect(find.textContaining('已开启'), findsNothing);
         await tester.tap(find.text('知道了'));
         await signingFrames(tester);
+        await tester.tap(find.byTooltip('关闭设备与同步'));
+        await signingFrames(tester);
         await tester.tap(find.byTooltip('搜索'));
         await tester.pump();
-        expect(find.text('签名剩余3天').hitTestable(), findsNothing);
+        expect(find.text('签名4天'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('offline-sync-management')).hitTestable(),
+          findsOneWidget,
+        );
         await tester.tap(find.byTooltip('关闭搜索'));
         await tester.pump();
         expect(
           nativeCalls,
-          1,
-          reason: 'hiding search preserves the leaf without reading the profile again',
+          2,
+          reason: 'the v2 management section reads once; search preserves the home leaf',
         );
         await tester.pump(const Duration(minutes: 2));
-        expect(nativeCalls, 1, reason: 'countdown ticks use memory only');
+        expect(nativeCalls, 2, reason: 'countdown ticks use memory only');
         expect(notifications, baselineNotifications);
         expect(sync.fullSnapshots, baselineFullSnapshots);
         expect(sync.fullCatalogs, baselineCatalogs);
@@ -193,20 +210,25 @@ void main() {
           AppLifecycleState.resumed,
         );
         await tester.pump();
-        expect(nativeCalls, 2);
+        expect(nativeCalls, 3);
         tester.binding.handleAppLifecycleStateChanged(
           AppLifecycleState.resumed,
         );
         await tester.pump();
-        expect(nativeCalls, 2, reason: 'in-flight native reads coalesce');
-        gate.complete({'status': 'unknown'});
+        expect(nativeCalls, 3, reason: 'in-flight native reads coalesce');
+        response = {'status': 'unknown'};
+        gate.complete(response);
         gate = null;
         await signingFrames(tester);
-        expect(find.text('签名期限未读取'), findsOneWidget);
-        await tester.tap(find.text('签名期限未读取'));
+        expect(find.text('未取得签名日期'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('offline-sync-management')));
+        await signingFrames(tester);
+        await tester.tap(find.text('管理'));
         await signingFrames(tester);
         expect(find.text('暂未读取到到期时间。'), findsOneWidget);
         await tester.tap(find.text('知道了'));
+        await signingFrames(tester);
+        await tester.tap(find.byTooltip('关闭设备与同步'));
         await signingFrames(tester);
 
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(native, (
@@ -220,8 +242,8 @@ void main() {
           AppLifecycleState.resumed,
         );
         await signingFrames(tester);
-        expect(nativeCalls, 3);
-        expect(find.text('签名期限未读取'), findsOneWidget);
+        expect(nativeCalls, 5);
+        expect(find.text('未取得签名日期'), findsOneWidget);
         expect(notifications, baselineNotifications);
         expect(sync.fullSnapshots, baselineFullSnapshots);
         expect(sync.fullCatalogs, baselineCatalogs);

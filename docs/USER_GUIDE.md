@@ -2,7 +2,7 @@
 
 [返回首页](../README.md) · [常见问题](FAQ.md)
 
-Windows 正式入口、Windows 便携分发包与根目录 iPad 安装包均已更新到 `0.8.10+41`。退出重开 Windows 阅读器即可使用新版；iPad 用 Sideloadly 本地签名覆盖安装。详见 [本轮发行记录](RELEASE_0.8.10_41.md)。
+Windows 正式入口、GitHub Release 上的 Windows 安装包与根目录 iPad 安装包均已更新到 `0.8.10+57`。退出重开 Windows 阅读器即可使用新版；iPad 用 Sideloadly 本地签名覆盖安装。详见 [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)。
 
 ## +41 更新操作
 

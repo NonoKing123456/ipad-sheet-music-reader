@@ -102,49 +102,133 @@ List<Offset> _corners(Rect rect) => [
   rect.bottomRight,
 ];
 void main() {
-  test('44px handle targets stay separate outside input; 28px visuals remain four pixels from its edge', () {
+  test('default 24px visuals anchor to the control frame with nearest circular 44px targets', () {
+    for (final scale in [.7, .9, 1.0, 1.25, 2.0, 4.0]) {
+      for (final height in [48.0, 68.0]) {
+        final unit = 1 / scale;
+        final frame = Rect.fromLTWH(250, 250, 210 * unit, height * unit);
+        final placements = layoutTextHandles(
+          frame: frame,
+          viewport: const Rect.fromLTWH(0, 0, 2000, 2000),
+          rotation: 0,
+          scale: scale,
+        );
+        expect(
+          (placements[TextHandleKind.move]!.visualRect.center -
+                  frame.bottomLeft)
+              .distance,
+          closeTo(0, .001),
+        );
+        expect(
+          (placements[TextHandleKind.width]!.visualRect.center -
+                  frame.centerRight)
+              .distance,
+          closeTo(0, .001),
+        );
+        expect(
+          (placements[TextHandleKind.transform]!.visualRect.center -
+                  frame.bottomRight)
+              .distance,
+          closeTo(0, .001),
+        );
+        expect(
+          placements[TextHandleKind.move]!.hitRect.topLeft,
+          frame.bottomLeft - Offset(22 * unit, 22 * unit),
+        );
+        expect(
+          placements[TextHandleKind.width]!.hitRect.topLeft,
+          frame.centerRight - Offset(22 * unit, 22 * unit),
+        );
+        expect(
+          placements[TextHandleKind.transform]!.hitRect.topLeft,
+          frame.bottomRight - Offset(22 * unit, 22 * unit),
+        );
+        final rects = placements.values.toList();
+        for (var i = 0; i < rects.length; i++) {
+          expect(rects[i].hitRect.width * scale, closeTo(44, .001));
+          expect(rects[i].visualRect.width * scale, closeTo(24, .001));
+          // 9870dab / spec 10.2: centered circular targets may overlap their
+          // bounding boxes; the input center stays outside the 22dp radius.
+          expect(
+            hitTestTextHandle(
+              point: frame.center,
+              centres: {
+                for (final entry in placements.entries)
+                  entry.key: entry.value.hitRect.center,
+              },
+              radius: 22 * unit,
+            ),
+            isNull,
+          );
+          for (var j = i + 1; j < rects.length; j++) {
+            expect(
+              hitTestTextHandle(
+                point: rects[i].hitRect.center,
+                centres: {
+                  for (final entry in placements.entries)
+                    entry.key: entry.value.hitRect.center,
+                },
+                radius: 22 * unit,
+              ),
+              placements.keys.elementAt(i),
+            );
+          }
+        }
+      }
+    }
+  });
+  test('rotated and edge placements keep targets separate and inside the viewport when space allows', () {
+    const viewport = Rect.fromLTWH(0, 0, 744, 800);
     for (final scale in [.7, 1.0, 2.0, 4.0]) {
       for (final rotation in [-.55, 0.0, .55, math.pi / 2]) {
-        for (final frame in [
-          const Rect.fromLTWH(220, 230, 210, 12),
-          const Rect.fromLTWH(80, 70, 80, 12),
-          const Rect.fromLTWH(570, 430, 100, 16),
-        ]) {
-          const viewport = Rect.fromLTWH(0, 44, 744, 456);
+        for (final origin in [const Offset(100, 150), const Offset(390, 590)]) {
+          final frame = origin & Size(180, 68 / scale);
+          // Rotation remains about the original text's centre, independently
+          // of any extra control-frame height supplied by the caller.
+          final pivot = frame.topLeft + const Offset(90, 24);
           final placements = layoutTextHandles(
             frame: frame,
             viewport: viewport,
             rotation: rotation,
             scale: scale,
+            rotationCentre: pivot,
           );
           final rects = placements.values.toList();
           for (var i = 0; i < rects.length; i++) {
-            final placement = rects[i];
-            expect(placement.hitRect.width * scale, closeTo(44, .001));
-            expect(placement.hitRect.height * scale, closeTo(44, .001));
-            expect(placement.visualRect.width * scale, closeTo(28, .001));
-            expect(placement.visualRect.height * scale, closeTo(28, .001));
-            expect(placement.hitRect.overlaps(frame), isFalse);
+            expect(rects[i].hitRect.width * scale, closeTo(44, .001));
+            expect(rects[i].hitRect.height * scale, closeTo(44, .001));
+            expect(rects[i].visualRect.width * scale, closeTo(24, .001));
+            expect(rects[i].visualRect.height * scale, closeTo(24, .001));
             for (var j = i + 1; j < rects.length; j++) {
-              expect(placement.hitRect.overlaps(rects[j].hitRect), isFalse);
+              expect(
+                hitTestTextHandle(
+                  point: rects[j].hitRect.center,
+                  centres: {
+                    for (final entry in placements.entries)
+                      entry.key: entry.value.hitRect.center,
+                  },
+                  radius: 22 / scale,
+                ),
+                placements.keys.elementAt(j),
+              );
             }
-            final visual = placement.visualRect;
-            final dx = math.max(
-              0.0,
-              math.max(frame.left - visual.right, visual.left - frame.right),
-            );
-            final dy = math.max(
-              0.0,
-              math.max(frame.top - visual.bottom, visual.top - frame.bottom),
-            );
-            expect(Offset(dx, dy).distance * scale, inInclusiveRange(2, 6.01));
+            for (final point in _corners(rects[i].hitRect)) {
+              final d = point - pivot;
+              final rotated =
+                  pivot +
+                  Offset(
+                    d.dx * math.cos(rotation) - d.dy * math.sin(rotation),
+                    d.dx * math.sin(rotation) + d.dy * math.cos(rotation),
+                  );
+              expect(viewport.inflate(.001).contains(rotated), isTrue);
+            }
           }
         }
       }
     }
   });
   test('bottom/keyboard placement keeps every target visible without an extra bottom area', () {
-    const frame = Rect.fromLTWH(410, 470, 280, 16),
+    const frame = Rect.fromLTWH(410, 420, 280, 58),
         viewport = Rect.fromLTRB(0, 44, 744, 500);
     final placements = layoutTextHandles(
       frame: frame,
@@ -157,10 +241,6 @@ void main() {
         expect(viewport.inflate(.001).contains(point), isTrue);
       }
     }
-    expect(
-      placements[TextHandleKind.transform]!.visualRect.center.dx,
-      greaterThan(frame.right),
-    );
   });
   testWidgets(
     'pen/text colors always use the same 28px dot, external ring and 44px target',
@@ -185,7 +265,7 @@ void main() {
             ),
           ),
         );
-        for (final color in [0xffc12b32, 0xff222222, 0xff1c57ac, 0xffffc107]) {
+        for (final color in [0xff9b5949, 0xff222222, 0xff1c57ac, 0xffffc107]) {
           final dots = find.byKey(ValueKey('annotation-color-dot-$color'));
           expect(dots, findsNWidgets(2));
           for (final item in dots.evaluate()) {
@@ -220,7 +300,7 @@ void main() {
           ),
           const Size(28, 28),
         );
-        expect(find.byTooltip('当前文字颜色'), findsOneWidget);
+        expect(find.byTooltip('当前颜色'), findsOneWidget);
       } finally {
         await tester.pumpWidget(const SizedBox());
         controls.dispose();
@@ -298,6 +378,7 @@ void main() {
         expect(
           field.controller!.selection.baseOffset,
           lessThan(4),
+          // SUSPECTED-REGRESSION: the handle must not swallow caret placement.
           reason: 'handles do not consume the text caret area',
         );
         await tester.tap(find.byTooltip('蓝色'));
@@ -305,6 +386,21 @@ void main() {
         expect(
           tester.widget<TextField>(find.byType(TextField)).style!.color,
           const Color(0xff1c57ac),
+        );
+        final widthHandle = tester.renderObject<RenderBox>(
+          find.byTooltip('调整换行宽度'),
+        );
+        final contextActions = tester.renderObject<RenderBox>(
+          find.byKey(const ValueKey('text-context-actions')),
+        );
+        final widthHandleRect =
+            widthHandle.localToGlobal(Offset.zero) & widthHandle.size;
+        final contextActionsRect =
+            contextActions.localToGlobal(Offset.zero) & contextActions.size;
+        expect(
+          widthHandleRect.overlaps(contextActionsRect),
+          isFalse,
+          reason: 'the floating context actions must not cover a text handle',
         );
         final generation = workspace.store.snapshot.generation;
         await tester.drag(find.byTooltip('调整换行宽度'), const Offset(-12, 0));
@@ -334,7 +430,7 @@ void main() {
             tester.getSize(
               find.byKey(ValueKey('text-handle-visual-${kind.name}')),
             ),
-            const Size(28, 28),
+            const Size(24, 24),
           );
         }
         state.hide();
@@ -352,7 +448,17 @@ void main() {
         tester.view.resetDevicePixelRatio();
         tester.view.resetPhysicalSize();
         await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
   );
@@ -403,15 +509,17 @@ void main() {
         expect(firstWidth, lessThan(paper.size.width * .45));
         await tester.enterText(find.byType(TextField), '短');
         await tester.pump();
-        expect(tester.getSize(find.byType(TextField)).width, firstWidth);
+        // 9870dab: a short nonempty draft tightens to the 96dp minimum.
+        expect(tester.getSize(find.byType(TextField)).width, 96);
+        final shortWidth = tester.getSize(find.byType(TextField)).width;
         await tester.enterText(
           find.byType(TextField),
           'abcdefghij abcdefghij abcdefghij abcdefghij',
         );
         await tester.pump();
         final grown = tester.getSize(find.byType(TextField));
-        expect(grown.width, greaterThan(firstWidth));
-        expect(grown.width, lessThanOrEqualTo(paper.size.width * .301));
+        expect(grown.width, greaterThan(shortWidth));
+        expect(grown.width, lessThanOrEqualTo(paper.size.width * .181));
         expect(grown.height, greaterThan(firstHeight));
         expect(
           tester.widget<TextField>(find.byType(TextField)).style!.fontSize,
@@ -480,7 +588,17 @@ void main() {
         tester.view.resetDevicePixelRatio();
         tester.view.resetPhysicalSize();
         await tester.binding.setSurfaceSize(null);
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
       }
     },
   );

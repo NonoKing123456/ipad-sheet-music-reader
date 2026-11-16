@@ -1,3 +1,5 @@
+import 'package:score_reader/reader/reader_input.dart';
+
 import 'reader_fixture.dart';
 
 import 'dart:convert';
@@ -69,14 +71,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(OfflineLibraryScreen), findsOneWidget);
       expect(find.text('把整个谱库带在身边'), findsNothing);
-      expect(find.text('搜索离线曲名或文件夹'), findsOneWidget);
+      expect(find.byTooltip('搜索'), findsOneWidget);
+      await tester.tap(find.byTooltip('搜索'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('directory-search-input')),
+        findsOneWidget,
+      );
       expect(find.byTooltip('返回谱库'), findsNothing);
       await tester.enterText(find.byType(TextField), '夜曲');
       await tester.pump();
       expect(find.text('夜曲', findRichText: false).hitTestable(), findsWidgets);
       await tester.tap(find.byTooltip('曲单'));
       await tester.pumpAndSettle();
-      await tester.pageBack();
+      await tester.tap(find.byTooltip('返回'));
       await tester.pumpAndSettle();
       expect(find.text('夜曲', findRichText: false).hitTestable(), findsWidgets);
       expect(find.byType(OfflineLibraryScreen), findsOneWidget);
@@ -183,8 +191,8 @@ void main() {
         );
         expect(
           tester.getSize(paper),
-          const Size(810, 1080),
-          reason: 'tools float without shrinking paper',
+          const Size(768, 1024),
+          reason: 'be6676d fits the page below the 56dp reading header',
         );
         expect(find.byIcon(Icons.tablet_mac_outlined), findsNothing);
         await tester.runAsync(() async {
@@ -214,9 +222,9 @@ void main() {
         await tester.binding.setSurfaceSize(const Size(1080, 810));
         await tester.pump();
         expect(tester.getSize(viewport), const Size(1080, 810));
-        expect(tester.getSize(paper).height, closeTo(810, .01));
-        expect(tester.getSize(paper).width, closeTo(607.5, .01));
-        await tester.tap(find.byTooltip('完成批注'));
+        expect(tester.getSize(paper).height, closeTo(754, .01));
+        expect(tester.getSize(paper).width, closeTo(565.5, .01));
+        await tester.tapAt(tester.getCenter(find.byType(ReaderInput)));
         await settleReader(tester);
         expect(
           tester
@@ -248,7 +256,7 @@ void main() {
               .value,
           1,
         );
-        expect(tester.getSize(paper).height, closeTo(810, .01));
+        expect(tester.getSize(paper).height, closeTo(754, .01));
         expect(tester.takeException(), isNull);
         await settleReader(tester);
         expect(workspace.saving, isFalse);
@@ -313,7 +321,24 @@ void main() {
       await tester.tapAt(const Offset(405, 540));
       await tester.pump();
       expect(find.byIcon(Icons.tablet_mac_outlined), findsNothing);
-      expect(find.byTooltip('放大'), findsOneWidget);
+      final input = tester.widget<ReaderInput>(find.byType(ReaderInput));
+      final center = tester.getCenter(find.byType(ReaderInput));
+      final left = await tester.startGesture(
+        center - const Offset(80, 0),
+        pointer: 71,
+      );
+      final right = await tester.startGesture(
+        center + const Offset(80, 0),
+        pointer: 72,
+      );
+      await tester.pump();
+      await left.moveTo(center - const Offset(120, 0));
+      await right.moveTo(center + const Offset(120, 0));
+      await tester.pump();
+      await left.up();
+      await right.up();
+      expect(input.transform!.value.getMaxScaleOnAxis(), greaterThan(1));
+      expect(find.text('打开曲谱'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;

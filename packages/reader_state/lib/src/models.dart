@@ -201,16 +201,31 @@ enum AnnotationTextFont { system, serif, monospace }
 
 /// Text remains Unicode and paper-relative geometry, never a raster or path.
 class TextAnnotation extends PageAnnotation {
-  TextAnnotation({required this.id, required this.text, required this.anchor,
-    required this.argb, required this.fontSizeFraction,
-    required this.widthFraction, required this.createdUtc,
-    required this.updatedUtc, required this.version, this.deletedUtc,
-    this.font = AnnotationTextFont.system, this.rotation = 0}) {
+  TextAnnotation(
+      {required this.id,
+      required this.text,
+      required this.anchor,
+      required this.argb,
+      required this.fontSizeFraction,
+      required this.widthFraction,
+      required this.createdUtc,
+      required this.updatedUtc,
+      required this.version,
+      this.deletedUtc,
+      this.font = AnnotationTextFont.system,
+      this.rotation = 0}) {
     requireNonEmptyId(id, 'annotationId');
-    if (text.trim().isEmpty || text.length > 8192 || version < 1 ||
-        argb < 0 || argb > 0xffffffff || !fontSizeFraction.isFinite ||
-        fontSizeFraction <= 0 || fontSizeFraction > .25 ||
-        !widthFraction.isFinite || widthFraction <= 0 || widthFraction > 1 ||
+    if (text.trim().isEmpty ||
+        text.length > 8192 ||
+        version < 1 ||
+        argb < 0 ||
+        argb > 0xffffffff ||
+        !fontSizeFraction.isFinite ||
+        fontSizeFraction <= 0 ||
+        fontSizeFraction > .25 ||
+        !widthFraction.isFinite ||
+        widthFraction <= 0 ||
+        widthFraction > 1 ||
         !rotation.isFinite) {
       throw ArgumentError('Invalid text annotation.');
     }
@@ -222,6 +237,7 @@ class TextAnnotation extends PageAnnotation {
   final int argb;
   final double fontSizeFraction, widthFraction;
   final AnnotationTextFont font;
+
   /// Radians clockwise around the laid-out text frame centre.
   final double rotation;
   @override
@@ -230,46 +246,79 @@ class TextAnnotation extends PageAnnotation {
   final int version;
   @override
   final DateTime? deletedUtc;
-  TextAnnotation revise({String? text, NormalizedPoint? anchor,
-      int? argb, double? fontSizeFraction, double? widthFraction,
-      AnnotationTextFont? font, double? rotation,
-      bool? deleted, required DateTime now, int? version}) => TextAnnotation(
-    id: id, text: text ?? this.text, anchor: anchor ?? this.anchor,
-    argb: argb ?? this.argb, fontSizeFraction: fontSizeFraction ?? this.fontSizeFraction,
-    widthFraction: widthFraction ?? this.widthFraction, font: font ?? this.font,
-    rotation: rotation ?? this.rotation, createdUtc: createdUtc,
-    updatedUtc: now, version: version ?? this.version + 1,
-    deletedUtc: deleted == null ? deletedUtc : deleted ? now : null);
+  TextAnnotation revise(
+          {String? text,
+          NormalizedPoint? anchor,
+          int? argb,
+          double? fontSizeFraction,
+          double? widthFraction,
+          AnnotationTextFont? font,
+          double? rotation,
+          bool? deleted,
+          required DateTime now,
+          int? version}) =>
+      TextAnnotation(
+          id: id,
+          text: text ?? this.text,
+          anchor: anchor ?? this.anchor,
+          argb: argb ?? this.argb,
+          fontSizeFraction: fontSizeFraction ?? this.fontSizeFraction,
+          widthFraction: widthFraction ?? this.widthFraction,
+          font: font ?? this.font,
+          rotation: rotation ?? this.rotation,
+          createdUtc: createdUtc,
+          updatedUtc: now,
+          version: version ?? this.version + 1,
+          deletedUtc: deleted == null
+              ? deletedUtc
+              : deleted
+                  ? now
+                  : null);
   @override
   TextAnnotation withDeletion(bool deleted, DateTime now) =>
       revise(deleted: deleted, now: now);
   Map<String, Object?> get geometry => {
-    'text': text, 'anchor': anchor.toJson(), 'argb': argb,
-    'fontSizeFraction': fontSizeFraction, 'widthFraction': widthFraction,
-    if (font != AnnotationTextFont.system) 'font': font.name,
-    if (rotation != 0) 'rotation': rotation,
-  };
+        'text': text,
+        'anchor': anchor.toJson(),
+        'argb': argb,
+        'fontSizeFraction': fontSizeFraction,
+        'widthFraction': widthFraction,
+        if (font != AnnotationTextFont.system) 'font': font.name,
+        if (rotation != 0) 'rotation': rotation,
+      };
   @override
   Map<String, Object?> toJson() => {
-    'kind': 'text', 'id': id, 'text': geometry,
-    'createdUtc': createdUtc.toUtc().toIso8601String(),
-    'updatedUtc': updatedUtc.toUtc().toIso8601String(), 'version': version,
-    'deletedUtc': deletedUtc?.toUtc().toIso8601String(),
-  };
+        'kind': 'text',
+        'id': id,
+        'text': geometry,
+        'createdUtc': createdUtc.toUtc().toIso8601String(),
+        'updatedUtc': updatedUtc.toUtc().toIso8601String(),
+        'version': version,
+        'deletedUtc': deletedUtc?.toUtc().toIso8601String(),
+      };
   factory TextAnnotation.fromJson(Map<String, dynamic> json) {
     final data = Map<String, dynamic>.from(json['text'] as Map);
-    return TextAnnotation(id: json['id'] as String, text: data['text'] as String,
-      anchor: NormalizedPoint.fromJson(Map<String, dynamic>.from(data['anchor'] as Map)),
-      argb: data['argb'] as int, fontSizeFraction: (data['fontSizeFraction'] as num).toDouble(),
-      widthFraction: (data['widthFraction'] as num).toDouble(),
-      rotation: data['rotation'] is num && (data['rotation'] as num).isFinite
-          ? (data['rotation'] as num).toDouble() : 0,
-      font: AnnotationTextFont.values.where((font) => font.name == data['font']).firstOrNull
-          ?? AnnotationTextFont.system,
-      createdUtc: DateTime.parse(json['createdUtc'] as String).toUtc(),
-      updatedUtc: DateTime.parse(json['updatedUtc'] as String).toUtc(),
-      version: json['version'] as int,
-      deletedUtc: json['deletedUtc'] == null ? null : DateTime.parse(json['deletedUtc'] as String).toUtc());
+    return TextAnnotation(
+        id: json['id'] as String,
+        text: data['text'] as String,
+        anchor: NormalizedPoint.fromJson(
+            Map<String, dynamic>.from(data['anchor'] as Map)),
+        argb: data['argb'] as int,
+        fontSizeFraction: (data['fontSizeFraction'] as num).toDouble(),
+        widthFraction: (data['widthFraction'] as num).toDouble(),
+        rotation: data['rotation'] is num && (data['rotation'] as num).isFinite
+            ? (data['rotation'] as num).toDouble()
+            : 0,
+        font: AnnotationTextFont.values
+                .where((font) => font.name == data['font'])
+                .firstOrNull ??
+            AnnotationTextFont.system,
+        createdUtc: DateTime.parse(json['createdUtc'] as String).toUtc(),
+        updatedUtc: DateTime.parse(json['updatedUtc'] as String).toUtc(),
+        version: json['version'] as int,
+        deletedUtc: json['deletedUtc'] == null
+            ? null
+            : DateTime.parse(json['deletedUtc'] as String).toUtc());
   }
 }
 
@@ -476,8 +525,9 @@ class ReaderSnapshot {
       required Map<DocumentKey, ReadingBookmark> bookmarks,
       List<MergeConflict> conflicts = const [],
       Set<String> mergeReceipts = const {}})
-      : annotations = Map.unmodifiable((annotations ?? pages).map((key, value) =>
-            MapEntry(key, List<PageAnnotation>.unmodifiable(value)))),
+      : annotations = Map.unmodifiable((annotations ?? pages).map(
+            (key, value) =>
+                MapEntry(key, List<PageAnnotation>.unmodifiable(value)))),
         setLists = List.unmodifiable(setLists),
         bookmarks = Map.unmodifiable(bookmarks),
         conflicts = List.unmodifiable(conflicts),
@@ -511,11 +561,15 @@ class ReaderSnapshot {
   final int generation;
   final Map<PageKey, List<PageAnnotation>> annotations;
   Map<PageKey, List<AnnotationStroke>>? _inkPages;
+
   /// Compatibility view for ink-only callers. Never use it to serialize a page.
-  Map<PageKey, List<AnnotationStroke>> get pages => _inkPages ??=
-      Map.unmodifiable(annotations.map((key, value) => MapEntry(key,
-          List<AnnotationStroke>.unmodifiable(value.whereType<AnnotationStroke>()))));
-  List<PageAnnotation> annotationsFor(PageKey key, {bool includeDeleted = false}) =>
+  Map<PageKey, List<AnnotationStroke>> get pages =>
+      _inkPages ??= Map.unmodifiable(annotations.map((key, value) => MapEntry(
+          key,
+          List<AnnotationStroke>.unmodifiable(
+              value.whereType<AnnotationStroke>()))));
+  List<PageAnnotation> annotationsFor(PageKey key,
+          {bool includeDeleted = false}) =>
       List.unmodifiable((annotations[key] ?? const <PageAnnotation>[])
           .where((item) => includeDeleted || !item.isDeleted));
   final List<ScoreSetList> setLists;
@@ -547,19 +601,21 @@ class ReaderSnapshot {
           Set<String>? mergeReceipts}) =>
       ReaderSnapshot(
           generation: generation + 1,
-          annotations: annotations ?? (pages == null ? this.annotations : _replaceInk(pages)),
+          annotations: annotations ??
+              (pages == null ? this.annotations : _replaceInk(pages)),
           setLists: setLists ?? this.setLists,
           bookmarks: bookmarks ?? this.bookmarks,
           conflicts: conflicts ?? this.conflicts,
           mergeReceipts: mergeReceipts ?? this.mergeReceipts);
 
   Map<PageKey, List<PageAnnotation>> _replaceInk(
-      Map<PageKey, List<AnnotationStroke>> ink) => {
-    for (final page in {...annotations.keys, ...ink.keys})
-      page: annotations[page]?.any((item) => item is TextAnnotation) == true
-          ? _inkKeepingText(annotations[page]!, ink[page] ?? const [])
-          : ink[page] ?? const [],
-  };
+          Map<PageKey, List<AnnotationStroke>> ink) =>
+      {
+        for (final page in {...annotations.keys, ...ink.keys})
+          page: annotations[page]?.any((item) => item is TextAnnotation) == true
+              ? _inkKeepingText(annotations[page]!, ink[page] ?? const [])
+              : ink[page] ?? const [],
+      };
 
   static List<PageAnnotation> _inkKeepingText(
       List<PageAnnotation> original, List<AnnotationStroke> ink) {
@@ -594,7 +650,9 @@ class ReaderSnapshot {
       };
 
   factory ReaderSnapshot.fromJson(Map<String, dynamic> json) {
-    if (json['schemaVersion'] != 1 && json['schemaVersion'] != 2 && json['schemaVersion'] != schemaVersion) {
+    if (json['schemaVersion'] != 1 &&
+        json['schemaVersion'] != 2 &&
+        json['schemaVersion'] != schemaVersion) {
       throw UnsupportedReaderSchemaException(json['schemaVersion']);
     }
     final pages = <PageKey, List<PageAnnotation>>{};
@@ -605,8 +663,8 @@ class ReaderSnapshot {
       if (pages.containsKey(key))
         throw const FormatException('Duplicate page key.');
       pages[key] = (page['strokes'] as List)
-          .map((stroke) => PageAnnotation.fromJson(
-              Map<String, dynamic>.from(stroke as Map)))
+          .map((stroke) =>
+              PageAnnotation.fromJson(Map<String, dynamic>.from(stroke as Map)))
           .toList();
     }
     final bookmarks = <DocumentKey, ReadingBookmark>{};

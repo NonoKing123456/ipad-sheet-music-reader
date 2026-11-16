@@ -1,4 +1,5 @@
 import '../recent/recent_reading_store.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -13,6 +14,7 @@ import 'package:path/path.dart' as p;
 
 import 'windows_file_identity.dart';
 import 'page_count_service.dart';
+import 'library_diagnostics.dart';
 
 class LibraryScanPacket {
   const LibraryScanPacket(
@@ -37,13 +39,15 @@ typedef LibraryCatalogLoader = Future<LibraryCatalog> Function(
   String state,
 );
 
-Future<LibraryCatalog> _openCatalog(String root, String state) =>
-    LibraryCatalog.open(
-      rootPath: root,
-      statePath: state,
-      fileIdentityResolver: windowsFileIdentity,
-      stateIdentityResolver: windowsFileIdentity,
-    );
+Future<LibraryCatalog> _openCatalog(String root, String state) {
+  initializeLibraryDiagnostics();
+  return LibraryCatalog.open(
+    rootPath: root,
+    statePath: state,
+    fileIdentityResolver: windowsFileIdentity,
+    stateIdentityResolver: windowsFileIdentity,
+  );
+}
 
 Future<LibraryCatalog> _openInWorker(String root, String state) =>
     Isolate.run(() async {
@@ -71,7 +75,9 @@ class _ScanJob {
   }
 }
 
-Future<void> _scanWorker((String, String, bool, bool, Set<String>?, SendPort) request) async {
+Future<void> _scanWorker(
+  (String, String, bool, bool, Set<String>?, SendPort) request,
+) async {
   final (root, state, verify, metadata, dirtyPaths, reply) = request;
   final commands = ReceivePort();
   var yieldRequested = false;
@@ -110,8 +116,9 @@ Future<LibraryScanPacket> _cooperativeScan(
   String root,
   String state,
   bool verify,
-  bool metadata, [Set<String>? dirtyPaths]
-) async {
+  bool metadata, [
+  Set<String>? dirtyPaths,
+]) async {
   // A foreground job that was already queued runs before a new idle scan.
   final key = _catalogJobKey(state);
   await _foregroundTasks[key]?.catchError((Object _) {});
@@ -320,8 +327,10 @@ class LibraryController extends ChangeNotifier {
         final external = _external(source, e);
         _owners[external.id] = (source, e);
         _externalEntries[external.id] = external;
-        _searchText[external.id] =
-            PreparedSearchText.withPrefix(prefix, e.preparedSearchPath);
+        _searchText[external.id] = PreparedSearchText.withPrefix(
+          prefix,
+          e.preparedSearchPath,
+        );
         entries.add(external);
       }
     }
@@ -490,7 +499,8 @@ class LibraryController extends ChangeNotifier {
           scan.requestYield();
           try {
             await scan.done.future;
-          } catch (_) {
+          } catch (error, stack) {
+            logLibraryFailure('prepare_scan_wait_failed', error, stack);
             // The foreground job reloads the durable generation independently.
           }
         }
@@ -577,7 +587,8 @@ class LibraryController extends ChangeNotifier {
           } else {
             pending[request.key] = request.value;
           }
-        } catch (_) {
+        } catch (error, stack) {
+          logLibraryFailure('batch_ready_check_failed', error, stack);
           /* Worker reports this file without aborting siblings. */
           pending[request.key] = request.value;
         }
@@ -601,7 +612,8 @@ class LibraryController extends ChangeNotifier {
             scan.requestYield();
             try {
               await scan.done.future;
-            } catch (_) {
+            } catch (error, stack) {
+              logLibraryFailure('batch_scan_wait_failed', error, stack);
               /* Reload durable base. */
             }
           }
@@ -653,7 +665,8 @@ class LibraryController extends ChangeNotifier {
                   current.$2.id,
                 );
                 if (entry != null) ready[request.key] = entry;
-              } catch (_) {
+              } catch (error, stack) {
+                logLibraryFailure('batch_ready_recheck_failed', error, stack);
                 /* Keep successful siblings. */
               }
             }
@@ -705,8 +718,10 @@ class LibraryController extends ChangeNotifier {
       replacements[external.id] = external;
       _owners[external.id] = (source, entry);
       _externalEntries[external.id] = external;
-      _searchText[external.id] =
-          PreparedSearchText.withPrefix(prefix, entry.preparedSearchPath);
+      _searchText[external.id] = PreparedSearchText.withPrefix(
+        prefix,
+        entry.preparedSearchPath,
+      );
     }
     _combined = _combined!.replacingEntries(
       replacements.values,
@@ -856,7 +871,8 @@ class LibraryController extends ChangeNotifier {
           registry = Map<String, dynamic>.from(
             jsonDecode(await registryFile.readAsString()) as Map,
           );
-        } catch (_) {
+        } catch (error, stack) {
+          logLibraryFailure('registry_primary_read_failed', error, stack);
           registry = Map<String, dynamic>.from(
             jsonDecode(await File('${registryFile.path}.backup').readAsString())
                 as Map,
@@ -954,7 +970,9 @@ class LibraryController extends ChangeNotifier {
     storageWarnings = const [];
     _scanQueued = false;
     _verifyQueued = false;
-    _queuedFullScan = false; _queuedDirtyPaths.clear(); _watchDirty.clear();
+    _queuedFullScan = false;
+    _queuedDirtyPaths.clear();
+    _watchDirty.clear();
     notifyListeners();
     try {
       if (persist) await _saveRegistry();
@@ -1077,12 +1095,14 @@ class LibraryController extends ChangeNotifier {
           .watch(recursive: true)
           .listen(
             (event) => _watchEvent(source.id, source.root, event),
-            onError: (Object _) {
+            onError: (Object error, StackTrace stack) {
+              logLibraryFailure('added_watch_stream_failed', error, stack);
               source.online = false;
               if (!_disposed) notifyListeners();
             },
           );
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('added_watch_failed', error, stack);
       source.online = false;
     }
   }
@@ -1096,22 +1116,40 @@ class LibraryController extends ChangeNotifier {
     void retain() {
       source.refreshQueued = true;
       source.verifyQueued = source.verifyQueued || verifyAll;
-      if (dirtyPaths == null) { source.fullScanQueued = true; }
-      else { source.dirtyQueued.addAll(dirtyPaths); }
+      if (dirtyPaths == null) {
+        source.fullScanQueued = true;
+      } else {
+        source.dirtyQueued.addAll(dirtyPaths);
+      }
     }
-    if (source.running) { retain(); return; }
+
+    if (source.running) {
+      retain();
+      return;
+    }
     source.running = true;
     source.retry?.cancel();
     source.retry = null;
     source.verifyQueued = false;
-    source.refreshQueued = false; source.fullScanQueued = false; source.dirtyQueued.clear();
+    source.refreshQueued = false;
+    source.fullScanQueued = false;
+    source.dirtyQueued.clear();
     _extraJobs++;
     notifyListeners();
     try {
       source.online = await Directory(source.root).exists();
-      if (!source.online) { retain(); return; }
+      if (!source.online) {
+        retain();
+        return;
+      }
       final packet = dirtyPaths != null && !verifyAll
-          ? await _cooperativeScan(source.root, source.catalog.statePath, false, true, dirtyPaths)
+          ? await _cooperativeScan(
+              source.root,
+              source.catalog.statePath,
+              false,
+              true,
+              dirtyPaths,
+            )
           : verifyAll
           ? await _scanInWorker(
               source.catalog.rootPath,
@@ -1129,9 +1167,15 @@ class LibraryController extends ChangeNotifier {
       if (!_disposed) {
         source.retry = Timer(
           const Duration(milliseconds: 250),
-          () =>
-              unawaited(_refreshAdded(source, verifyAll: source.verifyQueued,
-                dirtyPaths: source.fullScanQueued ? null : Set.of(source.dirtyQueued))),
+          () => unawaited(
+            _refreshAdded(
+              source,
+              verifyAll: source.verifyQueued,
+              dirtyPaths: source.fullScanQueued
+                  ? null
+                  : Set.of(source.dirtyQueued),
+            ),
+          ),
         );
       }
     } catch (failure) {
@@ -1143,9 +1187,18 @@ class LibraryController extends ChangeNotifier {
       _extraJobs--;
       if (!_disposed) notifyListeners();
       if (source.refreshQueued && source.retry == null && !_disposed) {
-        source.retry = Timer(const Duration(milliseconds: 650), () => unawaited(
-          _refreshAdded(source, verifyAll: source.verifyQueued,
-            dirtyPaths: source.fullScanQueued ? null : Set.of(source.dirtyQueued))));
+        source.retry = Timer(
+          const Duration(milliseconds: 650),
+          () => unawaited(
+            _refreshAdded(
+              source,
+              verifyAll: source.verifyQueued,
+              dirtyPaths: source.fullScanQueued
+                  ? null
+                  : Set.of(source.dirtyQueued),
+            ),
+          ),
+        );
       }
     }
   }
@@ -1176,15 +1229,24 @@ class LibraryController extends ChangeNotifier {
     String? relative(String absolute) {
       final actual = p.normalize(p.absolute(absolute));
       if (!p.isWithin(root, actual) && !p.equals(root, actual)) return null;
-      return p.relative(actual, from: root).split(p.separator).join('/').replaceFirst(RegExp(r'^\.$'), '');
+      return p
+          .relative(actual, from: root)
+          .split(p.separator)
+          .join('/')
+          .replaceFirst(RegExp(r'^\.$'), '');
     }
+
     final first = relative(event.path);
     if (first != null) {
       paths = {first};
       if (event is FileSystemMoveEvent) {
         final destination = event.destination;
         final target = destination == null ? null : relative(destination);
-        if (target == null) { paths = null; } else { paths.add(target); }
+        if (target == null) {
+          paths = null;
+        } else {
+          paths.add(target);
+        }
       }
     }
     if (_watchDirty.containsKey(sourceId)) {
@@ -1194,18 +1256,24 @@ class LibraryController extends ChangeNotifier {
     if (paths != null && paths.length > 256) paths = null;
     _watchDirty[sourceId] = paths;
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 650), () => unawaited(_drainWatchChanges()));
+    _debounce = Timer(
+      const Duration(milliseconds: 650),
+      () => unawaited(_drainWatchChanges()),
+    );
   }
 
   Future<void> _drainWatchChanges() async {
-    final changes = Map<String, Set<String>?>.of(_watchDirty); _watchDirty.clear();
+    final changes = Map<String, Set<String>?>.of(_watchDirty);
+    _watchDirty.clear();
     for (final change in changes.entries) {
       if (_disposed) return;
       if (change.key == _primaryId) {
         await _rescanPrimary(includeAdded: false, dirtyPaths: change.value);
       } else {
         final source = _added.where((s) => s.id == change.key).firstOrNull;
-        if (source != null) await _refreshAdded(source, dirtyPaths: change.value);
+        if (source != null) {
+          await _refreshAdded(source, dirtyPaths: change.value);
+        }
       }
     }
   }
@@ -1213,10 +1281,10 @@ class LibraryController extends ChangeNotifier {
   void scheduleRescan() {
     if (_disposed || rootPath == null) return;
     _debounce?.cancel();
-    _debounce = Timer(
-      const Duration(milliseconds: 650),
-      () { _watchDirty.clear(); unawaited(rescan()); },
-    );
+    _debounce = Timer(const Duration(milliseconds: 650), () {
+      _watchDirty.clear();
+      unawaited(rescan());
+    });
   }
 
   Future<void> rescan({bool verifyAll = false}) async {
@@ -1233,7 +1301,10 @@ class LibraryController extends ChangeNotifier {
 
   /// An explicit host import needs its source's adopted index before replying.
   /// Use the existing scan queue, including its foreground-read yield policy.
-  Future<void> refreshImportedSource(String sourceId, {String? relativePath}) async {
+  Future<void> refreshImportedSource(
+    String sourceId, {
+    String? relativePath,
+  }) async {
     bool sourceScanning() => sourceId == _primaryId
         ? _scanningEpoch == _epoch || _scanQueued
         : _added.any(
@@ -1264,11 +1335,17 @@ class LibraryController extends ChangeNotifier {
     await waitForIdle();
     if (_disposed) throw StateError('Library closed.');
     if (sourceId == _primaryId) {
-      await _rescanPrimary(includeAdded: false, dirtyPaths: relativePath == null ? null : {relativePath});
+      await _rescanPrimary(
+        includeAdded: false,
+        dirtyPaths: relativePath == null ? null : {relativePath},
+      );
     } else {
       final source = _added.where((s) => s.id == sourceId).firstOrNull;
       if (source == null) throw StateError('Source removed.');
-      await _refreshAdded(source, dirtyPaths: relativePath == null ? null : {relativePath});
+      await _refreshAdded(
+        source,
+        dirtyPaths: relativePath == null ? null : {relativePath},
+      );
     }
     await waitForIdle();
     if (_disposed || !sources.any((s) => s.id == sourceId && s.online)) {
@@ -1283,11 +1360,19 @@ class LibraryController extends ChangeNotifier {
   }) async {
     if (_disposed || rootPath == null || _catalog == null) return;
     void retain() {
-      _scanQueued = true; _verifyQueued = _verifyQueued || verifyAll;
-      if (dirtyPaths == null) { _queuedFullScan = true; }
-      else { _queuedDirtyPaths.addAll(dirtyPaths); }
+      _scanQueued = true;
+      _verifyQueued = _verifyQueued || verifyAll;
+      if (dirtyPaths == null) {
+        _queuedFullScan = true;
+      } else {
+        _queuedDirtyPaths.addAll(dirtyPaths);
+      }
     }
-    if (_scanningEpoch == _epoch) { retain(); return; }
+
+    if (_scanningEpoch == _epoch) {
+      retain();
+      return;
+    }
     final epoch = _epoch;
     final root = _catalog!.rootPath;
     final state = _catalog!.statePath;
@@ -1298,8 +1383,12 @@ class LibraryController extends ChangeNotifier {
       _primaryOnline = await Directory(root).exists();
       if (!_primaryOnline) {
         if (dirtyPaths != null) {
-          if (!_watchDirty.containsKey(_primaryId) || _watchDirty[_primaryId] != null) {
-            _watchDirty[_primaryId] = {...?_watchDirty[_primaryId], ...dirtyPaths};
+          if (!_watchDirty.containsKey(_primaryId) ||
+              _watchDirty[_primaryId] != null) {
+            _watchDirty[_primaryId] = {
+              ...?_watchDirty[_primaryId],
+              ...dirtyPaths,
+            };
           }
         }
         for (final source in _added.toList()) {
@@ -1345,11 +1434,18 @@ class LibraryController extends ChangeNotifier {
       retain();
     } catch (failure) {
       if (dirtyPaths != null) {
-        if (!_watchDirty.containsKey(_primaryId) || _watchDirty[_primaryId] != null) {
-          _watchDirty[_primaryId] = {...?_watchDirty[_primaryId], ...dirtyPaths};
+        if (!_watchDirty.containsKey(_primaryId) ||
+            _watchDirty[_primaryId] != null) {
+          _watchDirty[_primaryId] = {
+            ...?_watchDirty[_primaryId],
+            ...dirtyPaths,
+          };
         }
         _debounce?.cancel();
-        _debounce = Timer(const Duration(seconds: 1), () => unawaited(_drainWatchChanges()));
+        _debounce = Timer(
+          const Duration(seconds: 1),
+          () => unawaited(_drainWatchChanges()),
+        );
       }
       debugPrint('LIBRARY scan_failed: $failure');
       if (!_disposed && epoch == _epoch) {
@@ -1361,9 +1457,20 @@ class LibraryController extends ChangeNotifier {
         notifyListeners();
         if (_scanQueued) {
           final verify = _verifyQueued;
-          final queued = _queuedFullScan ? null : Set<String>.of(_queuedDirtyPaths);
-          _scanQueued = false; _verifyQueued = false; _queuedFullScan = false; _queuedDirtyPaths.clear();
-          unawaited(_rescanPrimary(verifyAll: verify, includeAdded: includeAdded, dirtyPaths: queued));
+          final queued = _queuedFullScan
+              ? null
+              : Set<String>.of(_queuedDirtyPaths);
+          _scanQueued = false;
+          _verifyQueued = false;
+          _queuedFullScan = false;
+          _queuedDirtyPaths.clear();
+          unawaited(
+            _rescanPrimary(
+              verifyAll: verify,
+              includeAdded: includeAdded,
+              dirtyPaths: queued,
+            ),
+          );
         }
       }
     }

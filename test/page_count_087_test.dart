@@ -10,12 +10,16 @@ import 'package:reader_state/reader_state.dart';
 import 'package:path/path.dart' as p;
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/page_count_service.dart';
+import 'package:score_reader/library/library_widgets.dart';
+import 'package:score_reader/theme/reader_icons.dart';
+import 'package:score_reader/library/score_file_icon.dart';
+import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/library/windows_file_identity.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/sync_controller.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 
-import 'desktop_reader_fixture.dart' show desktopPdf, desktopUntil;
+import 'desktop_reader_085_test.dart' show desktopPdf, desktopUntil;
 
 class _RealHttp extends HttpOverrides {}
 
@@ -333,6 +337,7 @@ void main() {
         await tester.runAsync(() async {
           await library.initialize();
           await sync.initialize();
+          await workspace.store.createSetList('离线加入');
           await sync.collection!.updateIndex(
             CollectionIndex(
               id: 'demo',
@@ -364,24 +369,125 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(home: OfflineLibraryScreen(controller: sync)),
         );
-        await desktopUntil(tester, () => find.text('待获取').evaluate().isNotEmpty);
+        await desktopUntil(
+          tester,
+          () => find.byTooltip('尚未取得页数').evaluate().isNotEmpty,
+        );
         expect(find.text('PNG'), findsOneWidget);
-        expect(find.byIcon(Icons.picture_as_pdf_outlined),findsOneWidget);
-        expect(find.byIcon(Icons.image_outlined),findsOneWidget);
-        final appearances = [for(final ext in ['pdf','jpg','png','webp']) scoreFileAppearance('synthetic.$ext')];
-        expect(appearances.map((a)=>a.background).toSet().length,4);
-        expect(appearances.every((a)=>ThemeData.estimateBrightnessForColor(a.background) == Brightness.light),true);
+        final pdfIcon = find.byWidgetPredicate(
+          (widget) =>
+              widget is ScoreFileIcon &&
+              !widget.isFolder &&
+              widget.path.endsWith('.pdf'),
+        );
+        final pngIcon = find.byWidgetPredicate(
+          (widget) =>
+              widget is ScoreFileIcon &&
+              !widget.isFolder &&
+              widget.path.endsWith('.png'),
+        );
+        expect(pdfIcon, findsOneWidget);
+        expect(pngIcon, findsOneWidget);
+        for (final icon in [pdfIcon, pngIcon]) {
+          expect(tester.getSize(icon), const Size(36, 36));
+          expect(
+            tester.widget<ScoreFileIcon>(icon).state,
+            ScoreFileIconState.cloud,
+          );
+        }
+        final pdfOutline = find.descendant(
+          of: pdfIcon,
+          matching: find.byWidgetPredicate(
+            (w) => w is ReaderIcon && w.glyph == ReaderGlyph.file,
+          ),
+        );
+        final imageOutline = find.descendant(
+          of: pngIcon,
+          matching: find.byWidgetPredicate(
+            (w) => w is ReaderIcon && w.glyph == ReaderGlyph.image,
+          ),
+        );
+        expect(tester.widget<ReaderIcon>(pdfOutline).size, 28);
+        expect(tester.widget<ReaderIcon>(imageOutline).size, 28);
+        expect(
+          find.descendant(
+            of: find.ancestor(
+              of: pdfIcon,
+              matching: find.byType(LibraryFileRow),
+            ),
+            matching: find.byTooltip('尚未取得页数'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.ancestor(
+              of: pngIcon,
+              matching: find.byType(LibraryFileRow),
+            ),
+            matching: find.byTooltip('1 页'),
+          ),
+          findsOneWidget,
+        );
+        expect(find.byTooltip('曲谱选项'), findsNWidgets(2));
+        final pdfTile = find.ancestor(
+          of: pdfIcon,
+          matching: find.byType(LibraryFileRow),
+        );
+        await tester.tap(
+          find.descendant(of: pdfTile, matching: find.byTooltip('曲谱选项')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('加入曲单'));
+        await desktopUntil(
+          tester,
+          () => find.byType(AlertDialog).evaluate().isNotEmpty,
+        );
+        expect(find.byType(LibraryReaderScreen), findsNothing);
+        await tester.tap(find.text('离线加入'));
+        await tester.pump();
+        await tester.tap(find.text('加入所选曲单'));
+        await desktopUntil(
+          tester,
+          () =>
+              !workspace.saving && find.byType(AlertDialog).evaluate().isEmpty,
+        );
+        expect(
+          workspace
+              .store
+              .snapshot
+              .activeSetLists
+              .single
+              .activeItems
+              .single
+              .entryId,
+          'pdf',
+        );
+        expect(find.byType(LibraryReaderScreen), findsNothing);
+        final appearances = [
+          for (final ext in ['pdf', 'jpg', 'png', 'webp'])
+            scoreFileAppearance('synthetic.$ext'),
+        ];
+        expect(appearances.map((a) => a.background).toSet().length, 4);
+        expect(
+          appearances.every(
+            (a) =>
+                ThemeData.estimateBrightnessForColor(a.background) ==
+                Brightness.light,
+          ),
+          true,
+        );
         final view = sync.activeCollection!.directory;
         // A successful later metadata reply updates only the mounted row.
         final pdfRow = tester
-            .widgetList<ScoreFileMetadata>(find.byType(ScoreFileMetadata))
+            .widgetList<LibraryFileMetadata>(find.byType(LibraryFileMetadata))
             .firstWhere((row) => row.path.endsWith('.pdf'));
         sync.pageCounts.remember(
           PageMetadataKey(pdfRow.entryId, pdfRow.revisionId),
           12,
         );
         await tester.pump();
-        expect(find.text('12页'), findsOneWidget);
+        expect(find.text('12 页'), findsOneWidget);
         expect(sync.pageCounts.parses, 0);
         expect(sync.activeCollection!.directory, same(view));
         expect(tester.takeException(), isNull);

@@ -161,6 +161,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       _capture();
     }
   }
+
   @override
   void initState() {
     super.initState();
@@ -247,7 +248,8 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
       return (id.number - widget.pageNumber).abs() <= 1;
     }
     return id.number == widget.pageNumber ||
-        (_incoming == null &&
+        (widget.prewarm == null &&
+            _incoming == null &&
             _requested == _displayed &&
             id.number ==
                 widget.pageNumber +
@@ -515,9 +517,7 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     }
     _awaitingPaint = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted &&
-          _displayed == id &&
-          _requested == id) {
+      if (mounted && _displayed == id && _requested == id) {
         _surfaces[id]?.owner.onPresented?.call(id.document, id.number);
       }
     });

@@ -110,6 +110,10 @@ class Harness {
     final http = HttpClient();
     try {
       final request = await http.openUrl(method, server.uri.resolve(path));
+      if (path == '/state' || path == '/ack') {
+        request.headers
+            .set('x-reader-state-max-schema', ReaderSnapshot.schemaVersion);
+      }
       if (auth)
         request.headers
             .set('authorization', 'Bearer ${(await clientJson())['token']}');

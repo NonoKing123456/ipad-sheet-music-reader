@@ -4,10 +4,13 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
+import 'package:score_reader/library/library_widgets.dart';
+import 'package:score_reader/library/score_file_icon.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
@@ -96,15 +99,39 @@ void main() {
       }
 
       Finder row(String folder) => find.byWidgetPredicate(
-        (w) =>
-            w is ListTile &&
-            w.subtitle is Text &&
-            (w.subtitle! as Text).data == folder,
+        (w) => w is LibraryFileRow && w.name == folder,
       );
       Finder source(String name) => find.byWidgetPredicate(
-        (w) =>
-            w is ListTile && w.title is Text && (w.title! as Text).data == name,
+        (w) => w is LibraryNavigationItem && w.label == name,
       );
+      final currentMenu = find.byKey(
+        const ValueKey('offline-current-folder-menu'),
+      );
+      Future<void> folderMenu(String folder, bool needsDownload) async {
+        await tester.tap(
+          find.descendant(of: row(folder), matching: find.byTooltip('文件夹选项')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.text('下载此文件夹'),
+          needsDownload ? findsOneWidget : findsNothing,
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+      }
+
+      Future<void> sourceMenu(String name, bool needsDownload) async {
+        await tester.tap(source(name));
+        await tester.pump();
+        expect(currentMenu, needsDownload ? findsOneWidget : findsNothing);
+        if (!needsDownload) return;
+        await tester.tap(currentMenu);
+        await tester.pumpAndSettle();
+        expect(find.text('下载整个谱库'), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+      }
+
       void state(
         String sourceId,
         String folder,
@@ -149,9 +176,22 @@ void main() {
             home: OfflineLibraryScreen(controller: sync, isHome: true),
           ),
         );
-        expect(find.byTooltip('全部未下载 · 0 / 3 份'), findsWidgets);
-        expect(tester.widget<ListTile>(row('foo')).trailing, isNotNull);
-        expect(tester.widget<ListTile>(row('empty')).trailing, isNull);
+        state('A', '', 3, 0, 0, 0);
+        expect(
+          tester.widget<LibraryNavigationItem>(source('Source A')).count,
+          '3',
+        );
+        expect(find.byTooltip('全部未下载 · 0 / 2 份'), findsOneWidget);
+        await sourceMenu('Source A', true);
+        await folderMenu('foo', true);
+        await folderMenu('empty', false);
+        final emptyIcon = tester.widget<ScoreFileIcon>(
+          find.descendant(
+            of: row('empty'),
+            matching: find.byType(ScoreFileIcon),
+          ),
+        );
+        expect(emptyIcon.state, ScoreFileIconState.empty);
         expect(find.byTooltip('空文件夹'), findsWidgets);
         await receive(a);
         state('A', '', 3, 1, 1, 0);
@@ -160,24 +200,29 @@ void main() {
         state('B', 'foo', 1, 0, 0, 0);
         expect(find.byTooltip('部分已下载 · 1 / 2 份'), findsWidgets);
         await receive(b);
-        expect(tester.widget<ListTile>(row('foo')).trailing, isNull);
-        expect(tester.widget<ListTile>(row('foobar')).trailing, isNotNull);
+        await folderMenu('foo', false);
+        await folderMenu('foobar', true);
+        expect(find.byTooltip('全部已下载 · 2 / 2 份'), findsOneWidget);
         await tester.tap(row('foo'));
         await tester.pump();
+        expect(currentMenu, findsNothing);
         expect(find.text('下载此文件夹'), findsNothing);
-        expect(find.byTooltip('全部已下载 · 2 / 2 份'), findsWidgets);
-        await tester.tap(find.byTooltip('上一级文件夹'));
+        expect(find.byTooltip('全部已下载 · 1 / 1 份'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('directory-parent-button')));
         await tester.pump();
         await receive(c);
-        expect(tester.widget<ListTile>(source('Source A')).trailing, isNull);
-        expect(tester.widget<ListTile>(source('Source B')).trailing, isNotNull);
+        await sourceMenu('Source A', false);
         expect(find.text('下载整个谱库'), findsNothing);
-        expect(find.byTooltip('全部已下载 · 3 / 3 份'), findsWidgets);
+        state('A', '', 3, 3, 3, 0);
+        expect(find.byTooltip('全部已下载 · 2 / 2 份'), findsOneWidget);
+        await sourceMenu('Source B', true);
+        expect(find.byTooltip('全部未下载 · 0 / 1 份'), findsOneWidget);
+        await sourceMenu('Source A', false);
         final rules = sync.collection!.selection.toJson().toString();
         await tester.runAsync(() => sync.removeOfflineDownload(a.entryId));
         await refresh();
         state('A', 'foo', 2, 1, 1, 0);
-        expect(tester.widget<ListTile>(row('foo')).trailing, isNotNull);
+        await folderMenu('foo', true);
         await receive(a);
         final revised = CatalogItem(
           sourceId: b.sourceId,
@@ -194,8 +239,8 @@ void main() {
         state('A', '', 3, 2, 3, 1);
         state('A', 'foo', 2, 1, 2, 1);
         expect(find.byTooltip('部分已下载 · 2 / 2 份已有离线副本，1 份待更新'), findsWidgets);
-        expect(tester.widget<ListTile>(row('foo')).trailing, isNotNull);
-        expect(tester.widget<ListTile>(source('Source A')).trailing, isNotNull);
+        await folderMenu('foo', true);
+        await sourceMenu('Source A', true);
         // Removing a download intentionally changes its selection. Merely reading
         // or hiding the buttons does not mutate those durable rules.
         final afterRemoval = sync.collection!.selection.toJson().toString();

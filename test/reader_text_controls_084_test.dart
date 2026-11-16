@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/reader/annotation_text_layer.dart';
+import 'package:score_reader/reader/annotation_canvas.dart';
 import 'package:score_reader/reader/reader_input.dart';
 import 'package:score_reader/reader/reader_page_seek_bar.dart';
 import 'package:score_reader/reader/reader_stage.dart';
@@ -189,9 +190,9 @@ void main() {
         expect(find.byType(TextField), findsNothing);
         expect(workspace.store.snapshot.annotations, isEmpty);
         final rect = tester.getRect(find.byKey(state.controlKey));
-        expect(rect.height, 56);
-        expect(rect.bottom, 782);
-        expect(readerSeekDotCount(820, rect.width), 33);
+        expect(rect.height, 48);
+        expect(rect.bottom, 792);
+        expect(readerSeekDotCount(820, rect.width), 20);
         final touch = await tester.createGesture(pointer: 41);
         await touch.down(Offset(rect.left + 440, rect.center.dy));
         await tester.pump();
@@ -234,7 +235,16 @@ void main() {
               workspace.store.snapshot.strokesFor(inkPage).isNotEmpty,
         );
         final stroke = workspace.store.snapshot.strokesFor(inkPage).single;
-        expect(stroke.points.first.y, closeTo(rect.center.dy / 800, .0001));
+        final inkBox = tester.renderObject<RenderBox>(
+          find.byType(AnnotationCanvas),
+        );
+        expect(
+          stroke.points.first.y,
+          closeTo(
+            inkBox.globalToLocal(rect.center).dy / inkBox.size.height,
+            .0001,
+          ),
+        );
         expect(
           workspace.store.snapshot
               .annotationsFor(inkPage)
@@ -317,7 +327,17 @@ void main() {
       } finally {
         await tester.pumpWidget(const SizedBox());
         workspace.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
         await tester.binding.setSurfaceSize(null);
       }
     },
@@ -421,9 +441,8 @@ void main() {
         state.transform.value = Matrix4.diagonal3Values(4, 4, 1)
           ..setTranslationRaw(-720, -960, 0);
         await tester.pump();
-        final selectedBox =
-            state.selectionKey.currentContext!.findRenderObject()! as RenderBox;
-        final point = selectedBox.localToGlobal(const Offset(2, 2));
+        // v2 moves selected text through its explicit lower-left handle.
+        final point = tester.getCenter(find.byTooltip('移动文字'));
         final originalMatrix = state.transform.value.clone(),
             before = workspace.store.snapshot.generation;
         await finger.down(point);
@@ -491,14 +510,19 @@ void main() {
         expect(workspace.store.snapshot.generation, generation);
         state.transform.value = Matrix4.identity();
         await tester.pump();
-        final anchor = workspace.store.snapshot
+        final retainedText = workspace.store.snapshot
             .annotationsFor(initialPage)
             .whereType<TextAnnotation>()
-            .single
-            .anchor;
-        await tester.tapAt(Offset(anchor.x * 600 + 2, anchor.y * 800 + 2));
+            .single;
+        final anchorBox = tester.renderObject<RenderBox>(
+          find.byType(AnnotationTextLayer),
+        );
+        final anchorPoint = anchorBox.localToGlobal(
+          textAnnotationFrame(retainedText, anchorBox.size).center,
+        );
+        await tester.tapAt(anchorPoint);
         await tester.pump();
-        await finger.down(Offset(anchor.x * 600 + 2, anchor.y * 800 + 2));
+        await finger.down(anchorPoint);
         await finger.moveBy(const Offset(40, 0));
         await tester.pump();
         state.mode(false);
@@ -524,7 +548,7 @@ void main() {
           findsNothing,
           reason: 'far up without an intermediate move is not a text tap',
         );
-        await tester.tapAt(Offset(anchor.x * 600 + 2, anchor.y * 800 + 2));
+        await tester.tapAt(anchorPoint);
         await tester.pump();
         state.textControls.onEdit!();
         await tester.pumpAndSettle();
@@ -532,7 +556,7 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
         expect(workspace.store.snapshot.generation, generation);
-        await tester.tap(find.byTooltip('删除文字'));
+        await tester.tap(find.byKey(const ValueKey('text-action-delete')));
         await until(
           tester,
           () =>
@@ -560,7 +584,17 @@ void main() {
       } finally {
         await tester.pumpWidget(const SizedBox());
         workspace.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await tester.runAsync(() async {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              await dir.delete(recursive: true);
+              break;
+            } on FileSystemException catch (error) {
+              if (error.osError?.errorCode != 32 || attempt >= 4) rethrow;
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+            }
+          }
+        });
         await tester.binding.setSurfaceSize(null);
       }
     },

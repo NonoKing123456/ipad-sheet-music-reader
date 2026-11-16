@@ -191,7 +191,8 @@ void main() {
     final result = await library.rescan();
 
     expect(result.hasIncompleteAreas, isTrue);
-    expect(result.issues.single.stage, ScanIssueStage.enumeration);
+    // The root type guard reports unavailable roots before enumeration.
+    expect(result.issues.single.stage, ScanIssueStage.link);
     expect(result.missingEntryIds, isEmpty);
     expect(library.snapshot.entryById(id)!.status, EntryStatus.available);
     expect(library.snapshot.folders, contains('保留目录'));

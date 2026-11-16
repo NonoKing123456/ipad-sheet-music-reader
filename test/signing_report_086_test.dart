@@ -16,6 +16,7 @@ import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/signing/signing_expiry_chip.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
+import 'package:score_reader/sync/sync_screen.dart';
 
 class _RealLoopback extends HttpOverrides {}
 
@@ -376,13 +377,18 @@ void main() {
           ),
         );
         await tester.pump();
-        expect(find.text('到期时间待确认'), findsOneWidget);
+        // 415f21c keeps the last known expiry in the explicitly historical view.
+        expect(store.latest!.status.expiration, isNull);
+        expect(
+          find.text(SigningExpiry(finalDate).exactLocalTime),
+          findsOneWidget,
+        );
         expect(find.textContaining('上次读到的到期时间：'), findsOneWidget);
         expect(find.textContaining('该次确认：'), findsOneWidget);
         store.setAuthenticatedPeers(hostId, {});
         await tester.pump();
         expect(
-          find.text('到期时间待确认'),
+          find.text('尚未收到当前配对 iPad 的签名回报。'),
           findsOneWidget,
           reason: 'revocation also clears an already open details view',
         );
@@ -395,7 +401,8 @@ void main() {
         ))!;
         var legacyRequests = 0;
         legacy.listen((request) async {
-          legacyRequests++;
+          // Daily catalog probes (15421ba) are separate from signing retries.
+          if (request.uri.path == '/device-status/signing') legacyRequests++;
           await request.drain<void>();
           request.response.statusCode = 404;
           request.response.headers.contentType = ContentType.json;
@@ -404,6 +411,7 @@ void main() {
         });
         client.reportLocalSigningExpiry(finalDate);
         await reportUntil(tester, () => legacyRequests == 1);
+        // Observe beyond the real 2s retry deadline to prove 404 schedules no retry.
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 2200)),
         );
@@ -520,16 +528,30 @@ void main() {
         );
         await reportUntil(
           tester,
-          () => find.text('iPad签名剩余5天').evaluate().isNotEmpty,
+          () => find.text('签名6天').evaluate().isNotEmpty,
         );
         expect(reads, 0);
         expect(source.calls, 0);
-        await tester.tap(find.text('iPad签名剩余5天'));
+        await tester.tap(
+          find.ancestor(
+            of: find.byType(SigningExpiryChip),
+            matching: find.byType(InkWell),
+          ),
+        );
+        await reportUntil(
+          tester,
+          () => find.byType(SyncScreen).evaluate().isNotEmpty,
+        );
+        await tester.tap(find.text('管理'));
+        await reportUntil(tester, () => !tester.binding.hasScheduledFrame);
         await tester.pumpAndSettle();
         expect(find.textContaining('电脑收到：'), findsOneWidget);
-        expect(find.textContaining('上次回报'), findsNWidgets(2));
+        expect(find.text('iPad 签名上次回报'), findsOneWidget);
+        expect(find.textContaining('最近确认 '), findsOneWidget);
         expect(find.textContaining('功能更新需安装新版'), findsOneWidget);
         await tester.tap(find.text('知道了'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('关闭设备与同步'));
         await tester.pumpAndSettle();
         await tester.runAsync(() async {
           final other = await Directory('${dir.path}/other-root').create();
@@ -537,10 +559,10 @@ void main() {
         });
         await reportUntil(
           tester,
-          () => find.text('iPad签名未回报').evaluate().isNotEmpty,
+          () => find.text('未取得签名日期').evaluate().isNotEmpty,
         );
         expect(
-          find.text('iPad签名剩余5天'),
+          find.text('签名6天'),
           findsNothing,
           reason: 'switching the active server/root immediately hides the former pair cache',
         );

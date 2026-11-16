@@ -1097,17 +1097,14 @@ class _AddScoresState extends State<_AddScores> {
     final matches = widget.targets
         .where(
           (target) => _searchQuery.matches(
-            _preparedTargets.putIfAbsent(
-              target,
-              () {
-                final parent = target.parentFolderLabel;
-                return PreparedSearchText.physicalPath(
-                  target.sourceId == null && parent != null
-                      ? '$parent / ${p.posix.basename(target.displayPath.replaceAll('\\', '/'))}'
-                      : '${target.sourceName} / ${target.displayPath}',
-                );
-              },
-            ),
+            _preparedTargets.putIfAbsent(target, () {
+              final parent = target.parentFolderLabel;
+              return PreparedSearchText.physicalPath(
+                target.sourceId == null && parent != null
+                    ? '$parent / ${p.posix.basename(target.displayPath.replaceAll('\\', '/'))}'
+                    : '${target.sourceName} / ${target.displayPath}',
+              );
+            }),
           ),
         )
         .toList();
@@ -1140,8 +1137,9 @@ class _AddScoresState extends State<_AddScores> {
                   prefixIcon: ReaderIcon(ReaderGlyph.search),
                   hintText: '搜索曲名或路径',
                 ),
-                onChanged: (value) =>
-                    setState(() => _searchQuery = SearchQuery.physicalPath(value)),
+                onChanged: (value) => setState(
+                  () => _searchQuery = SearchQuery.physicalPath(value),
+                ),
               ),
               if (_message != null)
                 Padding(
@@ -1167,7 +1165,9 @@ class _AddScoresState extends State<_AddScores> {
                       ),
                       title: Text(
                         physicalFileDisplayName(
-                          p.posix.basename(target.displayPath.replaceAll('\\', '/')),
+                          p.posix.basename(
+                            target.displayPath.replaceAll('\\', '/'),
+                          ),
                         ),
                         style: ScoreText.headline,
                       ),

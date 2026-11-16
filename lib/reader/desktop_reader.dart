@@ -125,6 +125,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
 
   final _topKey = GlobalKey();
   final _arrangementMenu = MenuController();
+  final _arrangementFocus = FocusNode(debugLabel: 'spread arrangement');
   final _readingControls = ScrollController();
   EdgeInsets? _lastObstruction;
   bool _measuring = false;
@@ -174,6 +175,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
     _directoryAnimation.dispose();
     _animation.dispose();
     _readingControls.dispose();
+    _arrangementFocus.dispose();
     super.dispose();
   }
 
@@ -400,6 +402,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
           : '1、2页并排';
       final arrangement = MenuAnchor(
         controller: _arrangementMenu,
+        childFocusNode: _arrangementFocus,
         onOpen: () => widget.onMenuChanged?.call(true),
         onClose: () => widget.onMenuChanged?.call(false),
         style: const MenuStyle(
@@ -429,6 +432,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             height: ScoreLayout.desktopTarget,
             child: TextButton(
               key: const ValueKey('reader-arrangement-button'),
+              focusNode: _arrangementFocus,
               onPressed: disabled || widget.editing
                   ? null
                   : () => controller.isOpen
@@ -464,6 +468,25 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       final stacked = constraints.maxWidth < ScoreLayout.windowsSidebarMin;
       final showAnnotationCaption =
           constraints.maxWidth >= ScoreLayout.windowsSidebarMin;
+      double textWidth(String text) => (TextPainter(
+        text: TextSpan(
+          text: text,
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: 1,
+      )..layout()).width;
+      final annotationWidth = !showAnnotationCaption
+          ? ScoreLayout.desktopTarget
+          : math.max(
+              widget.editing
+                  ? ScoreLayout.readerAnnotationDoneButtonWidth
+                  : ScoreLayout.readerAnnotationButtonWidth,
+              ScoreLayout.iconVisual +
+                  ScoreSpace.sm +
+                  textWidth(widget.editing ? '完成批注' : '批注'),
+            );
       final actions = <Widget>[
         widget.pageControl ??
             TextButton(
@@ -490,24 +513,11 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             onPressed: disabled ? null : widget.onAnnotate,
             selected: widget.editing,
             target: ScoreLayout.desktopTarget,
-            width: !showAnnotationCaption
-                ? ScoreLayout.desktopTarget
-                : widget.editing
-                ? ScoreLayout.readerAnnotationDoneButtonWidth
-                : ScoreLayout.readerAnnotationButtonWidth,
+            width: annotationWidth,
           ),
         ...widget.primaryActions,
         ...widget.actions,
       ];
-      double textWidth(String text) => (TextPainter(
-        text: TextSpan(
-          text: text,
-          style: Theme.of(context).textTheme.labelLarge,
-        ),
-        textDirection: Directionality.of(context),
-        textScaler: MediaQuery.textScalerOf(context),
-        maxLines: 1,
-      )..layout()).width;
       final modeWidth =
           ['单页', '双页', '连续'].map(textWidth).fold<double>(0, (a, b) => a + b) +
           6 * ScoreSpace.md +
@@ -522,13 +532,7 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
       final actionWidth =
           textWidth(widget.pageLabel) +
           2 * ScoreSpace.sm +
-          (widget.onAnnotate == null
-              ? 0
-              : !showAnnotationCaption
-              ? ScoreLayout.desktopTarget
-              : widget.editing
-              ? ScoreLayout.readerAnnotationDoneButtonWidth
-              : ScoreLayout.readerAnnotationButtonWidth) +
+          (widget.onAnnotate == null ? 0 : annotationWidth) +
           (widget.primaryActions.length + widget.actions.length) *
               ScoreLayout.desktopTarget +
           (actions.length - 1) * ScoreSpace.xs;
@@ -580,52 +584,58 @@ class _DesktopReaderShellState extends State<DesktopReaderShell>
             const SizedBox(width: ScoreSpace.sm),
             if (titleWidth >= ScoreSpace.xxl)
               Flexible(
-                child: SizedBox(
-                  width: titleWidth,
-                  child: MenuAnchor(
-                    style: const MenuStyle(
-                      minimumSize: WidgetStatePropertyAll(
-                        Size(ScoreLayout.menuWidth, 0),
+                fit: FlexFit.tight,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(
+                    width: titleWidth,
+                    child: MenuAnchor(
+                      style: const MenuStyle(
+                        minimumSize: WidgetStatePropertyAll(
+                          Size(ScoreLayout.menuWidth, 0),
+                        ),
                       ),
-                    ),
-                    menuChildren: widget.documentMenu,
-                    onOpen: () => widget.onMenuChanged?.call(true),
-                    onClose: () => widget.onMenuChanged?.call(false),
-                    builder: (context, controller, _) => Semantics(
-                      button: true,
-                      label: '${physicalFileDisplayName(widget.title)}，曲谱操作',
-                      child: Tooltip(
-                        message: physicalFileDisplayName(widget.title),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: disabled || widget.documentMenu.isEmpty
-                              ? null
-                              : () => controller.isOpen
-                                    ? controller.close()
-                                    : controller.open(),
-                          child: SizedBox(
-                            key: const ValueKey('reader-title-menu'),
-                            height: ScoreLayout.readerTitleMenuHitHeight,
-                            child: Row(
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    physicalFileDisplayName(widget.title),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context).textTheme.bodyLarge
-                                        ?.copyWith(
-                                          color: t.ink900,
-                                          fontWeight: FontWeight.w500,
-                                        ),
+                      menuChildren: widget.documentMenu,
+                      onOpen: () => widget.onMenuChanged?.call(true),
+                      onClose: () => widget.onMenuChanged?.call(false),
+                      builder: (context, controller, _) => Semantics(
+                        button: true,
+                        label: '${physicalFileDisplayName(widget.title)}，曲谱操作',
+                        child: Tooltip(
+                          message: physicalFileDisplayName(widget.title),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: disabled || widget.documentMenu.isEmpty
+                                ? null
+                                : () => controller.isOpen
+                                      ? controller.close()
+                                      : controller.open(),
+                            child: SizedBox(
+                              key: const ValueKey('reader-title-menu'),
+                              height: ScoreLayout.readerTitleMenuHitHeight,
+                              child: Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      physicalFileDisplayName(widget.title),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyLarge
+                                          ?.copyWith(
+                                            color: t.ink900,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(width: ScoreSpace.xs),
-                                const ReaderIcon(
-                                  ReaderGlyph.chevronDown,
-                                  size: ScoreLayout.readerTitleChevron,
-                                ),
-                              ],
+                                  const SizedBox(width: ScoreSpace.xs),
+                                  const ReaderIcon(
+                                    ReaderGlyph.chevronDown,
+                                    size: ScoreLayout.readerTitleChevron,
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),

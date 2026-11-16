@@ -279,7 +279,10 @@ void main() {
           ),
           0xff000000,
         );
-        expect(reopened.snapshot.toJson()['schemaVersion'], ReaderSnapshot.schemaVersion);
+        expect(
+          reopened.snapshot.toJson()['schemaVersion'],
+          ReaderSnapshot.schemaVersion,
+        );
         final fresh = _stroke(
           '000-clock-skew-new-ink',
           _black,
@@ -540,7 +543,10 @@ void main() {
       await File(path).writeAsString(jsonEncode(again.toJson()));
       final reopened = await ReaderStateStore.open(statePath: path);
       expect(retained(reopened.snapshot, .2), isTrue);
-      expect(reopened.snapshot.toJson()['schemaVersion'], ReaderSnapshot.schemaVersion);
+      expect(
+        reopened.snapshot.toJson()['schemaVersion'],
+        ReaderSnapshot.schemaVersion,
+      );
       debugPrint(
         'LAYER_RETENTION_083 all_branch_refs=true rollback_pins_only_missing_geometry=true stale_same_id_union=true swapped_same_payload=true repeated_merge_no_archive_growth=true reopen_preserves=true',
       );

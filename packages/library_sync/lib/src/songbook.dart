@@ -375,8 +375,10 @@ class SongbookStore {
                           0)) chosen[item.id] = item;
     }
     final order = <String>{
-      ...nativeBase.items.map((e) => e.id),
-      ...chosen.keys
+      ...nativeBase.items.where((e) => !chosen[e.id]!.manual).map((e) => e.id),
+      // Preserve outline order; manual additions need a peer-independent order.
+      // The full-index digest tie-break can pick another base after a merge.
+      ...(chosen.keys.toList()..sort())
     };
     final items = order.map((id) => chosen[id]!).toList();
     // Suppress native originals of manually edited embedded entries on all peers.

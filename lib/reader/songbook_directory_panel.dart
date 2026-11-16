@@ -247,7 +247,9 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
       _preparedIndex = _index;
       _preparedItems = {
         for (final item in source)
-          item.id: PreparedSearchText('${item.ancestors.join(' ')} ${item.title}'),
+          item.id: PreparedSearchText(
+            '${item.ancestors.join(' ')} ${item.title}',
+          ),
       };
     }
     final items = all

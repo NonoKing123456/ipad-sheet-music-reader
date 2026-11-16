@@ -83,8 +83,8 @@ class LibraryEntry {
   PreparedSearchText? _preparedSearchPath;
 
   /// Pure metadata cache, intentionally excluded from JSON and wire formats.
-  PreparedSearchText get preparedSearchPath => _preparedSearchPath ??=
-      PreparedSearchText.physicalPath(relativePath);
+  PreparedSearchText get preparedSearchPath =>
+      _preparedSearchPath ??= PreparedSearchText.physicalPath(relativePath);
 
   ContentRevision get currentRevision =>
       revisions.firstWhere((revision) => revision.id == currentRevisionId);
@@ -99,15 +99,15 @@ class LibraryEntry {
     String? platformFileId,
   }) {
     final next = LibraryEntry(
-        id: id,
-        relativePath: relativePath ?? this.relativePath,
-        status: status ?? this.status,
-        availability: availability ?? this.availability,
-        revisions: revisions ?? this.revisions,
-        currentRevisionId: currentRevisionId ?? this.currentRevisionId,
-        lastSeenUtc: lastSeenUtc ?? this.lastSeenUtc,
-        platformFileId: platformFileId ?? this.platformFileId,
-      );
+      id: id,
+      relativePath: relativePath ?? this.relativePath,
+      status: status ?? this.status,
+      availability: availability ?? this.availability,
+      revisions: revisions ?? this.revisions,
+      currentRevisionId: currentRevisionId ?? this.currentRevisionId,
+      lastSeenUtc: lastSeenUtc ?? this.lastSeenUtc,
+      platformFileId: platformFileId ?? this.platformFileId,
+    );
     if (next.relativePath == this.relativePath) {
       next._preparedSearchPath = _preparedSearchPath;
     }

@@ -33,7 +33,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       FLUTTER_VERSION: 3.47.8
       FLUTTER_REVISION: 737ba8f885dc774b53b442759999a312c9461e4e
-      REVIEWED_SOURCE_SHA256: d1c748703e044b16587544d1cea412223467ac303700a9e0f9cd6f40ffb5d1f0
+      REVIEWED_SOURCE_SHA256: 150d4a97381f26b4b528ce0a518ef7d99dfe8253cd9c873c0cb9546863562638
       CI: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

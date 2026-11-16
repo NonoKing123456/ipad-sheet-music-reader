@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
 
 import 'windows_file_identity.dart';
+import 'library_diagnostics.dart';
 
 class ScoreFileAppearance {
   const ScoreFileAppearance(
@@ -278,7 +279,8 @@ class PageCountService {
         return null;
       }
       return count is int && count > 0 && count <= 100000 ? count : null;
-    } catch (_) {
+    } catch (error, stack) {
+      logLibraryFailure('page_count_cache_read_failed', error, stack);
       return null;
     }
   }

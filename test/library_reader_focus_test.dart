@@ -81,11 +81,14 @@ void main() {
   }
 
   testWidgets(
-    'mouse zoom keeps pedal active without touching paper and ignores held repeats',
+    'mouse mode selection keeps pedal active without touching paper and ignores held repeats',
     (tester) async {
       await mountReader(tester);
-      await mouseClick(tester, find.byTooltip('放大'));
-      expect(find.text('125%'), findsOneWidget);
+      // The approved Windows reader no longer exposes zoom buttons/percent in
+      // its fixed one-row navigation bar. Use its live mode control as the
+      // mouse-focused toolbar interaction; zoom itself remains gesture/wheel
+      // driven and is covered by the motion tests.
+      await mouseClick(tester, find.text('单页'));
       await tester.runAsync(() async {
         await tester.sendKeyDownEvent(LogicalKeyboardKey.pageDown);
         await tester.sendKeyRepeatEvent(LogicalKeyboardKey.pageDown);
@@ -103,16 +106,21 @@ void main() {
     'annotation tool and color mouse clicks retain pedal navigation',
     (tester) async {
       await mountReader(tester);
+      await mouseClick(tester, find.byTooltip('批注'));
+      await tester.pumpAndSettle();
       await mouseClick(
         tester,
         find.byKey(const ValueKey(ReaderTool.highlighter)),
       );
       await pageKey(tester, LogicalKeyboardKey.pageDown);
       expect(find.text('2 / 4'), findsOneWidget);
-      await mouseClick(tester, find.byTooltip('蓝色'));
+      await mouseClick(tester, find.byTooltip('颜色'));
+      await tester.pumpAndSettle();
+      await mouseClick(tester, find.byTooltip('颜色 4'));
+      await tester.pumpAndSettle();
       await pageKey(tester, LogicalKeyboardKey.pageDown);
       expect(find.text('3 / 4'), findsOneWidget);
-      await mouseClick(tester, find.byTooltip('放大'));
+      await mouseClick(tester, find.byKey(const ValueKey(ReaderTool.eraser)));
       await pageKey(tester, LogicalKeyboardKey.pageDown);
       expect(find.text('4 / 4'), findsOneWidget);
     },

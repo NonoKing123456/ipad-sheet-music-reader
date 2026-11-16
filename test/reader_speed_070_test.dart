@@ -52,6 +52,8 @@ void main() {
       ready[2]!();
       await tester.pump();
       await tester.pump();
+      await tester
+          .pump(); // Wait for the initial selected paint acknowledgement.
       expect(shown, [1]);
       final start = now();
       requested = now();
@@ -199,7 +201,7 @@ void main() {
         expect(loads['B'], 1);
         expect(loads['C'], 1);
         expect(sampler.sourceCount, lessThanOrEqualTo(4));
-        expect(find.text('B.png'), findsOneWidget);
+        expect(find.text('B'), findsOneWidget);
       } finally {
         await tester.pumpWidget(const SizedBox());
         for (var i = 0; i < 100 && workspace.saving; i++) {

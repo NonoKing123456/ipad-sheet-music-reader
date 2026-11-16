@@ -1,3 +1,6 @@
+import 'package:score_reader/theme/device_layout.dart';
+import 'package:score_reader/reader/reader_input.dart';
+
 import 'reader_fixture.dart';
 
 import 'package:flutter/gestures.dart';
@@ -47,19 +50,27 @@ void main() {
           filePath: p.join(directory.path, 'page.png'),
           displayPath: 'folder/page.png',
         );
-        await tester.binding.setSurfaceSize(const Size(360, 800));
+        final layout = DeviceLayoutController(simulateIpad: true);
+        addTearDown(layout.dispose);
+        await tester.binding.setSurfaceSize(const Size(810, 1080));
         addTearDown(() => tester.binding.setSurfaceSize(null));
         await tester.runAsync(
           () => tester.pumpWidget(
             MaterialApp(
-              home: LibraryReaderScreen(
-                workspace: workspace,
-                locate: (_) => target,
-                initialTarget: target,
-                setListId: listId,
-                itemId: itemId,
-                loader: (target) async =>
-                    LoadedScore(target: target, pageCount: 1, imageAspect: .75),
+              home: DeviceLayoutScope(
+                controller: layout,
+                child: LibraryReaderScreen(
+                  workspace: workspace,
+                  locate: (_) => target,
+                  initialTarget: target,
+                  setListId: listId,
+                  itemId: itemId,
+                  loader: (target) async => LoadedScore(
+                    target: target,
+                    pageCount: 1,
+                    imageAspect: .75,
+                  ),
+                ),
               ),
             ),
           ),
@@ -68,27 +79,51 @@ void main() {
           () async => Future<void>.delayed(const Duration(milliseconds: 50)),
         );
         await settleReader(tester);
-        await tester.tap(find.byTooltip('开发预览（模拟平板）'));
+        expect(find.byTooltip('开发预览（模拟平板）'), findsNothing);
         await tester.pump();
-        var viewport = tester.getSize(
-          find.byKey(const ValueKey('tablet-preview-viewport')),
-        );
+        var viewport = tester.getSize(find.byType(ReaderInput));
         expect(viewport.width / viewport.height, closeTo(.75, .001));
-        expect(find.text('批注'), findsNothing);
+        expect(find.text('批注').hitTestable(), findsNothing);
         expect(
           tester.takeException(),
           isNull,
           reason: 'narrow toolbar and footer must fit',
         );
-        await tester.tap(find.byTooltip('开发预览：切换横竖屏'));
+        await tester.binding.setSurfaceSize(const Size(1080, 810));
         await tester.pump();
-        viewport = tester.getSize(
-          find.byKey(const ValueKey('tablet-preview-viewport')),
-        );
+        viewport = tester.getSize(find.byType(ReaderInput));
         expect(viewport.width / viewport.height, closeTo(4 / 3, .001));
-        await tester.tap(find.byTooltip('放大'));
+        await settleReader(tester);
+        final center = tester.getCenter(find.byType(ReaderInput));
+        final left = await tester.startGesture(
+          center - const Offset(100, 0),
+          pointer: 101,
+        );
+        final right = await tester.startGesture(
+          center + const Offset(100, 0),
+          pointer: 102,
+        );
         await tester.pump();
-        await tester.tap(find.byTooltip('收起阅读工具'));
+        await right.moveBy(const Offset(50, 0));
+        await tester.pump();
+        await left.up();
+        await right.up();
+        expect(
+          tester
+              .widget<ReaderInput>(find.byType(ReaderInput))
+              .transform!
+              .value
+              .getMaxScaleOnAxis(),
+          closeTo(1.25, .001),
+        );
+        await tester.pump();
+        expect(find.byTooltip('批注').hitTestable(), findsNothing);
+        await settleReader(tester);
+        await tester.tapAt(tester.getCenter(find.byType(ReaderInput)));
+        await settleReader(tester);
+        await tester.tap(find.byTooltip('批注').hitTestable());
+        await settleReader(tester);
+        await tester.tap(find.byTooltip('画笔'));
         await settleReader(tester);
         final box = tester.renderObject<RenderBox>(
           find.byType(AnnotationCanvas),
@@ -110,16 +145,32 @@ void main() {
         await settleReader(tester);
         expect(workspace.saving, isFalse);
         final page = PageKey(entryId: 'e', revisionId: 'r', pageNumber: 1);
-        final stroke = workspace.store.snapshot.strokesFor(page).single;
+        final strokes = workspace.store.snapshot.strokesFor(page);
+        expect(
+          strokes,
+          hasLength(1),
+          reason: 'scaled stylus stroke must remain on its original page',
+        );
+        final stroke = strokes.single;
         expect(stroke.points.first.x, closeTo(.25, .001));
         expect(stroke.points.first.y, closeTo(.3, .001));
         expect(stroke.points.last.x, closeTo(.75, .001));
         expect(stroke.points.last.y, closeTo(.7, .001));
-        await tester.tapAt(box.localToGlobal(box.size.center(Offset.zero)));
+        // With the pen selected a tap would ink, so leave annotation first.
+        await tester.tap(find.byTooltip('完成批注').hitTestable());
         await settleReader(tester);
-        await tester.tap(find.byTooltip('开发预览：切换横竖屏'));
+        await tester.binding.setSurfaceSize(const Size(810, 1080));
         await tester.pump();
-        expect(find.text('100%'), findsOneWidget);
+        // Viewport changes keep a zoom above 1 (amendment 49: keep the zoom
+        // anchor); only an unzoomed view snaps back to identity.
+        expect(
+          tester
+              .widget<ReaderInput>(find.byType(ReaderInput))
+              .transform!
+              .value
+              .getMaxScaleOnAxis(),
+          closeTo(1.25, .001),
+        );
         expect(workspace.store.snapshot.strokesFor(page).single.id, stroke.id);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());

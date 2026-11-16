@@ -8,7 +8,7 @@ Local-first sheet music reading for Windows and iPad: folder libraries, PDF/imag
 
 [使用指南](docs/USER_GUIDE.md) · [安装与构建](docs/BUILDING.md) · [常见问题](docs/FAQ.md) · [架构说明](docs/ARCHITECTURE.md) · [版本记录](CHANGELOG.md) · [构建下载](https://github.com/NonoKing123456/ipad-sheet-music-reader/releases)
 
-> 当前源码版本：`0.8.10+41`。Windows 正式入口和两端本地分发包已更新；iPad IPA 需本地签名安装。
+> 当前源码版本：`0.8.10+57`。Windows 正式入口、GitHub Release 上的 Windows 安装包与根目录 iPad IPA 已更新；iPad IPA 需本地签名安装。
 
 ## +41 更新
 

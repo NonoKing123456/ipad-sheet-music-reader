@@ -34,7 +34,7 @@ void main() {
       }))!;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      await tester.binding.setSurfaceSize(const Size(360, 800));
+      await tester.binding.setSurfaceSize(const Size(640, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.runAsync(() async {
         await tester.pumpWidget(
@@ -49,7 +49,11 @@ void main() {
       });
       await tester.pumpAndSettle();
       expect(find.text('把整个谱库带在身边'), findsNothing);
-      expect(find.text('搜索离线曲名或文件夹'), findsOneWidget);
+      await tester.tap(find.byTooltip('搜索'));
+      await tester.pump();
+      expect(find.text('搜索曲名、谱库或文件夹'), findsOneWidget);
+      await tester.tap(find.byTooltip('关闭搜索'));
+      await tester.pump();
       expect(find.byTooltip('选择谱库文件夹'), findsNothing);
       expect(find.text('打开离线谱库'), findsNothing);
       var scans = 0;
@@ -67,6 +71,9 @@ void main() {
           null,
         ),
       );
+      await tester.tap(find.byKey(const ValueKey('offline-sync-management')));
+      await tester.pumpAndSettle();
+      expect(scans, 0, reason: 'opening management never starts scanning');
       await tester.runAsync(() async {
         await tester.tap(find.text('扫描电脑二维码'));
         await Future<void>.delayed(const Duration(milliseconds: 80));
@@ -77,7 +84,8 @@ void main() {
       expect(scans, 1);
       expect(find.text('电脑地址与端口'), findsNothing);
       expect(find.text('8位临时配对码'), findsNothing);
-      await tester.tap(find.text('高级诊断（通常不需要）'));
+      await tester.ensureVisible(find.text('连接与诊断'));
+      await tester.tap(find.text('连接与诊断'));
       await tester.pumpAndSettle();
       expect(find.text('电脑地址与端口'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -143,9 +151,14 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
       await tester.runAsync(controller.stopServer);
-      controller.dispose();
-      controller.library.dispose();
-      controller.workspace.dispose();
+      await tester.runAsync(() async {
+        controller.dispose();
+        controller.library.dispose();
+        controller.workspace.dispose();
+        // Disposal closes native signing-file watches asynchronously.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      });
+      await tester.pump();
       await tester.runAsync(() => directory.delete(recursive: true));
     },
   );
