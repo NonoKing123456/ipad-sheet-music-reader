@@ -33,6 +33,15 @@ class IosBackgroundTransfer
   final Duration pollInterval;
   void Function()? onChanged;
   final _batchMetadata = <String, List<CatalogItem>>{};
+
+  Future<void> pruneUnselected(String namespace, OfflineSelection selection) {
+    _batchMetadata.clear();
+    return _invoke<void>('pruneUnselected', {
+      'namespace': namespace,
+      'selection': selection.toJson(),
+    });
+  }
+
   void dispose() {
     channel.setMethodCallHandler(null);
   }
@@ -82,8 +91,8 @@ class IosBackgroundTransfer
       'items': items.map((item) => item.toJson()).toList(),
     });
     if (cancellation?.isCancelled == true) {
-      await pause(namespace);
-      cancellation!.check();
+      if (cancellation!.pausesBackgroundTransfers) await pause(namespace);
+      cancellation.check();
     }
   }
 
@@ -103,7 +112,9 @@ class IosBackgroundTransfer
     SyncCancellation? cancellation,
   ) async {
     void cancel() {
-      unawaited(pause(namespace).catchError((Object _) {}));
+      if (cancellation!.pausesBackgroundTransfers) {
+        unawaited(pause(namespace).catchError((Object _) {}));
+      }
     }
 
     cancellation?.addListener(cancel);

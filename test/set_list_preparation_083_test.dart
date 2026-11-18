@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:library_sync/library_sync.dart';
@@ -72,6 +73,195 @@ Future<void> _cleanup083(WidgetTester tester, Directory dir) async {
 }
 
 void main() {
+  testWidgets(
+    '29 picker reports no matches, clears previous feedback and preserves selected scores',
+    (tester) async {
+      final dir = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('picker-search-'),
+      ))!;
+      final workspace = ReaderWorkspace(
+        (await tester.runAsync(
+          () => ReaderStateStore.open(statePath: '${dir.path}/reader.json'),
+        ))!,
+      );
+      final list = (await tester.runAsync(
+        () => workspace.store.createSetList('排练'),
+      ))!;
+      var entries = [
+        for (final id in ['A', 'B'])
+          ScoreCatalogEntry(
+            entryId: id,
+            displayPath: '$id.pdf',
+            state: ScoreContentState.ready,
+          ),
+      ];
+      final picker = find.byType(BottomSheet);
+      Finder inPicker(Finder content) =>
+          find.descendant(of: picker, matching: content);
+      final input = inPicker(find.byType(TextField));
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SetListsScreen(
+                workspace: workspace,
+                embedded: true,
+                initialListId: list.id,
+                targets: () => [],
+                locate: (_) => null,
+                catalog: () => entries,
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('添加曲谱'));
+        await tester.pumpAndSettle();
+        await tester.tap(inPicker(find.widgetWithText(ListTile, 'A')));
+        final success = inPicker(find.text('已添加，可继续选择'));
+        await _until083(tester, () => success.evaluate().isNotEmpty);
+        await tester.enterText(input, 'qzxz');
+        await tester.pump();
+        expect(inPicker(find.text('未找到匹配的曲谱')), findsOneWidget);
+        expect(success, findsNothing);
+        expect(inPicker(find.byType(ListTile)), findsNothing);
+        await tester.tap(inPicker(find.byTooltip('清除搜索')));
+        await tester.pump();
+        expect(tester.widget<TextField>(input).controller!.text, isEmpty);
+        expect(inPicker(find.byType(ListTile)), findsNWidgets(2));
+        final a = inPicker(find.widgetWithText(ListTile, 'A'));
+        expect(
+          tester
+              .widget<Checkbox>(
+                find.descendant(of: a, matching: find.byType(Checkbox)),
+              )
+              .value,
+          isTrue,
+        );
+        expect(
+          workspace.store.snapshot
+              .setListById(list.id)!
+              .activeItems
+              .map((item) => item.entryId),
+          ['A'],
+        );
+        await tester.tap(inPicker(find.text('完成')));
+        await tester.pumpAndSettle();
+        entries = [];
+        await tester.tap(find.text('添加曲谱'));
+        await tester.pumpAndSettle();
+        expect(inPicker(find.text('谱库中还没有可添加的曲谱')), findsOneWidget);
+        expect(inPicker(find.text('未找到匹配的曲谱')), findsNothing);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        workspace.dispose();
+        await _cleanup083(tester, dir);
+      }
+    },
+  );
+
+  testWidgets(
+    '25 opening an unprepared set-list item distinguishes cancel, failure and ready',
+    (tester) async {
+      final dir = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('set-list-open-'),
+      ))!;
+      final workspace = ReaderWorkspace(
+        (await tester.runAsync(
+          () => ReaderStateStore.open(statePath: '${dir.path}/state.json'),
+        ))!,
+      );
+      final list = (await tester.runAsync(
+        () => workspace.store.createSetList('演出'),
+      ))!;
+      await tester.runAsync(() => workspace.store.addItem(list.id, 'solo'));
+      final path = '${dir.path}/Solo.png';
+      await writeSyntheticPaper(tester, path);
+      final bytes = (await tester.runAsync(() => File(path).readAsBytes()))!;
+      final target = ScoreTarget(
+        entryId: 'solo',
+        revisionId: 'r1',
+        filePath: path,
+        displayPath: 'Solo.png',
+        contentHash: sha256.convert(bytes).toString(),
+      );
+      final messenger = GlobalKey<ScaffoldMessengerState>();
+      var calls = 0, ready = false;
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            scaffoldMessengerKey: messenger,
+            home: Scaffold(
+              body: SetListsScreen(
+                workspace: workspace,
+                embedded: true,
+                initialListId: list.id,
+                targets: () => ready ? [target] : [],
+                locate: (id) => ready && id == target.entryId ? target : null,
+                catalog: () => [
+                  ScoreCatalogEntry(
+                    entryId: target.entryId,
+                    displayPath: target.displayPath,
+                    state: ready
+                        ? ScoreContentState.ready
+                        : ScoreContentState.notDownloaded,
+                  ),
+                ],
+                prepare: (ids) async {
+                  expect(ids, {target.entryId});
+                  calls++;
+                  if (calls == 1) return '存储空间不足。';
+                  ready = true;
+                  return '已准备。';
+                },
+              ),
+            ),
+          ),
+        );
+        Future<void> choose(String button) async {
+          await tester.tap(find.text('Solo'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(button));
+          await _until083(
+            tester,
+            () => find.byType(AlertDialog).evaluate().isEmpty,
+          );
+        }
+
+        await choose('取消');
+        expect(calls, 0);
+        expect(find.text('Solo'), findsOneWidget);
+        expect(find.byType(LibraryReaderScreen), findsNothing);
+        expect(find.byType(SnackBar), findsNothing);
+        await choose('开始准备');
+        expect(calls, 1);
+        expect(find.textContaining('存储空间不足'), findsOneWidget);
+        expect(find.byType(LibraryReaderScreen), findsNothing);
+        messenger.currentState!.removeCurrentSnackBar();
+        await tester.pumpAndSettle();
+        expect(find.byType(SnackBar), findsNothing);
+        await choose('开始准备');
+        final presentedPage = find.descendant(
+          of: find.byType(LibraryReaderScreen),
+          matching: find.byType(RawImage),
+        );
+        await _until083(tester, () => presentedPage.evaluate().isNotEmpty);
+        expect(tester.widget<RawImage>(presentedPage.first).image, isNotNull);
+        expect(calls, 2);
+        expect(
+          tester
+              .widget<LibraryReaderScreen>(find.byType(LibraryReaderScreen))
+              .initialTarget
+              .entryId,
+          'solo',
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        workspace.dispose();
+        await _cleanup083(tester, dir);
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
   testWidgets(
     'Windows metadata-only scores can be named and added before opening; explicit set-list preparation hashes only its targets',
     (tester) async {
@@ -296,10 +486,15 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.text('添加曲谱'));
         await tester.pumpAndSettle();
-        expect(find.text('A'), findsOneWidget);
-        expect(find.text('B'), findsOneWidget);
-        expect(find.text('C'), findsOneWidget);
-        await tester.tap(find.text('A'));
+        final picker = find.byType(BottomSheet);
+        Finder scoreRow(String title) => find.descendant(
+          of: picker,
+          matching: find.widgetWithText(ListTile, title),
+        );
+        expect(scoreRow('A'), findsOneWidget);
+        expect(scoreRow('B'), findsOneWidget);
+        expect(scoreRow('C'), findsOneWidget);
+        await tester.tap(scoreRow('A'));
         await _until083(
           tester,
           () =>
@@ -309,7 +504,15 @@ void main() {
                   .length ==
               1,
         );
-        await tester.tap(find.text('A'));
+        final included = find.descendant(
+          of: scoreRow('A'),
+          matching: find.byType(Checkbox),
+        );
+        await _until083(
+          tester,
+          () => tester.widget<Checkbox>(included).value == true,
+        );
+        await tester.tap(scoreRow('A'));
         await _until083(tester, () => !reader.workspace.saving);
         expect(
           reader.workspace.store.snapshot.setListById(list.id)!.activeItems,
@@ -332,7 +535,7 @@ void main() {
                   .length ==
               2,
         );
-        await tester.tap(find.text('C'));
+        await tester.tap(scoreRow('C'));
         await _until083(
           tester,
           () =>

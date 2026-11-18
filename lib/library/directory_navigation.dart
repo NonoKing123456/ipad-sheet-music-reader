@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+import '../theme/device_layout.dart';
 import '../theme/tokens.dart';
 import '../theme/reader_icons.dart';
 
@@ -56,46 +57,96 @@ class _DirectorySearchFieldState extends State<DirectorySearchField> {
   @override
   Widget build(BuildContext context) {
     final tokens = ScoreTokens.of(context);
-    return Container(
-      height: 40,
-      padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.md),
-      decoration: BoxDecoration(
-        color: tokens.paper0,
-        borderRadius: ScoreRadius.controlAll,
-        border: Border.all(color: tokens.pine),
-      ),
-      child: Row(
-        children: [
-          ReaderIcon(ReaderGlyph.search, color: tokens.ink500),
-          const SizedBox(width: ScoreSpace.md),
-          Expanded(
-            child: TextField(
-              key: const ValueKey('directory-search-input'),
-              controller: widget.controller,
-              focusNode: widget.focusNode,
-              onTapOutside: (_) {},
-              style: ScoreText.body.copyWith(color: tokens.ink900),
-              decoration: const InputDecoration(
-                hintText: '搜索曲名、谱库或文件夹',
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.zero,
+    final tablet = DeviceLayoutScope.isCompact(context);
+    return LayoutBuilder(
+      builder: (context, bounds) {
+        final tight = tablet && bounds.maxWidth < 3 * ScoreLayout.touchTarget;
+        return Container(
+          height: ScoreLayout.desktopTarget,
+          padding: EdgeInsets.only(
+            left: tight ? ScoreSpace.xs : ScoreSpace.md,
+            right: tablet ? 0 : ScoreSpace.md,
+          ),
+          decoration: BoxDecoration(
+            color: tokens.paper0,
+            borderRadius: ScoreRadius.controlAll,
+            border: Border.all(color: tokens.pine),
+          ),
+          child: Row(
+            children: [
+              if (!tight) ...[
+                ReaderIcon(ReaderGlyph.search, color: tokens.ink500),
+                const SizedBox(width: ScoreSpace.md),
+              ],
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('directory-search-input'),
+                  controller: widget.controller,
+                  focusNode: widget.focusNode,
+                  onTapOutside: (_) {},
+                  style: ScoreText.body.copyWith(color: tokens.ink900),
+                  decoration: const InputDecoration(
+                    hintText: '搜索曲名、谱库或文件夹',
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
               ),
-            ),
+              if (tablet)
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: widget.controller,
+                  builder: (context, value, _) => value.text.isEmpty
+                      ? const SizedBox.shrink()
+                      : SizedBox(
+                          width: math.min(
+                            ScoreLayout.touchTarget,
+                            bounds.maxWidth / 2,
+                          ),
+                          height: double.infinity,
+                          child: IconButton(
+                            tooltip: '清除搜索词',
+                            padding: EdgeInsets.zero,
+                            icon: Container(
+                              width: ScoreLayout.searchClearDiameter,
+                              height: ScoreLayout.searchClearDiameter,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: tokens.ink500,
+                              ),
+                              child: ReaderIcon(
+                                ReaderGlyph.close,
+                                size: ScoreLayout.iconSmallVisual,
+                                color: tokens.paper0,
+                              ),
+                            ),
+                            onPressed: () {
+                              widget.controller.clear();
+                              widget.focusNode.requestFocus();
+                            },
+                          ),
+                        ),
+                )
+              else
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: tokens.hair),
+                    borderRadius: ScoreRadius.controlAll,
+                  ),
+                  child: Text(
+                    'Esc',
+                    style: ScoreText.micro.copyWith(color: tokens.ink500),
+                  ),
+                ),
+            ],
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-              border: Border.all(color: tokens.hair),
-              borderRadius: ScoreRadius.controlAll,
-            ),
-            child: Text(
-              'Esc',
-              style: ScoreText.micro.copyWith(color: tokens.ink500),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -114,6 +165,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
     required this.rootLabel,
     required this.currentPath,
     this.onNavigate,
+    this.onChooseSource,
     this.trailing,
   });
 
@@ -126,6 +178,7 @@ class DirectoryBreadcrumbs extends StatelessWidget {
   /// 跳转到某个祖先目录；传入的路径同样相对来源根，'' 表示根。
   final ValueChanged<String>? onNavigate;
 
+  final VoidCallback? onChooseSource;
   final Widget? trailing;
 
   static const double barHeight = ScoreSpace.huge;
@@ -321,12 +374,21 @@ class DirectoryBreadcrumbs extends StatelessWidget {
       );
     }
 
+    final onBack = currentPath.isEmpty
+        ? onChooseSource
+        : onNavigate == null
+        ? null
+        : () => onNavigate!(_parentPath);
     return SizedBox(
       height: barHeight,
       child: Row(
         children: [
           Tooltip(
-            message: currentPath.isEmpty ? '已在根目录' : '返回上一级：$_parentLabel',
+            message: currentPath.isNotEmpty
+                ? '返回上一级：$_parentLabel'
+                : onChooseSource == null
+                ? '已在根目录'
+                : '选择其他谱库',
             child: IconButton(
               key: const ValueKey('directory-parent-button'),
               style: IconButton.styleFrom(
@@ -336,13 +398,11 @@ class DirectoryBreadcrumbs extends StatelessWidget {
                 padding: EdgeInsets.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              onPressed: currentPath.isEmpty || onNavigate == null
-                  ? null
-                  : () => onNavigate!(_parentPath),
+              onPressed: onBack,
               icon: ReaderIcon(
                 ReaderGlyph.back,
                 size: ScoreLayout.iconVisual,
-                color: currentPath.isEmpty ? tokens.ink300 : tokens.ink700,
+                color: onBack == null ? tokens.ink300 : tokens.ink700,
               ),
             ),
           ),

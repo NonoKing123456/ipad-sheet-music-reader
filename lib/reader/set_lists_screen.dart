@@ -440,6 +440,9 @@ class _SetListsEntryState extends State<_SetListsEntry> {
           preparationNotice: screen.preparationNotice,
           embedded: screen.embedded,
           onBack: screen.embedded ? screen.onBack ?? () => _select(null) : null,
+          onDeleted: () {
+            if (mounted && _listId == id) _select(null);
+          },
           pageCounts: screen.pageCounts,
           songbooks: screen.songbooks,
           onReaderActive: screen.onReaderActive,
@@ -468,6 +471,7 @@ class _SetListDetail extends StatelessWidget {
     this.preparationNotice = '需要来源可用。',
     this.embedded = false,
     this.onBack,
+    this.onDeleted,
     this.pageCounts,
     this.songbooks,
     this.onReaderActive,
@@ -483,7 +487,7 @@ class _SetListDetail extends StatelessWidget {
   final ScorePreparation? prepare;
   final String preparationLabel, preparationNotice;
   final bool embedded;
-  final VoidCallback? onBack;
+  final VoidCallback? onBack, onDeleted;
   final PageCountService? pageCounts;
   final SongbookService? songbooks;
   final ValueChanged<bool>? onReaderActive;
@@ -491,9 +495,51 @@ class _SetListDetail extends StatelessWidget {
   List<ScoreCatalogEntry> _catalogEntries() =>
       catalog?.call() ?? targets().map(ScoreCatalogEntry.fromTarget).toList();
 
-  Future<void> _prepare(BuildContext context, Set<String> ids) async {
+  Future<void> _delete(BuildContext context, ScoreSetList list) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('删除曲单？'),
+        content: Text('删除“${list.name}”后，原谱、批注和其他曲单仍会保留。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: Text(
+              '删除',
+              style: TextStyle(color: ScoreTokens.of(dialog).dangerInk),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final route = ModalRoute.of(context);
+    final result = await workspace.edit(
+      (store) => store.deleteSetList(list.id),
+    );
+    if (result == null) return;
+    if (onDeleted != null) {
+      onDeleted!();
+    } else if (route != null && route.isActive) {
+      if (route.isCurrent) {
+        route.navigator!.pop();
+      } else {
+        route.navigator!.removeRoute(route);
+      }
+    }
+  }
+
+  Future<bool> _prepare(
+    BuildContext context,
+    Set<String> ids, {
+    bool opening = false,
+  }) async {
     final callback = prepare;
-    if (callback == null) return;
+    if (callback == null) return false;
     final entries = {
       for (final entry in _catalogEntries()) entry.entryId: entry,
     };
@@ -502,7 +548,7 @@ class _SetListDetail extends StatelessWidget {
         .whereType<ScoreCatalogEntry>()
         .where((entry) => entry.needsPreparation)
         .toList();
-    if (needed.isEmpty) return;
+    if (needed.isEmpty) return true;
     final known = needed.every((entry) => entry.bytes != null);
     final bytes = needed.fold<int>(
       0,
@@ -530,20 +576,25 @@ class _SetListDetail extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed != true || !context.mounted) return;
+    if (confirmed != true || !context.mounted) return false;
     String message;
+    var completed = false;
     try {
       message = await callback(needed.map((entry) => entry.entryId).toSet());
+      completed = true;
     } catch (_) {
       message = '准备未完成，请检查连接后重试。';
     }
-    if (context.mounted) {
-      final current = {
-        for (final entry in _catalogEntries()) entry.entryId: entry,
-      };
-      final unready = workspace.store.snapshot
-          .setListById(listId)!
-          .activeItems
+    if (!context.mounted) return false;
+    final current = {
+      for (final entry in _catalogEntries()) entry.entryId: entry,
+    };
+    final list = workspace.store.snapshot.setListById(listId);
+    if (list == null) return false;
+    final prepared =
+        completed && ids.every((id) => current[id]?.readable == true);
+    if (!opening || !prepared) {
+      final unready = list.activeItems
           .map((item) => item.entryId)
           .toSet()
           .where((id) => current[id]?.readable != true)
@@ -552,13 +603,15 @@ class _SetListDetail extends StatelessWidget {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(message)));
     }
+    return prepared;
   }
 
   Future<void> _open(
     BuildContext context,
     SetListItem item,
-    ScoreCatalogEntry? metadata,
+    Map<String, ScoreCatalogEntry> catalog,
   ) async {
+    final metadata = catalog[item.entryId];
     if (metadata?.state == ScoreContentState.missing ||
         metadata?.state == ScoreContentState.sourceOffline) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -570,8 +623,8 @@ class _SetListDetail extends StatelessWidget {
     if (target == null &&
         metadata?.needsPreparation == true &&
         prepare != null) {
-      await _prepare(context, {item.entryId});
-      if (!context.mounted) return;
+      final prepared = await _prepare(context, {item.entryId}, opening: true);
+      if (!prepared || !context.mounted) return;
       target = locate(item.entryId);
     }
     if (target == null) {
@@ -602,6 +655,15 @@ class _SetListDetail extends StatelessWidget {
             onPresented: recent?.presented,
             onLoaded: recent?.loaded,
             songbooks: songbooks,
+            programNames: {
+              for (final i
+                  in workspace.store.snapshot
+                          .setListById(listId)
+                          ?.activeItems ??
+                      const <SetListItem>[])
+                if (catalog[i.entryId] case final entry?)
+                  i.entryId: entry.displayPath,
+            },
             setListId: listId,
             itemId: item.id,
             sourceChanges: sourceChanges,
@@ -649,7 +711,9 @@ class _SetListDetail extends StatelessWidget {
         tooltip: '曲单更多操作',
         icon: const ReaderIcon(ReaderGlyph.more),
         onSelected: (action) async {
-          if (action == 'rename') {
+          if (action == 'delete') {
+            await _delete(context, list);
+          } else if (action == 'rename') {
             final name = await _nameDialog(context, initial: list.name);
             if (name != null) {
               await workspace.edit(
@@ -658,11 +722,16 @@ class _SetListDetail extends StatelessWidget {
             }
           }
         },
-        itemBuilder: (_) => const [
-          PopupMenuItem(
+        itemBuilder: (_) => [
+          const PopupMenuItem(
             value: 'rename',
             height: ScoreLayout.touchTarget,
             child: Text('重命名曲单'),
+          ),
+          PopupMenuItem(
+            value: 'delete',
+            height: ScoreLayout.touchTarget,
+            child: Text('删除曲单', style: TextStyle(color: tokens.dangerInk)),
           ),
         ],
       );
@@ -714,11 +783,7 @@ class _SetListDetail extends StatelessWidget {
                         onPressed: items.isEmpty
                             ? null
                             : () => unawaited(
-                                _open(
-                                  context,
-                                  items.first,
-                                  metadata[items.first.entryId],
-                                ),
+                                _open(context, items.first, metadata),
                               ),
                         icon: const ReaderIcon(ReaderGlyph.play),
                         label: const Text('开始阅读'),
@@ -974,7 +1039,7 @@ class _SetListDetail extends StatelessWidget {
                           height: rowHeight,
                           child: InkWell(
                             onTap: () =>
-                                unawaited(_open(context, item, target)),
+                                unawaited(_open(context, item, metadata)),
                             splashFactory: NoSplash.splashFactory,
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -1082,9 +1147,21 @@ class _AddScores extends StatefulWidget {
 }
 
 class _AddScoresState extends State<_AddScores> {
+  final _search = TextEditingController();
   SearchQuery _searchQuery = SearchQuery.physicalPath('');
   final _preparedTargets = <ScoreCatalogEntry, PreparedSearchText>{};
   String? _message;
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _setQuery(String value) => setState(() {
+    _searchQuery = SearchQuery.physicalPath(value);
+    _message = null;
+  });
 
   @override
   void didUpdateWidget(covariant _AddScores oldWidget) {
@@ -1133,13 +1210,22 @@ class _AddScoresState extends State<_AddScores> {
                 ],
               ),
               TextField(
-                decoration: const InputDecoration(
-                  prefixIcon: ReaderIcon(ReaderGlyph.search),
+                controller: _search,
+                decoration: InputDecoration(
+                  prefixIcon: const ReaderIcon(ReaderGlyph.search),
                   hintText: '搜索曲名或路径',
+                  suffixIcon: _search.text.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: '清除搜索',
+                          icon: const ReaderIcon(ReaderGlyph.close),
+                          onPressed: () {
+                            _search.clear();
+                            _setQuery('');
+                          },
+                        ),
                 ),
-                onChanged: (value) => setState(
-                  () => _searchQuery = SearchQuery.physicalPath(value),
-                ),
+                onChanged: _setQuery,
               ),
               if (_message != null)
                 Padding(
@@ -1147,60 +1233,77 @@ class _AddScoresState extends State<_AddScores> {
                   child: Text(_message!),
                 ),
               Expanded(
-                child: ListView.builder(
-                  itemCount: matches.length,
-                  itemBuilder: (context, index) {
-                    final target = matches[index];
-                    final included =
-                        widget.workspace.store.snapshot
-                            .setListById(widget.listId)
-                            ?.activeItems
-                            .any((item) => item.entryId == target.entryId) ==
-                        true;
-                    return ListTile(
-                      minTileHeight: ScoreLayout.setlistRowHeight,
-                      leading: SizedBox(
-                        width: ScoreLayout.iconColumn,
-                        child: Checkbox(value: included, onChanged: null),
-                      ),
-                      title: Text(
-                        physicalFileDisplayName(
-                          p.posix.basename(
-                            target.displayPath.replaceAll('\\', '/'),
-                          ),
+                child: matches.isEmpty
+                    ? Center(
+                        child: Text(
+                          widget.targets.isEmpty ? '谱库中还没有可添加的曲谱' : '未找到匹配的曲谱',
+                          style: ScoreText.body,
                         ),
-                        style: ScoreText.headline,
-                      ),
-                      subtitle: Text(
-                        '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: ScoreText.caption.copyWith(
-                          color: ScoreTokens.of(context).ink500,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                      onTap: included
-                          ? null
-                          : () async {
-                              final item = await widget.workspace.edit(
-                                (store) => store.addItem(
-                                  widget.listId,
-                                  target.entryId,
-                                  ifAbsent: true,
+                      )
+                    : ListView.builder(
+                        itemCount: matches.length,
+                        itemBuilder: (context, index) {
+                          final target = matches[index];
+                          final included =
+                              widget.workspace.store.snapshot
+                                  .setListById(widget.listId)
+                                  ?.activeItems
+                                  .any(
+                                    (item) => item.entryId == target.entryId,
+                                  ) ==
+                              true;
+                          return ListTile(
+                            minTileHeight: ScoreLayout.setlistRowHeight,
+                            leading: SizedBox(
+                              width: ScoreLayout.iconColumn,
+                              child: Checkbox(value: included, onChanged: null),
+                            ),
+                            title: Text(
+                              physicalFileDisplayName(
+                                p.posix.basename(
+                                  target.displayPath.replaceAll('\\', '/'),
                                 ),
-                              );
-                              if (mounted) {
-                                setState(
-                                  () => _message = item == null
-                                      ? '添加失败，请检查应用数据目录后重试。'
-                                      : '已添加，可继续选择',
-                                );
-                              }
-                            },
-                    );
-                  },
-                ),
+                              ),
+                              style: ScoreText.headline,
+                            ),
+                            subtitle: Text(
+                              '${target.parentFolderLabel ?? scoreParentFolder(target.displayPath)} · ${target.statusLabel}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: ScoreText.caption.copyWith(
+                                color: ScoreTokens.of(context).ink500,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                            onTap: included
+                                ? null
+                                : () async {
+                                    final query = _searchQuery;
+                                    final item = await widget.workspace.edit(
+                                      (store) => store.addItem(
+                                        widget.listId,
+                                        target.entryId,
+                                        ifAbsent: true,
+                                      ),
+                                    );
+                                    if (mounted) {
+                                      setState(() {
+                                        if (item == null) {
+                                          _message = '添加失败，请检查应用数据目录后重试。';
+                                        } else if (identical(
+                                          query,
+                                          _searchQuery,
+                                        )) {
+                                          _message = '已添加，可继续选择';
+                                        }
+                                      });
+                                    }
+                                  },
+                          );
+                        },
+                      ),
               ),
             ],
           ),

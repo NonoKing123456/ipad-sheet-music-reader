@@ -22,6 +22,7 @@ Future<void> showDeviceSyncPanel(
   BuildContext context, {
   required SyncController controller,
   required VoidCallback openOffline,
+  VoidCallback? openLocalImports,
   bool scanOnOpen = false,
   bool syncOnOpen = false,
 }) {
@@ -29,6 +30,7 @@ Future<void> showDeviceSyncPanel(
   Widget content() => SyncScreen(
     controller: controller,
     openOffline: openOffline,
+    openLocalImports: openLocalImports,
     scanOnOpen: scanOnOpen,
     syncOnOpen: syncOnOpen,
     panel: true,
@@ -75,18 +77,22 @@ class SyncScreen extends StatefulWidget {
     super.key,
     required this.controller,
     required this.openOffline,
+    this.openLocalImports,
     this.scanOnOpen = false,
     this.syncOnOpen = false,
     this.panel = false,
   });
   final SyncController controller;
   final VoidCallback openOffline;
+  final VoidCallback? openLocalImports;
   final bool scanOnOpen;
   final bool syncOnOpen;
   final bool panel;
   @override
   State<SyncScreen> createState() => _SyncScreenState();
 }
+
+typedef _DownloadRange = ({OfflineRule rule, String title, String? origin});
 
 class _SyncScreenState extends State<SyncScreen> {
   late final TextEditingController _address = TextEditingController(
@@ -98,7 +104,8 @@ class _SyncScreenState extends State<SyncScreen> {
   bool _catalogUpdating = false;
   bool _diagnosticsOpen = false;
   Object? _rangeSelection;
-  List<OfflineRule> _rangeRules = const [];
+  Object? _rangeSources;
+  List<_DownloadRange> _ranges = const [];
   String? _scanMessage;
   bool get _desktop =>
       defaultTargetPlatform != TargetPlatform.iOS &&
@@ -543,6 +550,11 @@ class _SyncScreenState extends State<SyncScreen> {
               ? '${sync.pendingComputerUploads} 份本机可读 · 待传电脑'
               : '前台连接可达时自动同步，已下载内容只传新增与更新。',
         ),
+        if (sync.importNameConflicts > 0)
+          TextButton(
+            onPressed: widget.openLocalImports,
+            child: Text('${sync.importNameConflicts} 份上传遇到同名 · 查看暂存'),
+          ),
         if (sync.backgroundPendingObjects > 0 ||
             (sync.busy && !_catalogUpdating)) ...[
           const SizedBox(height: ScoreSpace.sm),
@@ -581,32 +593,64 @@ class _SyncScreenState extends State<SyncScreen> {
     );
   }
 
-  List<OfflineRule> _downloadRangeRules(SyncController sync) {
+  List<_DownloadRange> _downloadRangeRules(SyncController sync) {
     final selection = sync.collection?.selection;
-    if (!identical(selection, _rangeSelection)) {
-      _rangeSelection = selection;
-      _rangeRules =
-          selection?.rules
-              .where((rule) => rule.selected && rule.folder != null)
-              .toList(growable: false) ??
-          const [];
+    final sources = sync.collection?.index?.sources;
+    if (identical(selection, _rangeSelection) &&
+        identical(sources, _rangeSources)) {
+      return _ranges;
     }
-    return _rangeRules;
+    _rangeSelection = selection;
+    _rangeSources = sources;
+    final sourceNames = {
+      for (final source in sync.offlineSources) source.id: source.name,
+    };
+    final rules = selection?.rules ?? const <OfflineRule>[];
+    final titles = <OfflineRule, String>{};
+    final titleCounts = <String, int>{};
+    final sourceTitleCounts = <(String, String), int>{};
+    for (final rule in rules) {
+      final folder = rule.folder;
+      if (!rule.selected ||
+          folder == null ||
+          sync.autoDownloadsFolder(rule.sourceId, folder) != true) {
+        continue;
+      }
+      final source = sourceNames[rule.sourceId] ?? '来源目录';
+      final title = folder.isEmpty ? source : folder.split('/').last;
+      titles[rule] = title;
+      titleCounts.update(title, (n) => n + 1, ifAbsent: () => 1);
+      sourceTitleCounts.update(
+        (source, title),
+        (n) => n + 1,
+        ifAbsent: () => 1,
+      );
+    }
+    _ranges = titles.entries
+        .map((entry) {
+          final rule = entry.key, title = entry.value;
+          String? origin;
+          if (titleCounts[title]! > 1) {
+            final source = sourceNames[rule.sourceId] ?? '来源目录';
+            final folder = rule.folder!;
+            final slash = folder.lastIndexOf('/');
+            origin = sourceTitleCounts[(source, title)]! > 1 && slash >= 0
+                ? [source, ...folder.substring(0, slash).split('/')].join(' › ')
+                : source;
+          }
+          return (rule: rule, title: title, origin: origin);
+        })
+        .toList(growable: false);
+    return _ranges;
   }
 
-  Widget _downloadRange(SyncController sync, OfflineRule rule) => _section(
+  Widget _downloadRange(SyncController sync, _DownloadRange range) => _section(
     Builder(
       builder: (context) {
         final status = sync.folderOfflineStatus(
-          sourceId: rule.sourceId,
-          folder: rule.folder!,
+          sourceId: range.rule.sourceId,
+          folder: range.rule.folder!,
         );
-        final source = sync.offlineSources
-            .where((source) => source.id == rule.sourceId)
-            .firstOrNull;
-        final folder = rule.folder!.isEmpty
-            ? source?.name ?? '来源目录'
-            : rule.folder!.split('/').last;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -614,20 +658,35 @@ class _SyncScreenState extends State<SyncScreen> {
               children: [
                 const ReaderIcon(ReaderGlyph.folder),
                 const SizedBox(width: ScoreSpace.sm),
-                Expanded(child: _title(folder)),
-                _caption('${status.readable} / ${status.total}'),
+                Expanded(child: _title(range.title)),
+                _caption('${status.currentReady} / ${status.total}'),
               ],
             ),
+            if (range.origin case final origin?)
+              Padding(
+                padding: const EdgeInsets.only(
+                  left: ScoreLayout.iconVisual + ScoreSpace.sm,
+                  top: ScoreSpace.xs,
+                ),
+                child: Text(
+                  origin,
+                  style: ScoreText.caption.copyWith(
+                    color: ScoreTokens.of(context).ink700,
+                  ),
+                ),
+              ),
             const SizedBox(height: ScoreSpace.sm),
             if (status.total > 0)
               LinearProgressIndicator(
-                value: status.readable / status.total,
+                value: status.currentReady / status.total,
                 minHeight: ScoreSpace.xs,
               ),
             const SizedBox(height: ScoreSpace.sm),
             _caption(
-              status.total > 0 && status.readable == status.total
+              status.allCurrent
                   ? '已完成'
+                  : status.pendingUpdate > 0
+                  ? '${status.pendingUpdate} 份待更新'
                   : '已选择的下载范围',
             ),
           ],

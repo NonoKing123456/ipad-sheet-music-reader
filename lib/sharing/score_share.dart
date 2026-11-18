@@ -134,7 +134,11 @@ class ScoreShareService {
         'Refusing to remove a directory outside the share cache.',
       );
     }
-    if (await directory.exists()) await directory.delete(recursive: true);
+    try {
+      if (await directory.exists()) await directory.delete(recursive: true);
+    } on FileSystemException {
+      // A transient file lock can defer deletion to normal cache expiry.
+    }
   }
 }
 
@@ -157,11 +161,11 @@ Future<void> shareScore(
   Future<void> Function()? validate,
   Future<bool> Function()? beforeShare,
   ExportAnnotations? annotationsFor,
+  ScoreShareService? shareService,
 }) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
-  File? prepared;
-  var exporting = false;
-  var exportComplete = false;
+  final service = shareService ?? ScoreShareService.instance;
+  File? pendingShare;
   try {
     if (beforeShare != null && !await beforeShare()) return;
     if (!context.mounted) return;
@@ -191,69 +195,119 @@ Future<void> shareScore(
       ),
     );
     if (kind == null || !context.mounted) return;
-    final service = ScoreShareService.instance;
-    late ShareResult result;
-    if (kind == _ScoreShareKind.original) {
-      final original = await service.prepareOriginal(
-        filePath: filePath,
-        fileName: fileName,
-        validate: validate,
-      );
-      if (!context.mounted) {
-        await service.discardPrepared(original);
-        return;
-      }
-      result = await service.sharePrepared(original, _shareOrigin(context));
-    } else {
-      exporting = true;
-      final fontFamily = Theme.of(context).textTheme.bodyMedium?.fontFamily;
-      final output = await _exportWithProgress(context, (
-        cancellation,
-        progress,
-      ) async {
-        prepared = await service.prepareOriginal(
-          filePath: filePath,
-          fileName: fileName,
-          validate: validate,
-          checkCancelled: cancellation.check,
-        );
-        cancellation.check();
-        return AnnotatedPdfExporter().export(
-          original: prepared!,
-          annotationsFor: annotationsFor ?? (_) => const [],
-          cancellation: cancellation,
-          onProgress: progress,
-          textFontFamily: fontFamily,
-        );
-      });
-      exportComplete = true;
-      if (!context.mounted) {
-        await service.discardPrepared(prepared!);
-        return;
-      }
-      result = await service.sharePrepared(output, _shareOrigin(context));
-    }
+    final annotated = kind == _ScoreShareKind.annotated;
+    final file = annotated
+        ? await _runShareStep(
+            context,
+            message: '无法导出批注副本，请检查文件和可用空间。',
+            retryLabel: '重新导出',
+            operation: () => _prepareAnnotatedCopy(
+              context,
+              service,
+              filePath: filePath,
+              fileName: fileName,
+              validate: validate,
+              annotationsFor: annotationsFor,
+            ),
+          )
+        : await service.prepareOriginal(
+            filePath: filePath,
+            fileName: fileName,
+            validate: validate,
+          );
+    pendingShare = file;
+    if (file == null || !context.mounted) return;
+    final result = await _runShareStep(
+      context,
+      message: annotated ? '批注 PDF 已生成，系统分享未成功。' : '系统分享未成功。',
+      retryLabel: '重试分享',
+      operation: () => service.sharePrepared(file, _shareOrigin(context)),
+    );
+    if (result == null) return;
+    // Receivers can continue reading even after the share sheet closes.
+    pendingShare = null;
     if (context.mounted && result.status == ShareResultStatus.dismissed) {
       messenger?.showSnackBar(const SnackBar(content: Text('已取消分享')));
     }
-  } catch (failure) {
-    if (prepared != null && !exportComplete) {
-      await ScoreShareService.instance.discardPrepared(prepared!);
+  } on ExportCancelled {
+    if (context.mounted) {
+      messenger?.showSnackBar(const SnackBar(content: Text('已取消导出')));
     }
+  } catch (_) {
     if (context.mounted) {
       messenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            failure is ExportCancelled
-                ? '已取消导出'
-                : exporting
-                ? '无法导出批注副本，请检查文件和可用空间。'
-                : '无法分享原文件，请确认文件已下载且仍可读取。',
-          ),
-        ),
+        const SnackBar(content: Text('无法分享原文件，请确认文件已下载且仍可读取。')),
       );
     }
+  } finally {
+    if (pendingShare != null) await service.discardPrepared(pendingShare);
   }
+}
+
+Future<T?> _runShareStep<T extends Object>(
+  BuildContext context, {
+  required String message,
+  required String retryLabel,
+  required Future<T> Function() operation,
+}) async {
+  while (context.mounted) {
+    try {
+      return await operation();
+    } on ExportCancelled {
+      rethrow;
+    } catch (_) {
+      if (!context.mounted) return null;
+      final retry = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(retryLabel),
+            ),
+          ],
+        ),
+      );
+      if (retry != true) return null;
+    }
+  }
+  return null;
+}
+
+Future<File> _prepareAnnotatedCopy(
+  BuildContext context,
+  ScoreShareService service, {
+  required String filePath,
+  String? fileName,
+  Future<void> Function()? validate,
+  ExportAnnotations? annotationsFor,
+}) {
+  final fontFamily = Theme.of(context).textTheme.bodyMedium?.fontFamily;
+  return _exportWithProgress(context, (cancellation, progress) async {
+    final original = await service.prepareOriginal(
+      filePath: filePath,
+      fileName: fileName,
+      validate: validate,
+      checkCancelled: cancellation.check,
+    );
+    try {
+      return await AnnotatedPdfExporter().export(
+        original: original,
+        annotationsFor: annotationsFor ?? (_) => const [],
+        cancellation: cancellation,
+        onProgress: progress,
+        textFontFamily: fontFamily,
+      );
+    } catch (_) {
+      await service.discardPrepared(original);
+      rethrow;
+    }
+  });
 }
 
 Future<File> _exportWithProgress(

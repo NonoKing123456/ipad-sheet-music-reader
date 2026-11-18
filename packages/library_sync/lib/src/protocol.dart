@@ -42,6 +42,14 @@ class SyncProtocolException implements Exception {
 
 class _DifferentLibrary implements Exception {}
 
+bool isSyncServiceUnavailable(Object error) =>
+    error is SocketException ||
+    error is TimeoutException ||
+    error is HttpException ||
+    error is SyncProtocolException &&
+        error.code != 'source_not_ready' &&
+        const {502, 503, 504}.contains(error.status);
+
 LibrarySyncFailure _libraryFailure(Object error) {
   if (error is SyncCancelled) return LibrarySyncFailure.cancelled;
   if (error is _DifferentLibrary ||
@@ -1590,12 +1598,14 @@ class SyncClient {
               : LibrarySyncStatus.partial,
           downloaded,
           _libraryFailureMessage(failure),
-          failure);
+          failure,
+          failure != LibrarySyncFailure.cancelled &&
+              isSyncServiceUnavailable(error));
     } finally {
       cancellation?.removeListener(cancel);
       http.close(force: true);
       await lease?.close();
-      if (cancellation?.isCancelled == true)
+      if (cancellation?.pausesBackgroundTransfers == true)
         await backgroundTransfer?.pause(_transferNamespace);
     }
   }
@@ -1935,12 +1945,14 @@ class SyncClient {
               : LibrarySyncStatus.partial,
           downloaded,
           _libraryFailureMessage(failure),
-          failure);
+          failure,
+          failure != LibrarySyncFailure.cancelled &&
+              isSyncServiceUnavailable(error));
     } finally {
       await acknowledgePending();
       cancellation?.removeListener(cancel);
       http.close(force: true);
-      if (cancellation?.isCancelled == true)
+      if (cancellation?.pausesBackgroundTransfers == true)
         await backgroundTransfer?.pause(_transferNamespace);
       // A cancelled/partial batch retains verified objects and their bounded
       // metadata without serializing the entire directory for every object.

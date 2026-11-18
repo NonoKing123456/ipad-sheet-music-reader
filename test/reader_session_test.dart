@@ -160,9 +160,31 @@ void main() {
       expect(failing.unsavedCount, 1);
       expect(failing.store.snapshot.strokesFor(page), isEmpty);
       await File(stateDir.path).delete();
-      await failing.retryStrokes();
+      final nextPoints = [NormalizedPoint(.3, .4)];
+      final finishingStroke = failing.addStroke(
+        page,
+        StrokeStyle(
+          tool: AnnotationTool.pen,
+          argb: 0xff000000,
+          widthFraction: .003,
+        ),
+        nextPoints,
+      );
+      // Two retry controls can be used while another stroke is committing.
+      await Future.wait([
+        finishingStroke,
+        failing.retryStrokes(),
+        failing.retryStrokes(),
+      ]);
       expect(failing.unsavedCount, 0);
-      expect(failing.store.snapshot.strokesFor(page), hasLength(1));
+      final saved = failing.store.snapshot.strokesFor(page);
+      expect(
+        saved.map((stroke) => stroke.points),
+        unorderedEquals([
+          [NormalizedPoint(.1, .2)],
+          nextPoints,
+        ]),
+      );
       failing.dispose();
     },
   );

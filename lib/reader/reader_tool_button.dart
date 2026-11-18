@@ -35,6 +35,7 @@ class ReaderActionButton extends StatefulWidget {
     required this.icon,
     required this.onPressed,
     this.selected = false,
+    this.semanticsSelected,
     this.tool = false,
     this.caption,
     this.width,
@@ -44,6 +45,9 @@ class ReaderActionButton extends StatefulWidget {
   final Widget icon;
   final VoidCallback? onPressed;
   final bool selected, tool;
+
+  /// Controls with their own selection marker can keep the default button fill.
+  final bool? semanticsSelected;
   final String? caption;
   final double? width;
   final double target;
@@ -63,11 +67,13 @@ class _ReaderActionButtonState extends State<ReaderActionButton> {
         : t.ink700;
     return Semantics(
       button: true,
-      selected: widget.selected,
+      selected: widget.semanticsSelected ?? widget.selected,
       label: widget.label,
       enabled: widget.onPressed != null,
       child: Tooltip(
         message: widget.label,
+        // iOS appends a merged tooltip to the label when speaking the swatch.
+        excludeFromSemantics: widget.semanticsSelected != null,
         child: Listener(
           onPointerDown: widget.onPressed == null
               ? null
@@ -490,14 +496,14 @@ class _ReaderPaletteButtonState extends State<ReaderPaletteButton> {
   ValueChanged<int>? get onChanged => widget.onChanged;
   // Content colors stay independent from the app's light/dark shell.
   static const colors = [
-    0xff17201c,
-    0xffc9432d,
-    0xff236459,
-    0xff1c57ac,
-    0xffe5b33c,
-    0xffa26f91,
-    0xfffbfaf6,
-    0xff805c3b,
+    ('黑色', 0xff17201c),
+    ('红色', 0xffc9432d),
+    ('松绿', 0xff236459),
+    ('蓝色', 0xff1c57ac),
+    ('黄色', 0xffe5b33c),
+    ('紫色', 0xffa26f91),
+    ('白色', 0xfffbfaf6),
+    ('棕色', 0xff805c3b),
   ];
   Widget _dot(BuildContext context, int color, {bool selected = false}) =>
       Container(
@@ -537,26 +543,22 @@ class _ReaderPaletteButtonState extends State<ReaderPaletteButton> {
               for (var row = 0; row < 2; row++)
                 Row(
                   children: [
-                    for (var col = 0; col < ScoreLayout.paletteColumns; col++)
-                      ReaderActionButton(
-                        label:
-                            '颜色 ${row * ScoreLayout.paletteColumns + col + 1}',
-                        icon: _dot(
-                          context,
-                          colors[row * ScoreLayout.paletteColumns + col],
-                          selected:
-                              argb ==
-                              colors[row * ScoreLayout.paletteColumns + col],
+                    for (final (name, color)
+                        in colors
+                            .skip(row * ScoreLayout.paletteColumns)
+                            .take(ScoreLayout.paletteColumns))
+                      MergeSemantics(
+                        child: ReaderActionButton(
+                          label: name,
+                          semanticsSelected: argb == color,
+                          icon: _dot(context, color, selected: argb == color),
+                          onPressed: onChanged == null
+                              ? null
+                              : () {
+                                  _menu.close();
+                                  onChanged!(color);
+                                },
                         ),
-                        onPressed: onChanged == null
-                            ? null
-                            : () {
-                                _menu.close();
-                                onChanged!(
-                                  colors[row * ScoreLayout.paletteColumns +
-                                      col],
-                                );
-                              },
                       ),
                   ],
                 ),

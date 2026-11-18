@@ -139,6 +139,28 @@ class RecentReadingList extends StatelessWidget {
     return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
+  Future<void> _remove(BuildContext context, RecentReading entry) async {
+    final removed = await store.remove(entry.entryId);
+    if (removed || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          '“${physicalFileDisplayName(p.basename(entry.path))}”的最近阅读记录未能移除。',
+        ),
+        action: SnackBarAction(
+          label: '重试',
+          onPressed: () {
+            if (context.mounted && store.entries.contains(entry)) {
+              _remove(context, entry);
+            }
+          },
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: store,
@@ -205,7 +227,7 @@ class RecentReadingList extends StatelessWidget {
                       horizontal: ScoreLayout.listMargin,
                     ),
                     itemCount: rows.length,
-                    itemBuilder: (context, index) {
+                    itemBuilder: (_, index) {
                       final row = rows[index];
                       if (row is String) {
                         return SizedBox(
@@ -277,7 +299,7 @@ class RecentReadingList extends StatelessWidget {
                           action: PopupMenuButton<String>(
                             tooltip: '最近阅读选项',
                             icon: const ReaderIcon(ReaderGlyph.more),
-                            onSelected: (_) => store.remove(entry.entryId),
+                            onSelected: (_) => _remove(context, entry),
                             itemBuilder: (_) => [
                               const PopupMenuItem(
                                 value: 'remove',

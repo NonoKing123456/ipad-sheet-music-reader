@@ -139,6 +139,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   String? _readerRemoteVersion;
   int get pendingComputerUploads =>
       _imports?.records.where((score) => score.pendingComputer).length ?? 0;
+  int get importNameConflicts => _imports?.importNameConflicts ?? 0;
   String? get importComputerKey => _client?.backgroundTransferNamespace;
   bool get _trustedImportDirectory =>
       importComputerKey != null &&
@@ -343,6 +344,53 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  Future<void> retryImportWithName({
+    required String id,
+    required String sourceId,
+    required String sourceName,
+    required String folder,
+    required String basename,
+    required String? computerKey,
+    required String? collectionId,
+  }) async {
+    final imports = _imports;
+    final index = activeCollection?.index;
+    if (imports == null ||
+        imports.byId(id)?.needsComputerRename != true ||
+        computerKey == null ||
+        computerKey != importComputerKey ||
+        index == null ||
+        collectionId != index.id ||
+        !index.sources.any((source) => source.id == sourceId) ||
+        (folder.isNotEmpty &&
+            index.folders[sourceId]?.contains(folder) != true)) {
+      throw StateError('待传记录或目标电脑已改变，请重新选择。');
+    }
+    await imports.saveToComputer(
+      id,
+      sourceId: sourceId,
+      sourceName: sourceName,
+      relativeFolder: folder,
+      basename: basename,
+      targetComputerKey: computerKey,
+      targetCollectionId: collectionId,
+      queueOnly: true,
+      upload: writeImportedScore,
+      beforeSaved: _mirrorUploadedImport,
+    );
+    requestComputerUpload(id);
+  }
+
+  Future<void> _mirrorUploadedImport(ImportedScore score) =>
+      mirrorImportAnnotations(
+        workspace,
+        DocumentKey(entryId: 'import-${score.id}', revisionId: score.hash),
+        DocumentKey(
+          entryId: score.catalogEntryId!,
+          revisionId: score.catalogRevisionId!,
+        ),
+      );
+
   Future<bool> _uploadConfirmedImports({
     bool allowReading = false,
     String? onlyId,
@@ -375,19 +423,16 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           ),
           targetComputerKey: transaction.targetComputerKey,
           targetCollectionId: transaction.targetCollectionId,
-          beforeSaved: (registered) => mirrorImportAnnotations(
-            workspace,
-            DocumentKey(entryId: 'import-${score.id}', revisionId: score.hash),
-            DocumentKey(
-              entryId: registered.catalogEntryId!,
-              revisionId: registered.catalogRevisionId!,
-            ),
-          ),
+          beforeSaved: _mirrorUploadedImport,
         );
         await imports.completeMirror(saved.id);
       } on ImportSaveConflict {
         // This item needs a new name; other confirmed intents may continue.
       } catch (error, stack) {
+        if (isSyncServiceUnavailable(error) && _computerReachable != false) {
+          _computerReachable = false;
+          _changed();
+        }
         logLibraryFailure('sync.pendingImportUpload', error, stack);
         return false;
       }
@@ -408,6 +453,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     final cancellation = SyncCancellation();
     _cancellation = cancellation;
     var changed = false;
+    final wasReachable = _computerReachable;
     try {
       await _syncSongbooks(cancellation);
       changed = await _syncSavedReaderState(cancellation, showActivity: true);
@@ -420,6 +466,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       return true;
     } catch (error, stack) {
       logLibraryFailure('sync.readerStateProbe', error, stack);
+      if (isSyncServiceUnavailable(error)) _computerReachable = false;
       return false;
     } finally {
       busy = false;
@@ -429,6 +476,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
           phase = SyncPhase.partial;
           message = '已保存的批注仍在本机，连接后会自动继续。';
         }
+        _changed();
+      } else if (wasReachable != _computerReachable) {
         _changed();
       }
     }
@@ -443,11 +492,13 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     final cancellation = SyncCancellation();
     _cancellation = cancellation;
     bool needsContent;
+    final wasReachable = _computerReachable;
     try {
       final delta = await client.refreshCollectionDelta(
         view,
         cancellation: cancellation,
       );
+      _computerReachable = true;
       needsContent =
           !delta.unchanged ||
           view.pendingDeltaEntryIds.isNotEmpty ||
@@ -456,10 +507,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       return true;
     } catch (error, stack) {
       logLibraryFailure('sync.statusProbe', error, stack);
+      if (isSyncServiceUnavailable(error)) _computerReachable = false;
       return false;
     } finally {
       busy = false;
       _cancellation = null;
+      if (wasReachable != _computerReachable) _changed();
     }
     if (_readerActive || !_recoveryForeground || _dailyPaused) return true;
     if (!needsContent) return _probeReaderState();
@@ -1061,7 +1114,17 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   String? _autoStartAttemptedRoot;
   String? _lastSelectedRoot;
   bool initialized = false;
-  bool busy = false;
+  bool _busy = false;
+  Completer<void>? _waitingForReplica;
+  bool get busy => _busy;
+  set busy(bool value) {
+    _busy = value;
+    if (!value) {
+      _waitingForReplica?.complete();
+      _waitingForReplica = null;
+    }
+  }
+
   Timer? _timer;
   int _seenReaderGeneration = -1;
   int _received = 0;
@@ -1427,6 +1490,41 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   bool needsOfflineDownload({required String sourceId, String folder = ''}) =>
       folderOfflineStatus(sourceId: sourceId, folder: folder).needsDownload;
 
+  OfflineSelection? _folderSelection;
+  final _folderChoices = <(String, String), (int, bool)>{};
+
+  /// The rule a future score would inherit here. Keep single-score overrides
+  /// out of this lookup, even for folders whose current files are all ready.
+  bool autoDownloadsEntry(String entryId) {
+    final view = activeCollection;
+    final item = view?.itemFor(entryId);
+    return item != null && view!.selection.includes(item);
+  }
+
+  bool? autoDownloadsFolder(String sourceId, String folder) {
+    final selection = collection?.selection;
+    if (selection == null) return null;
+    if (!identical(_folderSelection, selection)) {
+      _folderSelection = selection;
+      _folderChoices.clear();
+      for (final (index, rule) in selection.rules.indexed) {
+        if (rule.folder case final path?) {
+          _folderChoices[(rule.sourceId, path)] = (index, rule.selected);
+        }
+      }
+    }
+    (int, bool)? latest;
+    while (true) {
+      final choice = _folderChoices[(sourceId, folder)];
+      if (choice != null && (latest == null || choice.$1 > latest.$1)) {
+        latest = choice;
+      }
+      if (folder.isEmpty) return latest?.$2;
+      final slash = folder.lastIndexOf('/');
+      folder = slash < 0 ? '' : folder.substring(0, slash);
+    }
+  }
+
   (int, int) get selectedDownloadTotals {
     final selected =
         collection?.index?.entries.where(
@@ -1454,24 +1552,50 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
     return (entries.length, entries.fold<int>(0, (n, e) => n + e.length));
   }
 
-  Future<void> selectOffline(OfflineRule rule) async {
-    if (busy) {
-      cancel();
-      await _syncTask;
-    }
-    await collection?.select(rule);
-    _selectionNeedsSync = true;
-    _scheduleDaily(delay: const Duration(milliseconds: 500));
-    _changed();
-  }
+  Future<void> selectOffline(OfflineRule rule) => _updateOfflineRule(rule);
 
   Future<void> removeOfflineDownload(String id) async {
-    if (busy) {
-      cancel();
-      await _syncTask;
+    final item = collection?.itemFor(id);
+    if (item == null) return;
+    await _updateOfflineRule(
+      OfflineRule(sourceId: item.sourceId, entryId: id, selected: false),
+      removeCopy: true,
+    );
+  }
+
+  Future<void> _updateOfflineRule(
+    OfflineRule rule, {
+    bool removeCopy = false,
+  }) async {
+    while (busy && !_disposed) {
+      final idle = (_waitingForReplica ??= Completer<void>()).future;
+      _cancellation?.cancel(pauseBackgroundTransfers: false);
+      await idle;
     }
-    await collection?.removeDownload(id);
-    _changed();
+    if (_disposed) return;
+    final view = collection;
+    if (view == null) return;
+    busy = true;
+    _recoveryCancellation?.cancel();
+    try {
+      final client = _client, transfer = _backgroundTransfer;
+      if (!rule.selected && client != null && transfer != null) {
+        await transfer.pruneUnselected(
+          client.backgroundTransferNamespace,
+          view.selection.withRule(rule),
+        );
+      }
+      if (removeCopy) {
+        await view.removeDownload(rule.entryId!);
+      } else {
+        await view.select(rule);
+      }
+      _selectionNeedsSync = true;
+    } finally {
+      busy = false;
+      _scheduleDaily(delay: const Duration(milliseconds: 500));
+      _changed();
+    }
   }
 
   LibrarySnapshot? _targetSnapshot;
@@ -1523,7 +1647,15 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   SyncPhase phase = SyncPhase.idle;
-  String? message;
+  String? _message;
+  int _messageRevision = 0;
+  int get messageRevision => _messageRevision;
+  String? get message => _message;
+  set message(String? value) {
+    _message = value;
+    _messageRevision++;
+  }
+
   String? initializationError;
   String? serverMessage;
   String? pairingCode;
@@ -1532,6 +1664,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   bool get serving => _server != null;
   bool get serverBusy => _serverBusy || _preparingConnection;
   bool get paired => _client != null;
+  // Restoring a saved pairing says nothing about this session's connectivity.
+  bool? _computerReachable;
+  bool? get computerReachable => _computerReachable;
   Uri? get computerAddress => _client?.baseUri;
   int? get port => _server?.port;
   bool get autoStartServer => _settings['autoStartServer'] == true;
@@ -2201,6 +2336,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
       }
       await _saveSettings({..._settings, 'clientFolder': folder});
       _client = client;
+      _computerReachable = true;
       _configureBackgroundClient();
       pageCounts.connectionChanged();
       _retrySigningReport();
@@ -2303,10 +2439,14 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         collection!,
         cancellation: cancellation,
       );
+      _computerReachable = true;
       final songbooksSynced = await _syncSongbooks(cancellation);
       phase = songbooksSynced ? SyncPhase.complete : SyncPhase.partial;
       message = songbooksSynced ? '目录已更新。' : '曲谱目录已更新，谱本索引等待下次同步。';
-    } catch (_) {
+    } catch (error) {
+      if (!cancellation.isCancelled && isSyncServiceUnavailable(error)) {
+        _computerReachable = false;
+      }
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
           : SyncPhase.partial;
@@ -2511,10 +2651,12 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
         },
       );
       if (result.status == LibrarySyncStatus.complete) {
+        _computerReachable = true;
         _selectionNeedsSync = false;
         await _rememberImportDirectory();
       }
       if (result.status != LibrarySyncStatus.complete) {
+        if (result.serviceUnavailable) _computerReachable = false;
         phase = result.status == LibrarySyncStatus.cancelled
             ? SyncPhase.cancelled
             : SyncPhase.partial;
@@ -2566,6 +2708,9 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
                 : '本次已同步 $totalObjects 份新增或更新曲谱。')
           : '有不同版本，请查看。';
     } catch (failure) {
+      if (!cancellation.isCancelled && isSyncServiceUnavailable(failure)) {
+        _computerReachable = false;
+      }
       phase = cancellation.isCancelled
           ? SyncPhase.cancelled
           : SyncPhase.partial;
@@ -2660,14 +2805,7 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
             .where((e) => e.availability != ContentAvailability.ready)
             .length;
       } else {
-        for (final entry in selected.snapshot.availableEntries) {
-          final item = selected.readableItemFor(entry.id);
-          if (item != null &&
-              !await replica!.hasVerifiedObject(item.object, verifyAll: true)) {
-            unavailable++;
-          }
-        }
-        await selected.updateIndex(selected.index!);
+        unavailable = await selected.verifyLocalDownloads();
       }
       phase = SyncPhase.idle;
       message = unavailable == 0
@@ -2701,8 +2839,18 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
             '${sourceNameFor(entry.id)} · ${scoreParentFolder(entry.relativePath)}',
         contentHash: entry.currentRevision.contentHash,
         verifiedImmutable: true,
-        validateBeforeRead: () =>
-            selected.validateForRead(entry.id, entry.currentRevisionId),
+        validateBeforeRead: () async {
+          final wasReady = selected.isReady(readable);
+          try {
+            await selected.validateForRead(entry.id, entry.currentRevisionId);
+          } finally {
+            if (wasReady &&
+                !selected.isReady(readable) &&
+                identical(activeCollection, selected)) {
+              _changed();
+            }
+          }
+        },
       );
     }
     _indexOfflineTargets();
@@ -2712,6 +2860,8 @@ class SyncController extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _disposed = true;
+    _waitingForReplica?.complete();
+    _waitingForReplica = null;
     _signingAuthEpoch++;
     if (_observingLifecycle) {
       WidgetsBinding.instance.removeObserver(this);

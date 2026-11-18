@@ -6,6 +6,7 @@ import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 import 'collection.dart';
 import 'collection_delta.dart';
+import 'manifest.dart';
 import 'replica.dart';
 import 'storage.dart';
 
@@ -96,7 +97,10 @@ class ReplicaCollectionView {
 
   final _ready = <String>{};
   final _resolved = <String, CatalogItem>{};
-  final _readable = <String, CatalogItem>{};
+  // Last known object identity survives failed verification, including an older
+  // revision whose replacement exists only in the computer catalog. _ready
+  // independently grants read access. Keep the existing persisted field name.
+  final _localCopies = <String, CatalogItem>{};
   bool _dirty = false;
   LibrarySnapshot? _snapshot;
   CollectionDirectoryIndex? _directory;
@@ -113,7 +117,7 @@ class ReplicaCollectionView {
       _CollectionDirectoryRequest(
           index?.sources ?? const [],
           currentItems.toList(growable: false),
-          Map.of(_readable),
+          Map.of(_localCopies),
           Set.of(_ready));
   Future<void> _prepareDirectory() async {
     final request = _directoryRequest();
@@ -135,7 +139,7 @@ class ReplicaCollectionView {
   String get _journalPath =>
       p.join(objects.rootDirectory, 'selected-resolutions-v2.log');
   bool isReady(CatalogItem item) {
-    final readable = _readable[item.entryId];
+    final readable = _localCopies[item.entryId];
     return _ready.contains('${item.entryId}/${item.revisionId}/${item.hash}') &&
         readable != null &&
         readable.revisionId == item.revisionId &&
@@ -175,17 +179,18 @@ class ReplicaCollectionView {
         view._deltaPending.addAll(
             (stored['deltaPending'] as List? ?? const []).cast<String>());
         final verificationBefore = objects.verificationRevision;
-        objects.restoreVerificationCache(asMap(stored['verified'] ?? {}));
-        view._dirty = objects.verificationRevision != verificationBefore;
         final owners = {
           for (final e in view.index!.entries) e.entryId: e.sourceId
         };
         for (final raw in stored['readable'] as List? ?? const []) {
           final item = CatalogItem.fromJson(asMap(raw));
           if (owners[item.entryId] == item.sourceId && item.hash != null) {
-            view._readable[item.entryId] = item;
+            view._localCopies[item.entryId] = item;
           }
         }
+        objects.restoreVerificationCache(asMap(stored['verified'] ?? {}),
+            replaced: view._localCopies.values.map((item) => item.object));
+        view._dirty = objects.verificationRevision != verificationBefore;
       } else if (objects.manifest case final old?) {
         view._dirty = true; // The legacy migration has not been persisted yet.
         view.index = CollectionIndex(
@@ -214,7 +219,7 @@ class ReplicaCollectionView {
         if (deferVerification) {
           for (final item in view.index!.entries) {
             if (!item.missing && objects.hasCachedVerification(item.object)) {
-              view._readable[item.entryId] = item;
+              view._localCopies[item.entryId] = item;
             }
           }
         }
@@ -242,25 +247,25 @@ class ReplicaCollectionView {
   }
 
   void _restoreCachedReady() {
-    final prior = Map<String, CatalogItem>.from(_readable);
-    _readable.clear();
+    final prior = Map<String, CatalogItem>.from(_localCopies);
+    _localCopies.clear();
     final pending = <CatalogItem>[];
     for (final current in currentItems) {
       final old = prior[current.entryId];
       if (current.missing) {
-        if (old != null) _readable[current.entryId] = old;
+        if (old != null) _localCopies[current.entryId] = old;
         continue;
       }
-      if (current.hash != null) pending.add(current);
+      if (current.hash != null || old != null) pending.add(current);
       if (old != null &&
           old.sourceId == current.sourceId &&
           old.hash != null &&
           !(old.revisionId == current.revisionId &&
               old.hash == current.hash &&
-              (old.length != current.length || old.format != current.format)) &&
-          objects.hasCachedVerification(old.object)) {
-        _readable[current.entryId] = old;
-        _ready.add(_readyKey(old));
+              (old.length != current.length || old.format != current.format))) {
+        _localCopies[current.entryId] = old;
+        if (objects.hasCachedVerification(old.object))
+          _ready.add(_readyKey(old));
       } else if (old != null) {
         _dirty = true;
       }
@@ -294,16 +299,22 @@ class ReplicaCollectionView {
     final candidates = _pendingVerification.sublist(_verificationCursor, end);
     final verificationBefore = objects.verificationRevision;
     try {
+      final known = candidates.where((item) => item.hash != null).toList();
       final verified = await objects.verifyObjects(
-          [for (final item in candidates) item.object],
+          [for (final item in known) item.object],
           cancellation: cancellation, preserveOnIoError: true);
+      final verifiedIds = {
+        for (var i = 0; i < known.length; i++)
+          if (verified[i]) known[i].entryId
+      };
       if (epoch != _verificationEpoch) return false;
       cancellation?.check();
       final fallbacks = <CatalogItem>[];
-      for (var i = 0; i < candidates.length; i++) {
-        final item = candidates[i];
-        final old = _readable[item.entryId];
-        if (!verified[i] && old != null && !_sameItem(old, item)) {
+      for (final item in candidates) {
+        final old = _localCopies[item.entryId];
+        if (!verifiedIds.contains(item.entryId) &&
+            old != null &&
+            !_sameItem(old, item)) {
           fallbacks.add(old);
         }
       }
@@ -316,17 +327,18 @@ class ReplicaCollectionView {
         for (var i = 0; i < fallbacks.length; i++)
           if (fallbackVerified[i]) fallbacks[i].entryId: fallbacks[i]
       };
-      for (var i = 0; i < candidates.length; i++) {
-        final item = candidates[i];
+      for (final item in candidates) {
         if (!_sameItem(itemFor(item.entryId), item)) continue;
-        final before = _readable[item.entryId];
-        final next = verified[i] ? item : fallbackById[item.entryId];
-        if (next == null ? before == null : _sameItem(before, next)) continue;
+        final before = readableItemFor(item.entryId);
+        final next = verifiedIds.contains(item.entryId)
+            ? item
+            : fallbackById[item.entryId];
+        if (next == null
+            ? before == null && !_hasDamagedCopy(item)
+            : _sameItem(before, next)) continue;
         if (before != null) _ready.remove(_readyKey(before));
-        if (next == null) {
-          _readable.remove(item.entryId);
-        } else {
-          _readable[item.entryId] = next;
+        if (next != null) {
+          _localCopies[item.entryId] = next;
           _ready.add(_readyKey(next));
         }
         if (next == null && selection.includes(item))
@@ -351,8 +363,8 @@ class ReplicaCollectionView {
     _cancelPendingVerification();
     final verificationBefore = objects.verificationRevision;
     _ready.clear();
-    final prior = Map<String, CatalogItem>.from(_readable);
-    _readable.clear();
+    final prior = Map<String, CatalogItem>.from(_localCopies);
+    _localCopies.clear();
     final items = currentItems.toList(growable: false);
     final candidates = [
       for (final item in items)
@@ -361,16 +373,17 @@ class ReplicaCollectionView {
     final verified = await objects
         .verifyObjects([for (final item in candidates) item.object]);
     for (var i = 0; i < candidates.length; i++) {
-      if (verified[i]) _readable[candidates[i].entryId] = candidates[i];
+      if (verified[i]) _localCopies[candidates[i].entryId] = candidates[i];
     }
     final fallbacks = <CatalogItem>[];
     for (final item in items) {
       if (item.missing) {
-        if (prior[item.entryId] case final old?) _readable[item.entryId] = old;
+        if (prior[item.entryId] case final old?)
+          _localCopies[item.entryId] = old;
         continue;
       }
       final old = prior[item.entryId];
-      if (!_readable.containsKey(item.entryId) &&
+      if (!_localCopies.containsKey(item.entryId) &&
           old != null &&
           old.sourceId == item.sourceId &&
           old.hash != null &&
@@ -384,17 +397,21 @@ class ReplicaCollectionView {
     final fallbackVerified = await objects
         .verifyObjects([for (final item in fallbacks) item.object]);
     for (var i = 0; i < fallbacks.length; i++) {
-      if (fallbackVerified[i]) _readable[fallbacks[i].entryId] = fallbacks[i];
+      if (fallbackVerified[i])
+        _localCopies[fallbacks[i].entryId] = fallbacks[i];
     }
     for (final item in items.where((item) => !item.missing)) {
-      final readable = _readable[item.entryId];
-      if (readable != null)
-        _ready
-            .add('${readable.entryId}/${readable.revisionId}/${readable.hash}');
+      final readable = _localCopies[item.entryId];
+      if (readable != null) {
+        _ready.add(_readyKey(readable));
+      } else if (prior[item.entryId] case final old?
+          when old.sourceId == item.sourceId) {
+        _localCopies[item.entryId] = old;
+      }
     }
     if (objects.verificationRevision != verificationBefore ||
-        prior.length != _readable.length ||
-        _readable.entries
+        prior.length != _localCopies.length ||
+        _localCopies.entries
             .any((entry) => !_sameItem(prior[entry.key], entry.value)))
       _dirty = true;
     _snapshot = null;
@@ -445,7 +462,7 @@ class ReplicaCollectionView {
     ];
     final readable = [
       for (final id in touched)
-        if (_readable[id] case final item?) item
+        if (_localCopies[id] case final item?) item
     ];
     await _appendDeltaRecord({
       'kind': 'state',
@@ -511,7 +528,7 @@ class ReplicaCollectionView {
             selection = OfflineSelection.fromJson(record['selection'] as List);
             for (final id in delta.removed) {
               _resolved.remove(id);
-              _readable.remove(id);
+              _localCopies.remove(id);
               _deltaPending.remove(id);
             }
             for (final item in delta.upserts) {
@@ -533,14 +550,19 @@ class ReplicaCollectionView {
               _resolved[item.entryId] = item;
           }
           for (final id in (record['touched'] as List).cast<String>()) {
-            _readable.remove(id);
+            _localCopies.remove(id);
           }
+          final local = <ManifestEntry>[];
           for (final raw in record['readable'] as List) {
             final item = CatalogItem.fromJson(asMap(raw));
-            if (index?.entry(item.entryId)?.sourceId == item.sourceId)
-              _readable[item.entryId] = item;
+            if (item.hash != null &&
+                index?.entry(item.entryId)?.sourceId == item.sourceId) {
+              _localCopies[item.entryId] = item;
+              local.add(item.object);
+            }
           }
-          objects.restoreVerificationCache(asMap(record['verified']));
+          objects.restoreVerificationCache(asMap(record['verified']),
+              replaced: local);
           _deltaPending
             ..clear()
             ..addAll((record['pending'] as List).cast<String>());
@@ -669,7 +691,7 @@ class ReplicaCollectionView {
         Map.of(_resolved),
         selection,
         objects.exportVerificationCache(),
-        _readable.values.toList(),
+        _localCopies.values.toList(),
         deltaCursor,
         deltaOwner,
         Set.of(_deltaPending));
@@ -720,7 +742,7 @@ class ReplicaCollectionView {
     _dirty = true;
     _resolved[item.entryId] = item;
     _ready.add('${item.entryId}/${item.revisionId}/${item.hash}');
-    _readable[item.entryId] = item;
+    _localCopies[item.entryId] = item;
     _contentChanged(item);
   }
 
@@ -729,7 +751,7 @@ class ReplicaCollectionView {
     contentRevision++;
     _displayEntries.remove(item.entryId);
     if (_directory != null &&
-        !_directory!.update(item, _readable[item.entryId], _ready)) {
+        !_directory!.update(item, _localCopies[item.entryId], _ready)) {
       _directory = null;
     }
     if (_snapshot != null) {
@@ -748,14 +770,12 @@ class ReplicaCollectionView {
     if (cached != null) return cached;
     final current = itemFor(id);
     if (current == null) return null;
-    final shown = current.missing ? current : _readable[id] ?? current;
+    final shown = current.missing ? current : readableItemFor(id) ?? current;
     return _displayEntries[id] = LibraryEntry(
         id: id,
         relativePath: current.relativePath,
         status: current.missing ? EntryStatus.missing : EntryStatus.available,
-        availability: isReady(shown)
-            ? ContentAvailability.ready
-            : ContentAvailability.deferred,
+        availability: _availability(current, shown),
         revisions: [
           ContentRevision(
               id: shown.revisionId,
@@ -800,7 +820,7 @@ class ReplicaCollectionView {
     final priorSelection = selection, priorDirty = _dirty;
     final priorGeneration = _generation, priorRevision = contentRevision;
     final priorResolved = fullFallback ? Map.of(_resolved) : null;
-    final priorReadable = fullFallback ? Map.of(_readable) : null;
+    final priorReadable = fullFallback ? Map.of(_localCopies) : null;
     final priorReady = fullFallback ? Set.of(_ready) : null;
     final priorPending = fullFallback ? Set.of(_deltaPending) : null;
     final priorDisplay = fullFallback ? Map.of(_displayEntries) : null;
@@ -875,7 +895,7 @@ class ReplicaCollectionView {
               jsonEncode(next.sources.map((s) => s.toJson()).toList());
       if (sourcesChanged || fullFallback) _directory = null;
       for (final id in delta.removed) {
-        final old = _readable.remove(id);
+        final old = _localCopies.remove(id);
         if (old != null) _ready.remove(_readyKey(old));
         _resolved.remove(id);
         _durableResolutions.remove(id);
@@ -886,12 +906,12 @@ class ReplicaCollectionView {
       index = next;
       _deltaTouched.addAll(changed);
       for (final item in delta.upserts) {
-        final old = _readable[item.entryId];
+        final old = _localCopies[item.entryId];
         _resolved.remove(item.entryId);
         _durableResolutions.remove(item.entryId);
         if (verified.contains(item.entryId)) {
           if (old != null) _ready.remove(_readyKey(old));
-          _readable[item.entryId] = item;
+          _localCopies[item.entryId] = item;
           _ready.add(_readyKey(item));
         } else if (old != null &&
             (old.sourceId != item.sourceId ||
@@ -900,10 +920,10 @@ class ReplicaCollectionView {
                     old.revisionId == item.revisionId &&
                     old.hash == item.hash))) {
           _ready.remove(_readyKey(old));
-          _readable.remove(item.entryId);
+          if (old.sourceId != item.sourceId) _localCopies.remove(item.entryId);
         }
         _displayEntries.remove(item.entryId);
-        _directory?.replace(item, _readable[item.entryId], _ready);
+        _directory?.replace(item, _localCopies[item.entryId], _ready);
         if (!item.missing && selection.includes(item) && !isReady(item))
           _deltaPending.add(item.entryId);
         else
@@ -950,7 +970,7 @@ class ReplicaCollectionView {
         _resolved
           ..clear()
           ..addAll(priorResolved!);
-        _readable
+        _localCopies
           ..clear()
           ..addAll(priorReadable!);
         _ready
@@ -1023,6 +1043,8 @@ class ReplicaCollectionView {
       updates[key] = rule;
     }
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
+    final previousSelection = selection;
+    final previousPending = Set.of(_deltaPending);
     try {
       selection = OfflineSelection([
         for (final old in selection.rules)
@@ -1041,6 +1063,12 @@ class ReplicaCollectionView {
           _deltaPending.add(item.entryId);
       }
       await _persist();
+    } catch (_) {
+      selection = previousSelection;
+      _deltaPending
+        ..clear()
+        ..addAll(previousPending);
+      rethrow;
     } finally {
       await lease.close();
     }
@@ -1063,19 +1091,20 @@ class ReplicaCollectionView {
   }
 
   Future<void> removeDownload(String entryId) async {
-    // validateForRead drops a damaged download from _readable, but its bytes
-    // and offline rule must still be removable.
-    final item = readableItemFor(entryId) ?? itemFor(entryId);
-    if (item == null || item.hash == null) return;
     final lease = await DirectoryLease.acquire(objects.rootDirectory);
     try {
-      final file = File(objects.objectPath(item.object));
-      if (await file.exists()) await file.delete();
+      final item = itemFor(entryId);
+      if (item == null) return;
+      for (final candidate in _copyCandidates(item)) {
+        final file = File(objects.objectPath(candidate.object));
+        if (await file.exists()) await file.delete();
+        objects.forgetLocalCopy(candidate.object);
+      }
       selection = selection.withRule(OfflineRule(
           sourceId: item.sourceId, entryId: entryId, selected: false));
       // Same rule as select(): a deselected entry must not be re-queued.
       if (!selection.includes(item)) _deltaPending.remove(entryId);
-      _readable.remove(entryId);
+      _localCopies.remove(entryId);
       await refreshReady();
       await _persist();
     } finally {
@@ -1084,27 +1113,100 @@ class ReplicaCollectionView {
   }
 
   CatalogItem? itemFor(String id) => _resolved[id] ?? index?.entry(id);
-  CatalogItem? readableItemFor(String id) => _readable[id];
+  Iterable<CatalogItem> _copyCandidates(CatalogItem current) sync* {
+    final previous = _localCopies[current.entryId];
+    if (previous != null && previous.sourceId == current.sourceId)
+      yield previous;
+    if (current.hash != null && !_sameItem(previous, current)) yield current;
+  }
+
+  bool _hasDamagedCopy(CatalogItem current) => _copyCandidates(current)
+      .any((item) => objects.isKnownDamaged(item.object));
+
+  ContentAvailability _availability(CatalogItem current, CatalogItem shown) =>
+      isReady(shown)
+          ? ContentAvailability.ready
+          : _hasDamagedCopy(current)
+              ? ContentAvailability.unreadable
+              : ContentAvailability.deferred;
+
+  // Called when opening the row menu; scrolling never stats object files.
+  bool hasLocalDownload(String id) {
+    final item = itemFor(id);
+    if (item == null) return false;
+    try {
+      return _copyCandidates(item).any((candidate) =>
+          File(objects.objectPath(candidate.object)).existsSync());
+    } on FileSystemException {
+      return false;
+    }
+  }
+
+  CatalogItem? readableItemFor(String id) {
+    final item = _localCopies[id];
+    return item != null && isReady(item) ? item : null;
+  }
+
   String presentationPathFor(String id) =>
       objects.objectPath((readableItemFor(id) ?? itemFor(id))!.object);
   Future<void> validateForRead(String id, String revision) async {
     final item = readableItemFor(id);
+    final current = itemFor(id);
     if (item == null ||
-        itemFor(id)?.missing != false ||
+        current == null ||
+        current.missing ||
         item.revisionId != revision ||
         item.missing ||
         item.hash == null) {
       throw StateError('Selected download revision is unavailable.');
     }
-    if (!await objects.hasVerifiedObject(item.object)) {
-      _dirty = true;
-      _ready.remove('${item.entryId}/${item.revisionId}/${item.hash}');
-      _readable.remove(id);
-      final current = itemFor(id);
-      if (current != null && selection.includes(current)) _deltaPending.add(id);
-      if (current != null) _contentChanged(current);
+    if (!await _verifyCopy(current, item, verifyAll: false)) {
       throw StateError('Selected download is unavailable.');
     }
+  }
+
+  Future<int> verifyLocalDownloads() async {
+    var damaged = 0;
+    for (final current in currentItems) {
+      if (current.missing) continue;
+      final item = _localCopies[current.entryId] ??
+          (current.hash != null && objects.isKnownDamaged(current.object)
+              ? current
+              : null);
+      if (item == null) continue;
+      if (!await _verifyCopy(current, item, verifyAll: true) &&
+          objects.isKnownDamaged(item.object)) damaged++;
+    }
+    await flush();
+    return damaged;
+  }
+
+  Future<bool> _verifyCopy(CatalogItem current, CatalogItem item,
+      {required bool verifyAll}) async {
+    final id = item.entryId;
+    final wasReady = isReady(item);
+    final wasDamaged = objects.isKnownDamaged(item.object);
+    final previousVerification = objects.verificationRevision;
+    final verified =
+        await objects.hasVerifiedObject(item.object, verifyAll: verifyAll);
+    if (objects.verificationRevision != previousVerification) {
+      _dirty = true;
+      _deltaTouched.add(id);
+    }
+    if (wasReady != verified ||
+        wasDamaged != objects.isKnownDamaged(item.object)) {
+      _dirty = true;
+      if (verified) {
+        _localCopies[id] = item;
+        _ready.add(_readyKey(item));
+        if (_sameItem(item, current)) completeDeltaEntries([id]);
+      } else {
+        _ready.remove(_readyKey(item));
+        if (selection.includes(current)) _deltaPending.add(id);
+      }
+      _contentChanged(current);
+    }
+    return verified;
   }
 
   LibrarySnapshot get snapshot => _snapshot ??= LibrarySnapshot(
@@ -1119,7 +1221,7 @@ class ReplicaCollectionView {
                 for (final e in [
                   current.missing
                       ? current
-                      : _readable[current.entryId] ?? current
+                      : readableItemFor(current.entryId) ?? current
                 ])
                   LibraryEntry(
                     id: e.entryId,
@@ -1127,9 +1229,7 @@ class ReplicaCollectionView {
                     status: current.missing
                         ? EntryStatus.missing
                         : EntryStatus.available,
-                    availability: isReady(e)
-                        ? ContentAvailability.ready
-                        : ContentAvailability.deferred,
+                    availability: _availability(current, e),
                     revisions: [
                       ContentRevision(
                           id: e.revisionId,

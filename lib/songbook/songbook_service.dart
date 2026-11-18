@@ -25,11 +25,13 @@ Future<void> _songbookWorker((String, SendPort) input) async {
         switch (method) {
           case 'load':
             final key = payload as PageMetadataKey;
-            result = store.get(key) ?? await store.carryManual(key);
+            final existing = store.get(key);
+            final index = existing ?? await store.carryManual(key);
+            result = (index, existing == null && index != null);
           case 'save':
             final data =
                 payload
-                    as (PageMetadataKey, String?, String, int, List<String>);
+                    as (PageMetadataKey, String?, String, int?, List<String>);
             result = await store.saveItem(
               data.$1,
               itemId: data.$2,
@@ -42,13 +44,15 @@ Future<void> _songbookWorker((String, SendPort) input) async {
             result = await store.mergeOutline(data.$1, data.$2, data.$3);
           case 'merge':
             result = await store.mergeRemote(payload as SongbookIndex);
+          case 'bookKeys':
+            result = [for (final index in store.indexes) index.key];
           case 'search':
-            final data = payload as (String, PageMetadataKey?, int);
+            final (query, books, limit) =
+                payload as (String, Set<PageMetadataKey>?, int);
             result = searchSongbooks(
-              store.indexes,
-              data.$1,
-              key: data.$2,
-              limit: data.$3,
+              books == null ? store.indexes : books.map(store.get).nonNulls,
+              query,
+              limit: limit,
             );
           case 'changes':
             result = store.changes(payload as String?);
@@ -169,16 +173,20 @@ class SongbookService extends ChangeNotifier {
         }
       }
     });
-    _worker = await Isolate.spawn(_songbookWorker, (
-      directory,
-      replies.sendPort,
-    ));
-    final port = await ready.future;
-    if (_closed) {
+    try {
+      _worker = await Isolate.spawn(_songbookWorker, (
+        directory,
+        replies.sendPort,
+      ));
+      if (_closed) throw StateError('Songbook service closed.');
+      return await ready.future;
+    } catch (_) {
+      // A later search can reopen the index once storage is available again.
       _worker?.kill();
-      throw StateError('Songbook service closed.');
+      replies.close();
+      _starting = null;
+      rethrow;
     }
-    return port;
   }();
 
   Future<T> _call<T>(String method, Object? payload) async {
@@ -205,7 +213,11 @@ class SongbookService extends ChangeNotifier {
   }
 
   Future<SongbookIndex?> _load(PageMetadataKey key, bool reread) async {
-    final cached = await _call<SongbookIndex?>('load', key);
+    final (cached, carriedManual) = await _call<(SongbookIndex?, bool)>(
+      'load',
+      key,
+    );
+    if (carriedManual && !_closed) notifyListeners();
     if (cached?.extracted == true && !reread) return cached;
     final input = resolve(key);
     if (input == null || p.extension(input.path).toLowerCase() != '.pdf') {
@@ -264,7 +276,7 @@ class SongbookService extends ChangeNotifier {
     PageMetadataKey key, {
     String? itemId,
     required String title,
-    required int pageNumber,
+    required int? pageNumber,
     List<String> ancestors = const [],
   }) async {
     final index = await _call<SongbookIndex>('save', (
@@ -281,13 +293,27 @@ class SongbookService extends ChangeNotifier {
     return index;
   }
 
+  /// Resolve scope against indexed books only, without walking the file library.
+  Future<Set<PageMetadataKey>> indexedBooksWhere(
+    bool Function(PageMetadataKey) include,
+  ) async => (await _call<List<PageMetadataKey>>(
+    'bookKeys',
+    null,
+  )).where(include).toSet();
+
   Future<List<SongbookSearchHit>> search(
     String query, {
     PageMetadataKey? key,
     int limit = 100,
+  }) => searchBooks(query, key == null ? null : {key}, limit: limit);
+
+  Future<List<SongbookSearchHit>> searchBooks(
+    String query,
+    Set<PageMetadataKey>? books, {
+    int limit = 100,
   }) => _call<List<SongbookSearchHit>>('search', (
     query,
-    key,
+    books,
     limit.clamp(1, 1000),
   ));
 

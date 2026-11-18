@@ -318,6 +318,8 @@ abstract final class ScoreMotion {
   static const Duration panel = Duration(milliseconds: 200);
 
   /// 翻页、页面转场。
+  static const tabletPageSettle = Duration(milliseconds: 160);
+  static const pageNumberHold = Duration(milliseconds: 600);
   static const Duration page = Duration(milliseconds: 240);
 
   static const Duration syncCycle = Duration(milliseconds: 1200);
@@ -347,6 +349,11 @@ abstract final class ScoreLayout {
   static const double compactMargin = 16;
   static const double iconColumn = 48;
   static const double typeColumn = 64;
+  static const double directoryTypeColumn = 36;
+  static const double directoryPagesColumn = 50;
+  static const double directoryNameGap = 10;
+  static const double programWidth = 304;
+  static const double programRowHeight = 58;
   static const double pagesColumn = 72;
   static const double actionColumn = 48;
   static const double rowInnerPadding = 8;
@@ -355,12 +362,15 @@ abstract final class ScoreLayout {
   static const double rowDividerInsetEnd = 8;
   static const double iconVisual = 20;
   static const double iconSmallVisual = 14;
+  static const double searchClearDiameter = 17;
   static const double rowSubtitleGap = 2;
-  static const double resultContextHeight = 32;
+  static const double searchScopeHeight = 36;
   static const double brandIconVisual = 32;
   static const double deviceCardHeight = 88;
   static const double iconStroke = 1.75;
   static const double touchTarget = 48;
+  static const double narrowHeaderWidth = 480;
+  static const double setListHeaderMinWidth = 79;
   static const double desktopTarget = 40;
   static const double readerHeaderHeight = 56;
   static const double readerTitleMenuHitHeight = 48;
@@ -393,6 +403,8 @@ abstract final class ScoreLayout {
   static const double badgeVisual = 14;
   static const double badgeHalo = 2;
   static const double menuWidth = 224;
+  static const double offlineEntryMenuWidth = 264;
+  static const double importTabUnderline = 3;
   static const double sheetWidth = 440;
   static const double sheetMaxHeight = 720;
   static const double treeIndent = 16;

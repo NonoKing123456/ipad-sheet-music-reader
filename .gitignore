@@ -266,3 +266,8 @@
 !/test/desktop_reader_085_test.dart
 !/test/support/sdk_paths.dart
 !/tools/check.ps1
+
+# Exact release 58 additions
+!/docs/RELEASE_0.8.10_58.md
+!/lib/reader/reader_performance.dart
+!/test/support/score_fixture.dart

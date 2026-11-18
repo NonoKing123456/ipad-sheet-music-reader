@@ -78,7 +78,7 @@ void main() {
         );
         await tester.tap(find.byTooltip('颜色'));
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('颜色 4'));
+        await tester.tap(find.byTooltip('蓝色'));
         await tester.pump();
         final blue = inkColor();
         expect(blue, isNot(paperRight.toARGB32()));

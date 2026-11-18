@@ -35,27 +35,31 @@ class SongbookDirectoryPanel extends StatefulWidget {
 
 class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
   SongbookIndex? _index;
+  final _search = TextEditingController();
   SearchQuery _searchQuery = SearchQuery('');
   SongbookIndex? _preparedIndex;
   Map<String, PreparedSearchText> _preparedItems = {};
   bool _loading = true, _editing = false, _saving = false;
   String? _selectedId, _error;
   bool _adding = false;
+  (String, String) _initialDraft = ('', '');
   int _epoch = 0;
   final _name = TextEditingController();
+  final _nameFocus = FocusNode();
   final _page = TextEditingController();
   final _scroll = ScrollController();
   final _editorKey = GlobalKey();
 
-  void _revealEditor() {
+  void _revealEditor({bool focusTitle = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final editor = _editorKey.currentContext;
       if (mounted && editor != null) {
+        if (focusTitle && _adding) _nameFocus.requestFocus();
         unawaited(
           Scrollable.ensureVisible(
             editor,
             duration: ScoreMotion.panel,
-            alignment: 1,
+            alignment: _adding ? 0 : 1,
           ),
         );
       }
@@ -82,6 +86,7 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
       _index = null;
       _selectedId = null;
       _adding = false;
+      _saving = false;
       unawaited(_load());
     }
   }
@@ -89,11 +94,16 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
   @override
   void dispose() {
     _epoch++;
+    _search.dispose();
     _name.dispose();
+    _nameFocus.dispose();
     _page.dispose();
     _scroll.dispose();
     super.dispose();
   }
+
+  void _setQuery(String value) =>
+      setState(() => _searchQuery = SearchQuery(value));
 
   Future<void> _load({bool reread = false}) async {
     final epoch = ++_epoch;
@@ -116,29 +126,64 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
     }
   }
 
-  void _select(SongbookItem? item) {
-    _revealEditor();
+  bool get _draftChanged =>
+      (_adding || _selectedId != null) &&
+      (_name.text, _page.text) != _initialDraft;
+
+  Future<void> _select(SongbookItem? item) async {
+    if (_saving || item != null && item.id == _selectedId) return;
+    if (_draftChanged) {
+      if (!await _save() || !mounted) return;
+      if (item != null) {
+        final id = item.id;
+        item = _index?.items.where((entry) => entry.id == id).firstOrNull;
+        if (item == null) return;
+      }
+    }
+    if (item == null && _scroll.hasClients) {
+      _scroll.jumpTo(_scroll.position.minScrollExtent);
+    }
+    _revealEditor(focusTitle: item == null);
     setState(() {
       _adding = item == null;
       _selectedId = item?.id;
       _name.text = item?.title ?? '';
-      _page.text = '${item?.pageNumber ?? widget.currentPage}';
+      _page.text = item == null
+          ? '${widget.currentPage}'
+          : item.pageNumber?.toString() ?? '';
+      _initialDraft = (_name.text, _page.text);
       _error = item?.needsReview == true ? '文件已更新，请核对 PDF 页码后保存。' : null;
     });
   }
 
-  Future<void> _save() async {
-    final page = int.tryParse(_page.text.trim());
-    if (_name.text.trim().isEmpty ||
-        page == null ||
-        page < 1 ||
-        page > widget.pageCount) {
-      setState(() => _error = '填写名称和 1–${widget.pageCount} 的 PDF 实际页码。');
+  void _toggleEditing() {
+    if (_saving) return;
+    if (_editing && _draftChanged) {
+      unawaited(_save(finishEditing: true));
       return;
     }
-    SongbookItem? selected;
-    for (final item in _index?.items ?? <SongbookItem>[]) {
-      if (item.id == _selectedId) selected = item;
+    setState(() {
+      _editing = !_editing;
+      _adding = false;
+      _selectedId = null;
+    });
+  }
+
+  Future<bool> _save({bool finishEditing = false}) async {
+    if (_saving) return false;
+    final epoch = _epoch;
+    final selected = _index?.items
+        .where((item) => item.id == _selectedId)
+        .firstOrNull;
+    final keepHeading =
+        selected != null &&
+        selected.pageNumber == null &&
+        _page.text.trim().isEmpty;
+    final page = int.tryParse(_page.text.trim());
+    if (_name.text.trim().isEmpty ||
+        !keepHeading && (page == null || page < 1 || page > widget.pageCount)) {
+      setState(() => _error = '填写名称和 1–${widget.pageCount} 的 PDF 实际页码。');
+      return false;
     }
     setState(() {
       _saving = true;
@@ -147,62 +192,75 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
     try {
       final index = await widget.service.saveItem(
         widget.documentKey,
-        itemId: selected?.id,
+        itemId: _selectedId,
         title: _name.text.trim(),
         pageNumber: page,
         ancestors: selected?.ancestors ?? const [],
       );
-      if (mounted) {
+      if (mounted && epoch == _epoch) {
         setState(() {
           _index = index;
           _adding = false;
           _selectedId = null;
+          if (finishEditing) _editing = false;
         });
+        return true;
       }
     } catch (_) {
-      if (mounted) setState(() => _error = '目录保存失败，请重试。');
+      if (mounted && epoch == _epoch) {
+        setState(() => _error = '目录保存失败，请重试。');
+      }
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted && epoch == _epoch) setState(() => _saving = false);
     }
+    return false;
   }
 
-  Widget _editor() => SizedBox(
+  Widget _editor() => ConstrainedBox(
     key: _editorKey,
-    height: ReaderNavigationTokens.directoryEditorHeight,
+    constraints: const BoxConstraints(
+      minHeight: ReaderNavigationTokens.directoryEditorHeight,
+    ),
     child: ColoredBox(
       color: ScoreTokens.of(context).pineWash,
       child: Padding(
         padding: const EdgeInsets.all(ScoreSpace.sm),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('名称', style: ScoreText.note),
-            TextField(
-              key: const ValueKey('songbook-edit-title'),
-              controller: _name,
-              enabled: !_saving,
-              decoration: const InputDecoration(isDense: true),
-            ),
-            const SizedBox(height: ScoreSpace.sm),
-            Text('PDF 实际页码', style: ScoreText.note),
-            Row(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SizedBox(
-                  width: ReaderNavigationTokens.directoryPageInputWidth,
-                  child: TextField(
-                    key: const ValueKey('songbook-edit-page'),
-                    controller: _page,
-                    enabled: !_saving,
-                    keyboardType: TextInputType.number,
-                    onSubmitted: (_) => _saving ? null : _save(),
-                    decoration: const InputDecoration(isDense: true),
-                  ),
+                Text('名称', style: ScoreText.note),
+                TextField(
+                  key: const ValueKey('songbook-edit-title'),
+                  controller: _name,
+                  focusNode: _nameFocus,
+                  enabled: !_saving,
+                  decoration: const InputDecoration(isDense: true),
                 ),
-                const SizedBox(width: ScoreSpace.sm),
-                Text('/ ${widget.pageCount}', style: ScoreText.note),
+                const SizedBox(height: ScoreSpace.sm),
+                Text('PDF 实际页码', style: ScoreText.note),
+                Row(
+                  children: [
+                    SizedBox(
+                      width: ReaderNavigationTokens.directoryPageInputWidth,
+                      child: TextField(
+                        key: const ValueKey('songbook-edit-page'),
+                        controller: _page,
+                        enabled: !_saving,
+                        keyboardType: TextInputType.number,
+                        onSubmitted: (_) => _saving ? null : _save(),
+                        decoration: const InputDecoration(isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: ScoreSpace.sm),
+                    Text('/ ${widget.pageCount}', style: ScoreText.note),
+                  ],
+                ),
               ],
             ),
-            const Spacer(),
             FilledButton(
               onPressed: _saving ? null : _save,
               child: Text(_saving ? '保存中…' : '保存条目'),
@@ -291,13 +349,7 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                     ),
                   ),
                   TextButton(
-                    onPressed: _saving
-                        ? null
-                        : () => setState(() {
-                            _editing = !_editing;
-                            _adding = false;
-                            _selectedId = null;
-                          }),
+                    onPressed: _saving ? null : _toggleEditing,
                     child: Text(_editing ? '完成' : '编辑'),
                   ),
                   IconButton(
@@ -327,8 +379,8 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                 child: TextField(
                   style: ScoreText.body,
                   key: const ValueKey('songbook-directory-search'),
-                  onChanged: (value) =>
-                      setState(() => _searchQuery = SearchQuery(value)),
+                  controller: _search,
+                  onChanged: _setQuery,
                   decoration: InputDecoration(
                     isDense: true,
                     filled: true,
@@ -346,6 +398,16 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                       borderSide: BorderSide(color: t.pine),
                     ),
                     hintText: '搜索曲目或章节',
+                    suffixIcon: _search.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: '清除搜索',
+                            icon: const ReaderIcon(ReaderGlyph.close),
+                            onPressed: () {
+                              _search.clear();
+                              _setQuery('');
+                            },
+                          ),
                     prefixIcon: const Center(
                       widthFactor: 1,
                       heightFactor: 1,
@@ -374,7 +436,9 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                   children: [
                     Expanded(
                       child: Text(
-                        '${all.length} 条索引',
+                        _search.text.trim().isEmpty
+                            ? '${all.length} 条索引'
+                            : '匹配 ${items.length} 条，共 ${all.length} 条索引',
                         style: ScoreText.caption.copyWith(color: t.ink500),
                       ),
                     ),
@@ -409,6 +473,8 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                         ],
                       ),
                     )
+                  : items.isEmpty && all.isNotEmpty && !_adding && !_loading
+                  ? Center(child: Text('未找到匹配的目录项', style: ScoreText.body))
                   : Scrollbar(
                       controller: _scroll,
                       thumbVisibility: true,
@@ -419,8 +485,8 @@ class _SongbookDirectoryPanelState extends State<SongbookDirectoryPanel> {
                         ),
                         itemCount: items.length + (_adding ? 1 : 0),
                         itemBuilder: (context, index) {
-                          if (index == items.length) return _editor();
-                          final item = items[index];
+                          if (_adding && index == 0) return _editor();
+                          final item = items[_adding ? index - 1 : index];
                           final selected = _editing
                               ? item.id == _selectedId
                               : item.id == currentId;

@@ -106,28 +106,44 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   List<LibraryNavEntry> _navEntries = const [];
   String _folder = '';
   bool _withinFolder = false;
-  bool _opening = false;
-  (String, String, int)? _pendingSongbookOpen;
+  Object? _opening;
+  ({String entryId, String revisionId, int page, Object attempt})?
+  _pendingSongbookOpen;
+
+  void _cancelOpen() {
+    _opening = null;
+    _pendingSongbookOpen = null;
+  }
 
   void _resumeSongbookOpen() {
     final pending = _pendingSongbookOpen;
-    if (!mounted || _opening || pending == null) return;
-    final target = widget.controller.locateOffline(pending.$1);
+    if (!mounted || _opening != null || pending == null) return;
+    if (widget.controller.phase == SyncPhase.cancelled) {
+      _pendingSongbookOpen = null;
+      return;
+    }
+    final target = widget.controller.locateOffline(pending.entryId);
     if (target == null) return;
-    final entry = widget.controller.offlineSnapshot?.entryById(pending.$1);
+    final entry = widget.controller.recentEntry(pending.entryId);
     if (entry == null) return;
-    _pendingSongbookOpen = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
+      if (mounted && _pendingSongbookOpen == pending) {
+        _pendingSongbookOpen = null;
+        if (ModalRoute.of(context)?.isCurrent == false) return;
         unawaited(
-          _open(entry, pageNumber: pending.$3, expectedRevisionId: pending.$2),
+          _open(
+            entry,
+            pageNumber: pending.page,
+            expectedRevisionId: pending.revisionId,
+          ),
         );
       }
     });
   }
 
   final Set<String> _sharingEntries = {};
-  String? _sourceId, _dismissedMessage;
+  String? _sourceId;
+  int? _dismissedMessageRevision;
   String? get _activeSourceId {
     final sources = widget.controller.offlineSources;
     if (sources.any((s) => s.id == _sourceId)) return _sourceId;
@@ -154,6 +170,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _closeSearch() {
+    _cancelOpen();
     setState(() {
       _searchOpen = false;
       _search.clear();
@@ -187,11 +204,20 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
 
   Future<void> _refresh() async {
     final sync = widget.controller;
-    if (sync.hasSyncActivity || !sync.paired) return;
+    if (!sync.paired) {
+      await _sync();
+      return;
+    }
     await sync.synchronize();
+    final message = sync.message;
+    if (mounted && sync.phase == SyncPhase.complete && message != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   void _selectSource(String id) => setState(() {
+    _cancelOpen();
     _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
@@ -223,17 +249,35 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       folder: folder,
       entryId: entry?.id,
     );
+    final rangeDownload = entry == null;
+    final wholeSource = folder?.isEmpty ?? true;
+    final estimate = Text('$count 份曲谱 · ${_size(bytes)}');
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
-          entry == null
-              ? (folder?.isEmpty ?? true)
+          rangeDownload
+              ? wholeSource
                     ? '下载整个谱库'
                     : '下载文件夹'
               : '下载到iPad',
         ),
-        content: Text('$count 份曲谱 · ${_size(bytes)}'),
+        scrollable: rangeDownload,
+        content: rangeDownload
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  estimate,
+                  const SizedBox(height: ScoreSpace.sm),
+                  Text(
+                    wholeSource
+                        ? '以后新增的曲谱也会自动下载。\n可在谱库菜单中关闭。'
+                        : '以后新增的曲谱也会自动下载。\n可在文件夹菜单中关闭。',
+                  ),
+                ],
+              )
+            : estimate,
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -241,7 +285,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
           ),
           FilledButton(
             onPressed: count == 0 ? null : () => Navigator.pop(context, true),
-            child: const Text('下载到iPad'),
+            child: Text(rangeDownload ? '下载到 iPad' : '下载到iPad'),
           ),
         ],
       ),
@@ -284,6 +328,52 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     return true;
   }
 
+  List<PopupMenuEntry<String>> _entryMenu(
+    String entryId, {
+    required bool ready,
+    required bool pending,
+  }) {
+    final sync = widget.controller;
+    final canStop = sync.autoDownloadsEntry(entryId);
+    final canRemove = sync.activeCollection?.hasLocalDownload(entryId) == true;
+    return [
+      const PopupMenuItem(value: 'add', child: Text('加入曲单')),
+      PopupMenuItem(
+        value: 'share',
+        enabled: ready,
+        child: Text(ready ? '分享' : '下载后可分享'),
+      ),
+      const PopupMenuItem(value: 'location', child: Text('查看位置')),
+      if (!ready || pending)
+        PopupMenuItem(
+          value: 'download',
+          child: Text(pending ? '更新下载' : '下载到 iPad'),
+        ),
+      if (canStop || canRemove) const PopupMenuDivider(),
+      if (canStop)
+        const PopupMenuItem(value: 'unselect', child: Text('停止这首谱的自动下载')),
+      if (canRemove)
+        PopupMenuItem(
+          value: 'remove',
+          child: Text(
+            '移除这台 iPad 上的副本',
+            style: TextStyle(color: ScoreTokens.of(context).dangerInk),
+          ),
+        ),
+    ];
+  }
+
+  Future<void> _removeDownload(String entryId) async {
+    try {
+      await widget.controller.removeOfflineDownload(entryId);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('未能移除本机下载，请重试。')));
+      }
+    }
+  }
+
   @override
   void dispose() {
     FocusManager.instance.removeEarlyKeyEventHandler(_searchKey);
@@ -294,6 +384,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   void _selectFolder(String folder) {
+    _cancelOpen();
     _recentOpen = false;
     _setListsOpen = false;
     _setListId = null;
@@ -311,11 +402,15 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   }
 
   List<ScoreTarget> _targets() => widget.controller.offlineTargets;
-  Future<void> _sync() => showDeviceSyncPanel(
-    context,
-    controller: widget.controller,
-    openOffline: () => Navigator.pop(context),
-  );
+  Future<void> _sync() {
+    _cancelOpen();
+    return showDeviceSyncPanel(
+      context,
+      controller: widget.controller,
+      openOffline: () => Navigator.pop(context),
+      openLocalImports: widget.openLocalImports,
+    );
+  }
 
   String _activityLabel(SyncController sync) {
     if (sync.backgroundImporting) return '正在保存下载内容';
@@ -339,8 +434,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     int? pageNumber,
     String? expectedRevisionId,
   }) async {
-    if (_opening) return;
-    _opening = true;
+    if (_opening != null) return;
+    final attempt = _opening = Object();
     _pendingSongbookOpen = null;
     final savedQuery = _searchOpen ? _query : null;
     var opened = false;
@@ -348,12 +443,26 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       var target = widget.controller.locateOffline(entry.id);
       if (target == null) {
         final selected = await _download(entry: entry);
-        if (selected && pageNumber != null && expectedRevisionId != null) {
-          _pendingSongbookOpen = (entry.id, expectedRevisionId, pageNumber);
+        if (!mounted ||
+            _opening != attempt ||
+            !selected ||
+            ModalRoute.of(context)?.isCurrent == false) {
+          return;
         }
-        if (!mounted) return;
         target = widget.controller.locateOffline(entry.id);
-        if (target == null) return;
+        if (target == null) {
+          if (pageNumber != null &&
+              expectedRevisionId != null &&
+              widget.controller.phase != SyncPhase.cancelled) {
+            _pendingSongbookOpen = (
+              entryId: entry.id,
+              revisionId: expectedRevisionId,
+              page: pageNumber,
+              attempt: attempt,
+            );
+          }
+          return;
+        }
       }
       if (expectedRevisionId != null &&
           target.revisionId != expectedRevisionId) {
@@ -392,14 +501,35 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       );
     } finally {
       if (opened) widget.controller.setReaderActive(false);
-      _opening = false;
-      if (mounted && opened && savedQuery != null) {
+      final stillCurrent = _opening == attempt;
+      if (stillCurrent) _opening = null;
+      if (mounted && stillCurrent && opened && savedQuery != null) {
         setState(() {
           _searchOpen = true;
           _search.text = savedQuery;
           _query = savedQuery;
         });
       }
+    }
+  }
+
+  Future<void> _setFolderAutoDownload(
+    String sourceId,
+    String folder,
+    bool selected,
+  ) async {
+    String feedback;
+    try {
+      await widget.controller.selectOffline(
+        OfflineRule(sourceId: sourceId, folder: folder, selected: selected),
+      );
+      feedback = selected ? '已开启自动下载。' : '已取消自动下载，已下载的曲谱仍可离线阅读。';
+    } catch (_) {
+      feedback = '未能更新自动下载设置，请重试。';
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(feedback)));
     }
   }
 
@@ -412,6 +542,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       sourceId: sourceId,
       folder: folder,
     );
+    final autoDownload = widget.controller.autoDownloadsFolder(
+      sourceId,
+      folder,
+    );
     return PopupMenuButton<String>(
       key: key,
       style: libraryIconButtonStyle(context),
@@ -422,6 +556,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       onSelected: (value) {
         if (value == 'download') {
           unawaited(_download(sourceId: sourceId, folder: folder));
+        } else if (value == 'cancel' || value == 'enable') {
+          unawaited(
+            _setFolderAutoDownload(sourceId, folder, value == 'enable'),
+          );
         } else {
           showDialog<void>(
             context: context,
@@ -445,11 +583,22 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             value: 'download',
             child: Text(folder.isEmpty ? '下载整个谱库' : '下载此文件夹'),
           ),
+        if (autoDownload == true)
+          PopupMenuItem(
+            value: 'cancel',
+            child: Text(folder.isEmpty ? '取消整库自动下载' : '取消此文件夹自动下载'),
+          ),
+        if (!needsDownload && autoDownload == false)
+          PopupMenuItem(
+            value: 'enable',
+            child: Text(folder.isEmpty ? '开启整库自动下载' : '开启此文件夹自动下载'),
+          ),
       ],
     );
   }
 
   void _setLists({String? initialListId, bool initialCreate = false}) {
+    _cancelOpen();
     setState(() {
       _recentOpen = false;
       _setListsOpen = true;
@@ -514,18 +663,27 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       _ensureHierarchy(folders);
       final children = searching ? <String>[] : _hierarchy!.childrenOf(folder);
       final ipad = DeviceLayoutScope.isCompact(context);
+      final collection = sync.activeCollection;
+      final catalog = !searching
+          ? null
+          : collection == null
+          ? sync.offlineSnapshot
+          : (collection.index, collection.contentRevision);
+      final searchFolder = _withinFolder ? folder : null;
+      final searchSource = _withinFolder ? _activeSourceId : null;
       return SongbookSearchBuilder(
         service: sync.songbooks,
         query: searching ? _query : '',
-        builder: (found) {
-          final hits = found.where((hit) {
-            final entry = sync.offlineSnapshot?.entryById(hit.key.entryId);
-            return entry != null &&
-                entry.currentRevisionId == hit.key.revisionId &&
-                (!_withinFolder ||
-                    (sync.sourceIdFor(entry.id) == _activeSourceId &&
-                        folderContains(folder, entry.relativePath)));
-          }).toList();
+        scope: (catalog, searchSource, searchFolder),
+        includeBook: (key) {
+          final entry = sync.recentEntry(key.entryId);
+          return entry != null &&
+              entry.currentRevisionId == key.revisionId &&
+              (searchFolder == null ||
+                  (sync.sourceIdFor(entry.id) == searchSource &&
+                      folderContains(searchFolder, entry.relativePath)));
+        },
+        builder: (hits, songbookStatus) {
           return LayoutBuilder(
             builder: (context, constraints) {
               final wide =
@@ -533,7 +691,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                   (ipad
                       ? ScoreLayout.ipadSidebarMin
                       : ScoreLayout.windowsSidebarMin);
-              return Scaffold(
+              final screen = Scaffold(
+                onDrawerChanged: (open) {
+                  if (open) _cancelOpen();
+                },
                 drawer: wide
                     ? null
                     : Drawer(
@@ -554,8 +715,14 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                             : Column(
                                 children: [
                                   Builder(
-                                    builder: (headerContext) =>
-                                        _header(headerContext, wide, folder),
+                                    builder: (headerContext) => _header(
+                                      headerContext,
+                                      wide,
+                                      folder,
+                                      tight:
+                                          constraints.maxWidth <
+                                          ScoreLayout.narrowHeaderWidth,
+                                    ),
                                   ),
                                   if (!wide && ipad)
                                     SizedBox(
@@ -678,13 +845,15 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                   ),
                                                 if (searching)
                                                   LibrarySearchContext(
-                                                    count: entries.length,
+                                                    count:
+                                                        entries.length +
+                                                        hits.length,
                                                     withinFolder: _withinFolder,
                                                     onScopeChanged: (value) =>
-                                                        setState(
-                                                          () => _withinFolder =
-                                                              value,
-                                                        ),
+                                                        setState(() {
+                                                          _cancelOpen();
+                                                          _withinFolder = value;
+                                                        }),
                                                   ),
                                                 if (sync.initializationError !=
                                                     null)
@@ -696,8 +865,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                     minHeight: 2,
                                                   ),
                                                 if (sync.message != null &&
-                                                    sync.message !=
-                                                        _dismissedMessage &&
+                                                    sync.messageRevision !=
+                                                        _dismissedMessageRevision &&
                                                     [
                                                       SyncPhase.partial,
                                                       SyncPhase.failed,
@@ -709,13 +878,13 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                       onPressed: sync.busy
                                                           ? null
                                                           : () => unawaited(
-                                                              sync.synchronize(),
+                                                              _refresh(),
                                                             ),
                                                       child: const Text('重试'),
                                                     ),
                                                     dismiss: () => setState(
-                                                      () => _dismissedMessage =
-                                                          sync.message,
+                                                      () => _dismissedMessageRevision =
+                                                          sync.messageRevision,
                                                     ),
                                                   ),
                                                 if (sync
@@ -744,6 +913,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                     child: Column(
                                                       children: [
                                                         const LibraryColumnHeader(),
+                                                        if (songbookStatus !=
+                                                                null &&
+                                                            entries.isNotEmpty)
+                                                          songbookStatus,
                                                         Expanded(
                                                           child:
                                                               entries.isEmpty &&
@@ -751,18 +924,18 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                       .isEmpty &&
                                                                   hits.isEmpty
                                                               ? Center(
-                                                                  child: Text(
-                                                                    searching
-                                                                        ? '未找到曲谱'
-                                                                        : '这个文件夹里还没有曲谱',
-                                                                    style: ScoreText
-                                                                        .body
-                                                                        .copyWith(
+                                                                  child:
+                                                                      songbookStatus ??
+                                                                      Text(
+                                                                        searching
+                                                                            ? '未找到曲谱'
+                                                                            : '这个文件夹里还没有曲谱',
+                                                                        style: ScoreText.body.copyWith(
                                                                           color: ScoreTokens.of(
                                                                             context,
                                                                           ).ink500,
                                                                         ),
-                                                                  ),
+                                                                      ),
                                                                 )
                                                               : ListView.builder(
                                                                   key: PageStorageKey((
@@ -794,6 +967,9 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                       if (index ==
                                                                           entries
                                                                               .length) {
+                                                                        if (songbookStatus !=
+                                                                            null)
+                                                                          return const SizedBox.shrink();
                                                                         return songbookResultHeading(
                                                                           context,
                                                                           '谱本内曲目 · ${hits.length}',
@@ -806,9 +982,8 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                             hits[index -
                                                                                 entries.length -
                                                                                 1];
-                                                                        final entry = sync
-                                                                            .offlineSnapshot!
-                                                                            .entryById(
+                                                                        final entry =
+                                                                            sync.recentEntry(
                                                                               hit.key.entryId,
                                                                             )!;
                                                                         return SongbookSearchResultRow(
@@ -817,18 +992,6 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                           pathLabel:
                                                                               '${sync.sourceNameFor(entry.id)} / ${entry.relativePath}',
                                                                           onOpen: () {
-                                                                            if (!hit.item.canNavigate) {
-                                                                              ScaffoldMessenger.of(
-                                                                                context,
-                                                                              ).showSnackBar(
-                                                                                const SnackBar(
-                                                                                  content: Text(
-                                                                                    '文件已更新，请打开目录核对 PDF 页码。',
-                                                                                  ),
-                                                                                ),
-                                                                              );
-                                                                              return;
-                                                                            }
                                                                             unawaited(
                                                                               _open(
                                                                                 entry,
@@ -935,7 +1098,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                           ),
                                                                           constraints: const BoxConstraints.tightFor(
                                                                             width:
-                                                                                ScoreLayout.menuWidth,
+                                                                                ScoreLayout.offlineEntryMenuWidth,
                                                                           ),
                                                                           tooltip: '曲谱选项',
                                                                           icon: const ReaderIcon(
@@ -970,55 +1133,20 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                                                                                     : value == 'download'
                                                                                     ? _download(entry: entry)
                                                                                     : value == 'remove'
-                                                                                    ? sync.removeOfflineDownload(entry.id)
+                                                                                    ? _removeDownload(entry.id)
                                                                                     : sync.selectOffline(
                                                                                         OfflineRule(sourceId: sync.sourceIdFor(entry.id)!, entryId: entry.id, selected: false),
                                                                                       ),
                                                                               );
                                                                             }
                                                                           },
-                                                                          itemBuilder: (_) => [
-                                                                            const PopupMenuItem(
-                                                                              value: 'add',
-                                                                              child: Text(
-                                                                                '加入曲单',
-                                                                              ),
-                                                                            ),
-                                                                            PopupMenuItem(
-                                                                              value: 'share',
-                                                                              enabled: ready,
-                                                                              child: Text(
-                                                                                ready ? '分享' : '下载后可分享',
-                                                                              ),
-                                                                            ),
-                                                                            const PopupMenuItem(
-                                                                              value: 'location',
-                                                                              child: Text(
-                                                                                '查看位置',
-                                                                              ),
-                                                                            ),
-                                                                            if (!ready ||
-                                                                                pending)
-                                                                              PopupMenuItem(
-                                                                                value: 'download',
-                                                                                child: Text(
-                                                                                  pending ? '更新下载' : '下载到 iPad',
-                                                                                ),
-                                                                              ),
-                                                                            const PopupMenuItem(
-                                                                              value: 'unselect',
-                                                                              child: Text(
-                                                                                '取消离线选择',
-                                                                              ),
-                                                                            ),
-                                                                            if (ready)
-                                                                              const PopupMenuItem(
-                                                                                value: 'remove',
-                                                                                child: Text(
-                                                                                  '移除本机下载',
-                                                                                ),
-                                                                              ),
-                                                                          ],
+                                                                          itemBuilder: (_) => _entryMenu(
+                                                                            entry.id,
+                                                                            ready:
+                                                                                ready,
+                                                                            pending:
+                                                                                pending,
+                                                                          ),
                                                                         ),
                                                                       ),
                                                                       onTap: () =>
@@ -1046,6 +1174,10 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                   ),
                 ),
               );
+              return DirectoryMetadataScope(
+                enabled: !searching && !_setListsOpen && !_recentOpen,
+                child: screen,
+              );
             },
           );
         },
@@ -1061,6 +1193,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
       '谱库';
 
   void _showRecent([BuildContext? navigationContext]) {
+    _cancelOpen();
     setState(() {
       _recentOpen = true;
       _setListsOpen = false;
@@ -1111,79 +1244,91 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     },
   );
 
-  Widget _header(BuildContext headerContext, bool wide, String folder) =>
-      SizedBox(
-        height: ScoreLayout.headerHeight,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: ScoreLayout.listMargin,
-          ),
-          child: Row(
-            children: [
-              if (!wide) ...[
-                LibraryIconButton(
-                  glyph: ReaderGlyph.list,
-                  label: '打开来源',
-                  onPressed: () => Scaffold.of(headerContext).openDrawer(),
-                ),
-                const SizedBox(width: 8),
-              ],
-              Expanded(
-                child: _recentOpen
-                    ? Text(
-                        '最近阅读',
-                        style: ScoreText.title.copyWith(
-                          color: ScoreTokens.of(context).ink900,
-                        ),
-                      )
-                    : _searchOpen
-                    ? DirectorySearchField(
-                        controller: _search,
-                        focusNode: _searchFocus,
-                        onChanged: (text) => setState(() => _query = text),
-                      )
-                    : wide
-                    ? DirectoryBreadcrumbs(
-                        rootLabel: _sourceName,
-                        currentPath: folder,
-                        onNavigate: _selectFolder,
-                      )
-                    : Text(
-                        widget.isHome ? '曲谱库' : '离线谱库',
-                        style: ScoreText.title.copyWith(
-                          color: ScoreTokens.of(context).ink900,
-                        ),
-                      ),
-              ),
-              const SizedBox(width: 8),
-              LibraryIconButton(
-                glyph: _searchOpen ? ReaderGlyph.close : ReaderGlyph.search,
-                label: _searchOpen ? '关闭搜索' : '搜索',
-                onPressed: _searchOpen ? _closeSearch : _openSearch,
-              ),
-              const SizedBox(width: 8),
-              const ThemeAction(),
-              if (widget.openLocalImports != null)
-                LibraryIconButton(
-                  glyph: ReaderGlyph.folder,
-                  label: '本机导入',
-                  onPressed: widget.openLocalImports,
-                ),
-              if (!wide) ...[
-                const SizedBox(width: 8),
-                LibraryIconButton(
-                  glyph: ReaderGlyph.downloadList,
-                  label: '曲单',
-                  onPressed: _setLists,
-                ),
-                const SizedBox(width: 8),
-                _deviceSummary(compact: true),
-              ],
-              if (wide) ?_currentFolderMenu(folder),
-            ],
-          ),
+  Widget _header(
+    BuildContext headerContext,
+    bool wide,
+    String folder, {
+    required bool tight,
+  }) {
+    final gap = SizedBox(width: tight ? 0 : ScoreSpace.sm);
+    return SizedBox(
+      height: ScoreLayout.headerHeight,
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: tight ? ScoreSpace.xs : ScoreLayout.listMargin,
         ),
-      );
+        child: Row(
+          children: [
+            if (!wide) ...[
+              LibraryIconButton(
+                glyph: ReaderGlyph.list,
+                label: '打开来源',
+                onPressed: () => Scaffold.of(headerContext).openDrawer(),
+              ),
+              gap,
+            ],
+            Expanded(
+              child: _recentOpen
+                  ? Text(
+                      '最近阅读',
+                      style: ScoreText.title.copyWith(
+                        color: ScoreTokens.of(context).ink900,
+                      ),
+                    )
+                  : _searchOpen
+                  ? DirectorySearchField(
+                      controller: _search,
+                      focusNode: _searchFocus,
+                      onChanged: (text) => setState(() {
+                        _cancelOpen();
+                        _query = text;
+                      }),
+                    )
+                  : wide
+                  ? DirectoryBreadcrumbs(
+                      rootLabel: _sourceName,
+                      currentPath: folder,
+                      onNavigate: _selectFolder,
+                    )
+                  : Text(
+                      widget.isHome ? '曲谱库' : '离线谱库',
+                      style: ScoreText.title.copyWith(
+                        color: ScoreTokens.of(context).ink900,
+                      ),
+                    ),
+            ),
+            gap,
+            LibraryIconButton(
+              glyph: _searchOpen ? ReaderGlyph.close : ReaderGlyph.search,
+              label: _searchOpen ? '关闭搜索' : '搜索',
+              onPressed: _searchOpen ? _closeSearch : _openSearch,
+            ),
+            gap,
+            const ThemeAction(),
+            if (widget.openLocalImports != null)
+              LibraryIconButton(
+                glyph: ReaderGlyph.folder,
+                label: '本机导入',
+                onPressed: () {
+                  _cancelOpen();
+                  widget.openLocalImports!();
+                },
+              ),
+            if (!wide) ...[
+              gap,
+              LibrarySetListButton(onPressed: _setLists),
+              gap,
+              if (tight)
+                Flexible(child: _deviceSummary(compact: true))
+              else
+                _deviceSummary(compact: true),
+            ],
+            if (wide) ?_currentFolderMenu(folder),
+          ],
+        ),
+      ),
+    );
+  }
 
   /// Download action for the folder being browsed, the source root included.
   /// It sits beside the breadcrumbs: in the header when wide, otherwise in
@@ -1191,10 +1336,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
   Widget? _currentFolderMenu(String folder) =>
       !_recentOpen &&
           _activeSourceId != null &&
-          widget.controller.needsOfflineDownload(
-            sourceId: _activeSourceId!,
-            folder: folder,
-          )
+          (widget.controller.needsOfflineDownload(
+                sourceId: _activeSourceId!,
+                folder: folder,
+              ) ||
+              widget.controller.autoDownloadsFolder(_activeSourceId!, folder) !=
+                  null)
       ? _folderDownloadMenu(
           key: const ValueKey('offline-current-folder-menu'),
           sourceId: _activeSourceId!,
@@ -1244,7 +1391,13 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
                   children: [
                     if (!compact)
                       Text(
-                        sync.paired ? '电脑 · 已连接' : '连接电脑',
+                        !sync.paired
+                            ? '连接电脑'
+                            : switch (sync.computerReachable) {
+                                true => '电脑 · 已连接',
+                                false => '已配对 · 电脑暂不可达',
+                                null => '电脑 · 已配对',
+                              },
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: ScoreText.body.copyWith(color: t.ink900),
@@ -1421,6 +1574,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             final source = entry.value! as LibrarySourceInfo;
             return LibraryNavigationItem(
               label: source.name,
+              closeDrawerOnTap: true,
               selected:
                   !_recentOpen &&
                   !_setListsOpen &&
@@ -1457,7 +1611,12 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
             return LibraryNavigationItem(
               label: '立即同步',
               glyph: ReaderGlyph.sync,
-              onTap: () => unawaited(_refresh()),
+              onTap: () {
+                if (widget.controller.hasSyncActivity) return;
+                final scaffold = Scaffold.maybeOf(context);
+                if (scaffold?.isDrawerOpen == true) scaffold!.closeDrawer();
+                unawaited(_refresh());
+              },
             );
           case LibraryNavKind.returnLibrary:
             return LibraryNavigationItem(
@@ -1478,6 +1637,7 @@ class _OfflineLibraryScreenState extends State<OfflineLibraryScreen> {
     return LibraryNavigationItem(
       key: ValueKey('offline-folder-$folder'),
       label: p.posix.basename(folder),
+      closeDrawerOnTap: true,
       selected: !_recentOpen && !_setListsOpen && _folder == folder,
       indent: (depth * ScoreLayout.treeIndent).clamp(0, 132),
       onTap: () => _selectFolder(folder),
@@ -1509,7 +1669,7 @@ class _OfflineFolderIcon extends StatelessWidget {
         child: ScoreFileIcon.folder(
           state: status.total == 0
               ? ScoreFileIconState.empty
-              : status.readable == status.total
+              : status.allCurrent
               ? ScoreFileIconState.ready
               : status.readable == 0
               ? ScoreFileIconState.cloud

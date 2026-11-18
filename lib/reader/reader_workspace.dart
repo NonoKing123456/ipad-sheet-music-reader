@@ -44,6 +44,7 @@ class ReaderWorkspace extends ChangeNotifier {
   bool _bookmarkError = false;
   final Set<Completer<void>> _annotationIdleWaiters = <Completer<void>>{};
   Future<void> _positionWrites = Future.value();
+  Future<void>? _retryingAnnotations;
   Future<void> flushPositions() => _positionWrites;
   bool get saving => _operations > 0 || _positionOperations > 0;
   bool get savingAnnotations =>
@@ -178,7 +179,14 @@ class ReaderWorkspace extends ChangeNotifier {
     _changed();
   }
 
-  Future<void> retryStrokes() async {
+  Future<void> retryStrokes() =>
+      _retryingAnnotations ??= _retryPendingAnnotations().whenComplete(
+        () => _retryingAnnotations = null,
+      );
+
+  Future<void> _retryPendingAnnotations() async {
+    // A stroke can still be in the pending list while its first write commits.
+    await waitForAnnotationWrites();
     for (final stroke in List<PendingStroke>.of(pending)) {
       await _saveStroke(stroke);
     }

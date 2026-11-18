@@ -38,6 +38,66 @@ Future<void> until(WidgetTester tester, bool Function() done) async {
   await tester.pump();
 }
 
+Future<void> _checkSidebarSelection(
+  WidgetTester tester, {
+  required bool ipad,
+}) async {
+  Finder item(String title) =>
+      find.widgetWithText(LibraryNavigationItem, title);
+  Finder contents(String title) =>
+      find.widgetWithText(LibraryFileRow, title).hitTestable();
+  final open = find.byTooltip('打开来源');
+  final sidebar = find.byType(LibrarySidebar);
+  // The preceding Windows refresh is launched from inside the open drawer.
+  final initialScaffold = Scaffold.of(tester.element(open));
+  if (initialScaffold.isDrawerOpen) {
+    initialScaffold.closeDrawer();
+    await tester.pumpAndSettle();
+  }
+  await tester.binding.setSurfaceSize(const Size(1280, 810));
+  await tester.pumpAndSettle();
+  expect(open, findsNothing);
+  await tester.tap(item('Two'));
+  await tester.pumpAndSettle();
+  expect(contents('Blue OtherSource'), findsOneWidget);
+  expect(sidebar.hitTestable(), findsOneWidget);
+
+  await tester.binding.setSurfaceSize(
+    ipad ? const Size(810, 1080) : const Size(1080, 810),
+  );
+  await tester.pumpAndSettle();
+  expect(open.hitTestable(), findsOneWidget);
+  await tester.tap(open.hitTestable());
+  await tester.pumpAndSettle();
+  final scaffold = Scaffold.of(tester.element(sidebar));
+  await tester.tap(item('One'));
+  await tester.pumpAndSettle();
+  expect(scaffold.isDrawerOpen, isFalse);
+  expect(contents('Gig'), findsOneWidget);
+  expect(open.hitTestable(), findsOneWidget);
+  await tester.tap(open.hitTestable());
+  await tester.pumpAndSettle();
+  final collapse = find.descendant(
+    of: item('Gig'),
+    matching: find.byTooltip('收起文件夹'),
+  );
+  if (collapse.evaluate().isNotEmpty) {
+    await tester.tap(collapse);
+    await tester.pumpAndSettle();
+  }
+  expect(scaffold.isDrawerOpen, isTrue);
+  expect(item('Nested'), findsNothing);
+  await tester.tap(
+    find.descendant(of: item('Gig'), matching: find.byTooltip('展开文件夹')),
+  );
+  await tester.pumpAndSettle();
+  expect(scaffold.isDrawerOpen, isTrue);
+  await tester.tap(item('Nested'));
+  await tester.pumpAndSettle();
+  expect(scaffold.isDrawerOpen, isFalse);
+  expect(contents('Blue First'), findsOneWidget);
+}
+
 void main() {
   testWidgets(
     'directory magnifier expands only the header, closes to same folder, keeps scope and has full 48px parent and direct refresh at supported minimum sizes',
@@ -207,6 +267,35 @@ void main() {
         expect(result('Blue First'), findsOneWidget);
         expect(result('Blue Elsewhere'), findsNothing);
         expect(result('Blue OtherSource'), findsNothing);
+        final clear = find.byTooltip('清除搜索词');
+        if (ipad) {
+          expect(find.text('Esc'), findsNothing);
+          final field = tester.widget<TextField>(find.byType(TextField));
+          final close = find.byTooltip('关闭搜索');
+          expect(
+            tester.getRect(clear).right,
+            lessThan(tester.getRect(close).left),
+          );
+          await tester.tap(clear.hitTestable());
+          await tester.pump();
+          expect(field.controller!.text, isEmpty);
+          expect(field.focusNode!.hasFocus, isTrue);
+          expect(tester.testTextInput.isVisible, isTrue);
+          expect(clear, findsNothing);
+          expect(close, findsOneWidget);
+          expect(currentCrumb(), 'Nested');
+          await tester.enterText(find.byType(TextField), '返场');
+          await tester.pump();
+          expect(field.controller!.text, '返场');
+          await tester.enterText(find.byType(TextField), 'Blue');
+          await tester.pump();
+          expect(result('Blue First'), findsOneWidget);
+          expect(result('Blue OtherSource'), findsNothing);
+          expect(result('Blue Elsewhere'), findsNothing);
+        } else {
+          expect(clear, findsNothing);
+          expect(find.text('Esc'), findsOneWidget);
+        }
         await tester.tap(find.byTooltip('关闭搜索'));
         await tester.pump();
         expect(find.byType(TextField), findsNothing);
@@ -226,17 +315,15 @@ void main() {
           expect(library.currentFolder, 'Gig');
           await tester.tap(find.byTooltip('打开来源'));
           await tester.pumpAndSettle();
-          await tester.scrollUntilVisible(
-            find.byTooltip('曲库操作'),
-            160,
-            scrollable: find
-                .descendant(
-                  of: find.byType(LibrarySidebar),
-                  matching: find.byType(Scrollable),
-                )
-                .first,
-          );
-          await tester.tap(find.byTooltip('曲库操作'));
+          final operations = find.byTooltip('曲库操作').hitTestable();
+          final heading = tester.getCenter(find.text('谱库来源'));
+          expect(operations, findsOneWidget);
+          final hit = tester.getRect(operations);
+          expect(hit.size, const Size(40, 40));
+          expect(hit.left, greaterThan(heading.dx));
+          expect(hit.top, lessThan(heading.dy));
+          expect(hit.bottom, greaterThan(heading.dy));
+          await tester.tap(operations);
           await tester.pumpAndSettle();
           await tester.tap(find.text('刷新谱库'));
           await until(tester, () => !library.scanning);
@@ -246,6 +333,7 @@ void main() {
           isNull,
           reason: 'supported minimum layout must not overflow',
         );
+        await _checkSidebarSelection(tester, ipad: ipad);
         debugPrint(
           'DIRECTORY_UI_084 platform=${ipad ? 'iPad' : 'Windows'} header_search_only=true full_parent48=true scope_cross_source_preserved=true close_restores_folder=true direct_refresh=true supported_minimum_no_overflow=true',
         );

@@ -14,6 +14,7 @@ import 'reader_input.dart';
 import 'reader_page_seek_bar.dart';
 import 'reader_stage.dart';
 import 'reader_page_window.dart';
+import 'reader_performance.dart';
 import 'reader_presentation_policy.dart';
 import 'reader_session.dart';
 import 'reader_workspace.dart';
@@ -46,6 +47,7 @@ class LibraryReaderScreen extends StatefulWidget {
     required this.locate,
     required this.initialTarget,
     this.setListId,
+    this.programNames = const {},
     this.itemId,
     this.sourceChanges,
     this.loader,
@@ -66,6 +68,7 @@ class LibraryReaderScreen extends StatefulWidget {
   final ScoreLocator locate;
   final ScoreTarget initialTarget;
   final String? setListId;
+  final Map<String, String> programNames;
   final String? itemId;
   final Listenable? sourceChanges;
   final ScoreLoader? loader;
@@ -192,12 +195,105 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   Stopwatch? _pageWatch;
   bool _presented = false;
   PageKey? _historyPosition;
-  String? _historyItemId;
+  String? _historyItemId, _presentedTitle;
   LoadedScore? _notifiedDocument;
   ReaderSnapshot? _shareSnapshot;
   bool _leaving = false;
   bool _directoryOpen = false;
   bool _pageInputOpen = false;
+  bool _programOpen = false;
+  String? _pendingItem, _errorItem, _itemError;
+  LoadedScore? _programOrigin;
+  ReadingPosition? _programOriginPosition;
+  PageKey? _folio;
+  late bool _toolsVisible = widget.initiallyShowToolbar;
+  ScoreSetList? get _program {
+    final id = widget.setListId;
+    final list = id == null
+        ? null
+        : widget.workspace.store.snapshot.setListById(id);
+    return list == null || list.isDeleted ? null : list;
+  }
+
+  String _scoreName(String path) =>
+      physicalFileDisplayName(p.posix.basename(path.replaceAll('\\', '/')));
+  String _programTitle(SetListItem item) => _scoreName(
+    widget.programNames[item.entryId] ??
+        widget.locate(item.entryId)?.displayPath ??
+        '暂不可用的曲谱',
+  );
+
+  void _closeProgram() {
+    _programOpen = false;
+    if (_pendingItem != null) _restoreProgramOrigin();
+    setState(() {
+      _errorItem = null;
+      _itemError = null;
+    });
+  }
+
+  void _restoreProgramOrigin() {
+    final score = _programOrigin, position = _programOriginPosition;
+    _pendingItem = null;
+    _programOrigin = null;
+    _programOriginPosition = null;
+    if (score != null && position != null) {
+      _session.restorePresented(score, position);
+    }
+  }
+
+  Future<void> _chooseProgramItem(SetListItem item) async {
+    if (_pendingItem != null || _writing || _modeChanging) return;
+    if (item.id == _historyItemId) {
+      _closeProgram();
+      return;
+    }
+    final target = widget.locate(item.entryId);
+    final position = _historyPosition, origin = _visibleDocument;
+    if (position == null || origin == null) return;
+    if (target == null) {
+      setState(() {
+        _errorItem = item.id;
+        _itemError = '曲谱尚不可读';
+      });
+      return;
+    }
+    if (!await _textControls.finish() ||
+        !mounted ||
+        !_programOpen ||
+        _pendingItem != null) {
+      return;
+    }
+    setState(() {
+      _pendingItem = item.id;
+      _errorItem = null;
+      _itemError = null;
+      _programOrigin = origin;
+      _programOriginPosition = ReadingPosition(
+        entryId: position.entryId,
+        revisionId: position.revisionId,
+        pageNumber: position.pageNumber,
+        setListItemId: _historyItemId,
+      );
+      _direction = 0;
+    });
+    await _session.open(target, itemId: item.id);
+    if (!mounted || _pendingItem != item.id) return;
+    if (_session.message != null ||
+        _session.position?.setListItemId != item.id) {
+      _programFailed(item.id, _session.message ?? '曲谱暂时无法打开');
+    }
+  }
+
+  void _programFailed(String id, String message) {
+    if (!mounted || _pendingItem != id) return;
+    _restoreProgramOrigin();
+    setState(() {
+      _errorItem = id;
+      _itemError = message;
+    });
+  }
+
   final _indexedDocuments = <DocumentKey>{};
   final _canceledSeekGestures = Expando<bool>();
 
@@ -243,6 +339,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             ? position!.pageNumber
             : 1,
         setListId: widget.setListId,
+        programNames: widget.programNames,
         itemId: _historyItemId ?? widget.itemId,
         sourceChanges: widget.sourceChanges,
         loader: widget.loader,
@@ -277,6 +374,12 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   KeyEventResult _annotationHistoryKey(KeyEvent event) {
+    if (_programOpen &&
+        event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      _closeProgram();
+      return KeyEventResult.handled;
+    }
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.escape &&
         widget.beforeLeave != null &&
@@ -402,6 +505,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   void _changed() {
     if (!mounted) return;
+    if (_programOpen && _program == null) _closeProgram();
     final document = _session.current;
     if (document != null && !identical(document, _notifiedDocument)) {
       _notifiedDocument = document;
@@ -416,6 +520,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       _prewarmAnchor = null;
       _session.cancelPrewarm();
       _shownPage = _session.pageKey;
+      _folio = null;
       final page = _shownPage;
       if (page != null) {
         debugPrint(
@@ -431,6 +536,28 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       }
       // Retain outgoing paper and transform through the ready/paint gate.
       // The newly presented page receives normal fit at its prepaint gate.
+    }
+    // Two consecutive set-list entries may already share the painted page.
+    // Its surface will not emit a second paint callback just for the entry ID.
+    final itemId = _session.position?.setListItemId;
+    final alreadyShown = _session.pageKey;
+    if (itemId != null &&
+        itemId != _historyItemId &&
+        document != null &&
+        alreadyShown != null &&
+        alreadyShown == _historyPosition &&
+        alreadyShown == _visiblePage &&
+        identical(document, _visibleDocument)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            _session.position?.setListItemId == itemId &&
+            _historyItemId != itemId &&
+            _session.pageKey == alreadyShown &&
+            _visiblePage == alreadyShown &&
+            identical(document, _visibleDocument)) {
+          _markPresented(document, alreadyShown.pageNumber);
+        }
+      });
     }
     setState(() {});
     if (_terminalVisiblePage != null) {
@@ -478,27 +605,47 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         widget.workspace.pendingText.isEmpty) {
       return true;
     }
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('批注尚未保存'),
-            content: const Text('退出应用会丢失未保存内容。'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('继续保存'),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('返回谱库'),
-              ),
-            ],
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('批注尚未保存'),
+        content: const Text('退出应用会丢失未保存内容。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('继续保存'),
           ),
-        ) ??
-        false;
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('返回谱库'),
+          ),
+        ],
+      ),
+    );
+    if (leave != false || !mounted) return leave == true;
+    final workspace = widget.workspace;
+    await workspace.retryStrokes();
+    await workspace.waitForAnnotationWrites();
+    if (mounted) {
+      final remaining = workspace.unsavedCount;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              remaining == 0 ? '批注已保存。' : '仍有 $remaining 项批注未保存，请重试。',
+            ),
+          ),
+        );
+    }
+    return false;
   }
 
   Future<void> _back() async {
+    if (_programOpen) {
+      _closeProgram();
+      return;
+    }
     if (await _leaveSafely() && mounted) Navigator.pop(context);
   }
 
@@ -709,10 +856,27 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   Widget build(BuildContext context) {
     final reader = _buildReader(context);
     final document = _session.current;
+    final program = _program;
     final child = _isCompact
         ? Stack(
             children: [
               Positioned.fill(child: reader),
+              if (_folio != null &&
+                  !_toolsVisible &&
+                  !_dotsSuppressed &&
+                  !_writing &&
+                  !_editing &&
+                  _effectiveViewMode == ReaderViewMode.single)
+                Positioned(
+                  top: MediaQuery.paddingOf(context).top + ScoreSpace.lg,
+                  right: MediaQuery.paddingOf(context).right + ScoreSpace.xxl,
+                  child: ReaderTurnFolio(
+                    key: ValueKey((_folio, _historyItemId)),
+                    page: _folio!.pageNumber,
+                    count: _visibleDocument!.pageCount,
+                  ),
+                ),
+              if (program != null) _programOverlay(program),
               if (_directoryOpen && document != null) ...[
                 Positioned(
                   left: 0,
@@ -754,6 +918,62 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     );
   }
 
+  Widget _programOverlay(ScoreSetList program) => Positioned.fill(
+    top: MediaQuery.paddingOf(context).top + ScoreLayout.readerHeaderHeight,
+    child: IgnorePointer(
+      ignoring: !_programOpen,
+      child: ExcludeFocus(
+        excluding: !_programOpen,
+        child: ExcludeSemantics(
+          excluding: !_programOpen,
+          child: Stack(
+            children: [
+              if (_programOpen)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _closeProgram,
+                  ),
+                ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(
+                  width: ScoreLayout.programWidth,
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : ScoreMotion.panel,
+                    switchInCurve: ScoreMotion.curve,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) => SlideTransition(
+                      position: Tween<Offset>(
+                        begin: const Offset(-1, 0),
+                        end: Offset.zero,
+                      ).animate(animation),
+                      child: child,
+                    ),
+                    child: _programOpen
+                        ? ReaderProgramPanel(
+                            name: program.name,
+                            items: program.activeItems,
+                            currentId: _historyItemId,
+                            pendingId: _pendingItem,
+                            errorId: _errorItem,
+                            error: _itemError,
+                            titleFor: _programTitle,
+                            onSelect: _chooseProgramItem,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
   Widget _buildReader(BuildContext context) {
     final current = _session.current;
     final page = _session.pageKey;
@@ -778,9 +998,19 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               ? '${workspace.unsavedCount} 项未保存'
               : '阅读状态',
           onToolsLayoutSettled: _refreshReaderLayout,
+          onToolsVisibilityChanged: (visible) {
+            _toolsVisible = visible;
+            _folio = null;
+            if (!visible && _programOpen) _closeProgram();
+            if (mounted) setState(() {});
+          },
           beforeHideTools: () async =>
               !_writing && (!_editing || await _setEditing(false)),
-          blockArrowKeys: _desktopMenuOpen || _directoryOpen || _pageInputOpen,
+          blockArrowKeys:
+              _desktopMenuOpen ||
+              _programOpen ||
+              _directoryOpen ||
+              _pageInputOpen,
           onObstructionChanged: (insets) => setState(() => _panInsets = insets),
           onPrevious: () => _navigate(NavigationDirection.backward),
           onNext: () => _navigate(NavigationDirection.forward),
@@ -867,6 +1097,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         !_capabilities.supports(mode)) {
       return;
     }
+    if (_programOpen) _closeProgram();
     if (_displayedMode == ReaderViewMode.continuous) {
       final old = _heldFrame ?? _frame;
       _continuousRestore = old.continuous.anchor;
@@ -968,6 +1199,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
 
   Future<void> _annotationAction() async {
     if (_writing || _modeChanging) return;
+    if (_programOpen) _closeProgram();
     if (_editing) {
       await _finishAnnotation();
       return;
@@ -1046,7 +1278,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         page: _visiblePage?.pageNumber ?? _session.page,
         pageCount: document.pageCount,
         label: label,
-        enabled: !_writing && !_directoryOpen,
+        enabled: !_writing && !_directoryOpen && !_programOpen,
         target: _isCompact
             ? ScoreLayout.touchTarget
             : ScoreLayout.desktopTarget,
@@ -1085,6 +1317,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
         ? null
         : () async {
             if (!await _textControls.finish() || !mounted) return;
+            if (_programOpen) _closeProgram();
             setState(() => _directoryOpen = !_directoryOpen);
           },
   );
@@ -1536,7 +1769,8 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
               presentationClock: widget.presentationClock,
               forwardWindowOnly: !_isCompact || groups.doublePage,
               paperWidthTransition: !_isCompact || groups.doublePage,
-              shortPageTransition: !_isCompact || groups.doublePage,
+              shortPageTransition: true,
+              tabletPageTurn: _isCompact && !groups.doublePage,
               onWillPresentPage: (key, index) {
                 if (key != viewKey || !identical(frame, _frame)) return;
                 final group = groups.at(index);
@@ -1657,6 +1891,31 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             .catchError((Object _) {}),
       );
     }
+    final itemId = _session.position?.setListItemId;
+    if (_historyPosition != null &&
+        newlyPresented &&
+        _isCompact &&
+        _direction != 0 &&
+        !_toolsVisible &&
+        !_writing &&
+        !_editing &&
+        !_dotsSuppressed &&
+        _effectiveViewMode == ReaderViewMode.single) {
+      setState(() => _folio = visible);
+    }
+    if (_pendingItem != null &&
+        _pendingItem == itemId &&
+        visible == _session.pageKey) {
+      setState(() {
+        _pendingItem = null;
+        _programOrigin = null;
+        _programOriginPosition = null;
+        _programOpen = false;
+      });
+      _stageControls.hideTools();
+    }
+    if (_historyItemId != itemId && _isCompact) setState(() {});
+    _presentedTitle = document.target.displayPath;
     _historyPosition = visible;
     _historyItemId = _session.position?.setListItemId;
     if (visible == _shownPage && !_presented) {
@@ -1689,6 +1948,17 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
     final reportFailure = failed;
     failed = (error) {
       reportFailure(error);
+      final pending = _pendingItem;
+      if (error != null &&
+          pending != null &&
+          _session.position?.setListItemId == pending &&
+          identical(_session.current, document) &&
+          _session.page == number) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _programFailed(pending, error),
+        );
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
       if (frame != null) _rejectModePresentation(frame, error);
     };
     final surfacePage = PageKey(
@@ -2115,6 +2385,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
       }
       _dotRestore?.cancel();
       _penPointers.add(event.pointer);
+      _folio = null;
       if (!_dotsSuppressed) setState(() => _dotsSuppressed = true);
     },
     onPointerUp: _releasePen,
@@ -2188,6 +2459,10 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   Widget _compactHeader(LoadedScore? current, String title) {
     final t = ScoreTokens.of(context);
     final document = _visibleDocument ?? current;
+    final list = _program;
+    final items = list?.activeItems;
+    final index = items?.indexWhere((item) => item.id == _historyItemId) ?? -1;
+    final inProgram = list != null && index >= 0;
     return Container(
       height: ScoreLayout.readerHeaderHeight,
       decoration: BoxDecoration(
@@ -2206,14 +2481,91 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
             ),
           ),
           const SizedBox(width: ScoreSpace.sm),
-          Expanded(
+          if (inProgram)
+            Expanded(
+              child: Semantics(
+                button: true,
+                expanded: _programOpen,
+                child: InkWell(
+                  key: const ValueKey('reader-program-title'),
+                  onTap: _editing || _modeChanging
+                      ? null
+                      : () {
+                          if (_programOpen) {
+                            _closeProgram();
+                            return;
+                          }
+                          setState(() {
+                            _directoryOpen = false;
+                            _programOpen = true;
+                          });
+                        },
+                  child: SizedBox(
+                    height: ScoreLayout.readerTitleMenuHitHeight,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                _scoreName(_presentedTitle ?? title),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: ScoreText.headline.copyWith(
+                                  color: t.ink900,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: ScoreSpace.xs),
+                            ReaderIcon(
+                              _programOpen
+                                  ? ReaderGlyph.chevronUp
+                                  : ReaderGlyph.chevronDown,
+                              size: ScoreLayout.readerTitleChevron,
+                            ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                list.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: ScoreText.caption.copyWith(
+                                  color: t.ink500,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              ' · ${index + 1}/${items!.length}',
+                              style: ScoreText.caption.copyWith(
+                                color: t.ink500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Flexible(
+            fit: inProgram ? FlexFit.loose : FlexFit.tight,
+            flex: inProgram ? 0 : 1,
             child: MenuAnchor(
               style: const MenuStyle(
                 minimumSize: WidgetStatePropertyAll(
                   Size(ScoreLayout.menuWidth, 0),
                 ),
               ),
-              onOpen: () => setState(() => _desktopMenuOpen = true),
+              onOpen: () {
+                if (_programOpen) _closeProgram();
+                setState(() => _desktopMenuOpen = true);
+              },
               onClose: () => setState(() => _desktopMenuOpen = false),
               menuChildren: [
                 if (widget.allowAnnotations)
@@ -2229,45 +2581,55 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
                     child: const Text('图片信息'),
                   ),
               ],
-              builder: (context, controller, _) => Semantics(
-                button: true,
-                label: '曲谱操作',
-                child: Tooltip(
-                  message: '曲谱操作',
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => controller.isOpen
-                        ? controller.close()
-                        : controller.open(),
-                    child: SizedBox(
-                      key: const ValueKey('reader-title-menu'),
-                      height: ScoreLayout.readerTitleMenuHitHeight,
-                      child: Row(
-                        children: [
-                          Flexible(
-                            child: Text(
-                              physicalFileDisplayName(
-                                p.posix.basename(title.replaceAll('\\', '/')),
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: ScoreText.body.copyWith(
-                                color: t.ink900,
-                                fontWeight: FontWeight.w500,
-                              ),
+              builder: (context, controller, _) => inProgram
+                  ? ReaderActionButton(
+                      label: '曲谱操作',
+                      icon: const ReaderIcon(ReaderGlyph.more),
+                      onPressed: controller.isOpen
+                          ? controller.close
+                          : controller.open,
+                    )
+                  : Semantics(
+                      button: true,
+                      label: '曲谱操作',
+                      child: Tooltip(
+                        message: '曲谱操作',
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => controller.isOpen
+                              ? controller.close()
+                              : controller.open(),
+                          child: SizedBox(
+                            key: const ValueKey('reader-title-menu'),
+                            height: ScoreLayout.readerTitleMenuHitHeight,
+                            child: Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    physicalFileDisplayName(
+                                      p.posix.basename(
+                                        title.replaceAll('\\', '/'),
+                                      ),
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: ScoreText.body.copyWith(
+                                      color: t.ink900,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: ScoreSpace.xs),
+                                const ReaderIcon(
+                                  ReaderGlyph.chevronDown,
+                                  size: ScoreLayout.readerTitleChevron,
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(width: ScoreSpace.xs),
-                          const ReaderIcon(
-                            ReaderGlyph.chevronDown,
-                            size: ScoreLayout.readerTitleChevron,
-                          ),
-                        ],
+                        ),
                       ),
                     ),
-                  ),
-                ),
-              ),
             ),
           ),
           const SizedBox(width: ScoreSpace.sm),
@@ -2366,6 +2728,7 @@ class _LibraryReaderScreenState extends State<LibraryReaderScreen> {
   }
 
   Future<void> _navigate(NavigationDirection direction) async {
+    if (_programOpen) return;
     if (!await _textControls.finish() || !mounted) return;
     if (_picking) setState(_cancelPick);
     final step = direction == NavigationDirection.forward ? 1 : -1;

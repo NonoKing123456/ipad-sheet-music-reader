@@ -36,6 +36,7 @@ class SongbookItem {
   SongbookItem copyWith(
           {String? title,
           int? pageNumber,
+          List<String>? ancestors,
           bool? needsReview,
           bool? manual,
           int? modified}) =>
@@ -43,7 +44,7 @@ class SongbookItem {
           id: id,
           title: title ?? this.title,
           pageNumber: pageNumber ?? this.pageNumber,
-          ancestors: ancestors,
+          ancestors: ancestors ?? this.ancestors,
           manual: manual ?? this.manual,
           needsReview: needsReview ?? this.needsReview,
           sourceSignature: sourceSignature,
@@ -89,6 +90,35 @@ class SongbookItem {
         needsReview: json['needsReview'] == true,
         modified: json['modified'] as int,
         sourceSignature: json['sourceSignature'] as String?);
+  }
+}
+
+/// Resolve paths in the outline that supplied an item. Embedded ids and source
+/// signatures survive edits, so native children don't become manual bookmarks.
+class _ChapterRenames {
+  _ChapterRenames(
+      Iterable<SongbookItem> source, Map<String, SongbookItem> edits) {
+    for (final item in source) {
+      final edited = edits[item.id];
+      if (edited != null && edited.title != item.title) {
+        _titles[jsonEncode([...item.ancestors, item.title])] = edited.title;
+      }
+    }
+  }
+  final _titles = <String, String>{};
+
+  SongbookItem apply(SongbookItem item) {
+    if (_titles.isEmpty) return item;
+    List<String>? updated;
+    final prefix = <String>[];
+    for (var i = 0; i < item.ancestors.length; i++) {
+      prefix.add(item.ancestors[i]);
+      final title = _titles[jsonEncode(prefix)];
+      if (title != null && title != item.ancestors[i]) {
+        (updated ??= [...item.ancestors])[i] = title;
+      }
+    }
+    return updated == null ? item : item.copyWith(ancestors: updated);
   }
 }
 
@@ -242,29 +272,34 @@ class SongbookStore {
   Future<SongbookIndex> saveItem(PageMetadataKey key,
       {String? itemId,
       required String title,
-      required int pageNumber,
+      required int? pageNumber,
       List<String> ancestors = const []}) async {
     title = title.trim();
     final old = get(key);
     if (title.isEmpty ||
         title.length > 2048 ||
-        pageNumber < 1 ||
-        pageNumber > 100000 ||
-        (old?.pageCount != null && pageNumber > old!.pageCount!)) {
+        pageNumber != null &&
+            (pageNumber < 1 ||
+                pageNumber > 100000 ||
+                (old?.pageCount != null && pageNumber > old!.pageCount!))) {
       throw ArgumentError('请输入曲名及有效的实际PDF页码。');
     }
     final items = [...?old?.items];
     final selected =
         itemId == null ? -1 : items.indexWhere((e) => e.id == itemId);
     if (itemId != null && selected < 0) throw StateError('目录项已经改变，请重新选择。');
-    final duplicate = items.indexWhere(
-        (e) => e.title.trim() == title && e.pageNumber == pageNumber);
+    final previous = selected < 0 ? null : items[selected];
+    if (pageNumber == null &&
+        (previous == null || previous.pageNumber != null)) {
+      throw ArgumentError('请输入曲名及有效的实际PDF页码。');
+    }
+    final duplicate = items.indexWhere((e) =>
+        e.title.trim() == title &&
+        e.pageNumber == pageNumber &&
+        (previous == null ||
+            jsonEncode(e.ancestors) == jsonEncode(previous.ancestors)));
     final now = DateTime.now().toUtc().microsecondsSinceEpoch;
-    final base = selected >= 0
-        ? items[selected]
-        : duplicate >= 0
-            ? items[duplicate]
-            : null;
+    final base = previous ?? (duplicate >= 0 ? items[duplicate] : null);
     final item = SongbookItem(
         id: base?.id ??
             'm-${songbookItemSignature(title, pageNumber, ancestors)}',
@@ -283,9 +318,11 @@ class SongbookStore {
     } else {
       items.add(item);
     }
+    final renamed =
+        _ChapterRenames([if (previous != null) previous], {item.id: item});
     final result = SongbookIndex(
         key: key,
-        items: List.unmodifiable(items),
+        items: List.unmodifiable(items.map(renamed.apply)),
         pageCount: old?.pageCount,
         extracted: old?.extracted ?? false,
         outlineModified: old?.outlineModified ?? 0,
@@ -321,21 +358,33 @@ class SongbookStore {
         old?.items.where((e) => e.manual).toList() ?? <SongbookItem>[];
     final protected =
         manual.map((e) => e.sourceSignature).whereType<String>().toSet();
+    final edits = {for (final item in manual) item.id: item};
+    final renamed = _ChapterRenames(native, edits);
+    // Old indexes may have a renamed parent but still store a manual child's
+    // original path. The PDF outline supplies that child's stable identity.
+    for (final original in native) {
+      final edit = edits[original.id];
+      if (edit != null) {
+        edits[original.id] =
+            edit.copyWith(ancestors: renamed.apply(original).ancestors);
+      }
+    }
+    String destination(SongbookItem item) =>
+        jsonEncode([item.ancestors, item.title, item.pageNumber]);
+    final destinations = edits.values.map(destination).toSet();
     final items = <SongbookItem>[];
-    for (final item in native) {
-      if (protected.contains(item.sourceSignature) ||
-          manual.any(
-              (e) => e.title == item.title && e.pageNumber == item.pageNumber))
-        continue;
-      if (items
-          .any((e) => e.title == item.title && e.pageNumber == item.pageNumber))
-        continue;
+    for (final original in native) {
+      if (edits.containsKey(original.id) ||
+          protected.contains(original.sourceSignature)) continue;
+      final item = renamed.apply(original);
+      if (!destinations.add(destination(item))) continue;
       items.add(item.copyWith(
           needsReview: item.pageNumber != null && item.pageNumber! > pages));
     }
-    items.addAll(manual.map((e) => e.pageNumber != null && e.pageNumber! > pages
-        ? e.copyWith(needsReview: true)
-        : e));
+    items.addAll(edits.values.map((e) =>
+        e.pageNumber != null && e.pageNumber! > pages
+            ? e.copyWith(needsReview: true)
+            : e));
     final now = DateTime.now().toUtc().microsecondsSinceEpoch;
     final result = SongbookIndex(
         key: key,
@@ -380,7 +429,14 @@ class SongbookStore {
       // The full-index digest tie-break can pick another base after a merge.
       ...(chosen.keys.toList()..sort())
     };
-    final items = order.map((id) => chosen[id]!).toList();
+    final localRenames = _ChapterRenames(local.items, chosen);
+    final incomingRenames = _ChapterRenames(incoming.items, chosen);
+    final localItems = local.items.toSet();
+    final items = [
+      for (final id in order)
+        (localItems.contains(chosen[id]) ? localRenames : incomingRenames)
+            .apply(chosen[id]!)
+    ];
     // Suppress native originals of manually edited embedded entries on all peers.
     final protected = items
         .where((e) => e.manual)

@@ -3,6 +3,7 @@ import 'package:score_reader/reader/reader_input.dart';
 
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +15,7 @@ import 'package:score_reader/reader/reader_screen.dart';
 import 'package:score_reader/reader/reader_session.dart';
 
 import 'reader_color_070_test.dart' show setup, mount, until, flush, canvasPage;
+import 'support/score_fixture.dart' show syntheticPdf;
 
 // Painting is independent of annotation hit testing: v2 disables idle ink.
 Finder _readablePaper() => find.byElementPredicate((element) {
@@ -29,6 +31,91 @@ Finder _readablePaper() => find.byElementPredicate((element) {
 });
 
 void main() {
+  testWidgets(
+    '31 unreadable neighbours identify the target and retry opens the last page of the previous score',
+    (tester) async {
+      final (dir, workspace, _) = await setup(tester);
+      const provider = MethodChannel('plugins.flutter.io/path_provider');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(provider, (_) async => dir.path);
+      final targets = <String, ScoreTarget>{};
+      final presented = <PageKey>[];
+      final previousPdf = syntheticPdf(3);
+      try {
+        final list = (await tester.runAsync(() async {
+          final list = await workspace.store.createSetList('合成曲单');
+          for (final name in ['A', 'B', 'C']) {
+            final bytes = name == 'A' ? previousPdf : syntheticPdf(1);
+            final file = File('${dir.path}/$name.pdf');
+            await file.writeAsBytes(name == 'B' ? bytes : [0]);
+            targets[name] = ScoreTarget(
+              entryId: name,
+              revisionId: 'r1',
+              filePath: file.path,
+              displayPath: '排练/$name.pdf',
+              contentHash: sha256.convert(bytes).toString(),
+            );
+            await workspace.store.addItem(list.id, name);
+          }
+          return workspace.store.snapshot.setListById(list.id)!;
+        }))!;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: LibraryReaderScreen(
+              workspace: workspace,
+              initialTarget: targets['B']!,
+              locate: (id) => targets[id],
+              setListId: list.id,
+              itemId: list.activeItems[1].id,
+              onPresented: presented.add,
+            ),
+          ),
+        );
+        await until(tester, () => presented.isNotEmpty);
+        final start = presented.last;
+        expect(start.entryId, 'B');
+        expect(start.pageNumber, 1);
+        Future<void> checkFailure(
+          LogicalKeyboardKey key,
+          String direction,
+          String name,
+        ) async {
+          await tester.sendKeyEvent(key);
+          final status = find.byTooltip('阅读状态');
+          await until(tester, () => status.evaluate().isNotEmpty);
+          if (status.hitTestable().evaluate().isEmpty) {
+            await tester.tapAt(tester.getCenter(find.byType(ReaderInput)));
+            await tester.pump(const Duration(milliseconds: 240));
+          }
+          await tester.tap(status.hitTestable());
+          await tester.pumpAndSettle();
+          final message = find.textContaining('${direction}一份曲谱暂时无法读取');
+          expect(message, findsOneWidget);
+          expect(tester.widget<Text>(message).data, contains('《$name》'));
+          expect(presented.last, start);
+        }
+
+        await checkFailure(LogicalKeyboardKey.pageDown, '下', 'C');
+        await tester.tap(find.byTooltip('关闭状态详情'));
+        await tester.pumpAndSettle();
+        await checkFailure(LogicalKeyboardKey.pageUp, '上', 'A');
+        await tester.runAsync(
+          () => File(targets['A']!.filePath).writeAsBytes(previousPdf),
+        );
+        await tester.tap(find.text('重试翻页'));
+        await until(tester, () => presented.last.entryId == 'A');
+        expect(presented.last.pageNumber, 3);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await flush(tester, workspace);
+        workspace.dispose();
+        messenger.setMockMethodCallHandler(provider, null);
+        await tester.runAsync(() => dir.delete(recursive: true));
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
   testWidgets(
     'real reader repeated boundary pedals stay silent; selected pen inks on the right page and failed save remains discoverable and retryable',
     (tester) async {

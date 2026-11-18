@@ -7,7 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:reader_state/reader_state.dart';
+import 'package:score_reader/library/library_controller.dart';
+import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/ios_background_transfer.dart';
+import 'package:score_reader/sync/sync_controller.dart';
 
 class _Source implements LibrarySource, CollectionLibrarySource {
   final data = {
@@ -119,6 +122,16 @@ class _NativeBoundary {
       case 'status':
         if (!firstStatus.isCompleted) firstStatus.complete();
         return jobs[args['entryId']] ?? {'state': 'missing'};
+      case 'pruneUnselected':
+        final selection = OfflineSelection.fromJson(args['selection'] as List);
+        for (final id in jobs.keys.toList()) {
+          final item = source.item(id);
+          if (selection.includes(item)) continue;
+          final removed = jobs.remove(id);
+          await File(removed['path'] as String).delete();
+        }
+        await save();
+        return null;
       case 'staged':
         return jobs.values.where((v) => v['state'] == 'staged').toList();
       case 'acknowledge':
@@ -295,6 +308,58 @@ void main() {
     expect(view.readableItemFor('a'), isNotNull);
     expect(view.readableItemFor('b'), isNull);
     expect(restored.jobs, isEmpty);
+  });
+
+  test('cancelling a busy scope prunes its jobs while the other source keeps downloading', () async {
+    final tablet = Directory('${root.path}/tablet');
+    final library = LibraryController(
+      dataDirectory: tablet,
+      watchSource: false,
+    );
+    await library.initialize();
+    final workspace = ReaderWorkspace(
+      await ReaderStateStore.open(statePath: '${tablet.path}/reader.json'),
+    );
+    final sync = SyncController(
+      library: library,
+      workspace: workspace,
+      backgroundTransferFactory: () => transfer,
+    );
+    try {
+      await sync.initialize();
+      sync.setReaderActive(true);
+      await sync.pair(server.uri.toString(), server.createPairingCode());
+      expect(sync.paired, isTrue);
+      await sync.refreshCatalog();
+      for (final sourceId in ['scores', 'other-source']) {
+        await sync.selectOffline(
+          OfflineRule(sourceId: sourceId, folder: '', selected: true),
+        );
+      }
+      native.hold = true;
+      final downloading = sync.synchronize();
+      await native.firstStatus.future;
+      expect(native.jobs.keys, unorderedEquals(['a', 'b', 'other']));
+      await sync.selectOffline(
+        OfflineRule(sourceId: 'scores', folder: '', selected: false),
+      );
+      await downloading;
+      expect(native.pauses, 0);
+      expect(native.jobs.keys, ['other']);
+      expect(native.jobs['other']['state'], 'running');
+
+      native.jobs['other']['state'] = 'staged';
+      native.hold = false;
+      await sync.synchronize();
+      expect(sync.locateOffline('other'), isNotNull);
+      expect(sync.locateOffline('a'), isNull);
+      expect(sync.locateOffline('b'), isNull);
+      expect(native.jobs, isEmpty);
+    } finally {
+      sync.dispose();
+      workspace.dispose();
+      library.dispose();
+    }
   });
 
   test(

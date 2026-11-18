@@ -1,26 +1,38 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:library_sync/library_sync.dart';
 import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_widgets.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
+import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
 import 'package:score_reader/sync/sync_screen.dart';
 import 'package:score_reader/sync/qr_scanner.dart';
 import 'package:score_reader/theme/app_theme.dart';
 
+import 'support/score_fixture.dart' show syntheticPdf;
+import 'multisource_app_080_test.dart' show idleLibrary;
+import 'multisource_ui_080_test.dart' show uiUntil;
+
+class _LoopbackHttp extends HttpOverrides {}
+
 class _HeaderController extends SyncController {
-  _HeaderController({required super.library, required super.workspace});
+  _HeaderController({required super.library, required super.workspace})
+    : super(bindAddress: InternetAddress.loopbackIPv4);
 
   bool pairedForTest = false;
+  Completer<void>? downloadGate;
   int refreshCalls = 0, synchronizeCalls = 0, cancelCalls = 0;
 
   @override
-  bool get paired => pairedForTest;
+  bool get paired => pairedForTest || super.paired;
 
   @override
   Future<void> refreshCatalog() async {
@@ -32,6 +44,8 @@ class _HeaderController extends SyncController {
   @override
   Future<void> synchronize({Set<String>? onlyEntryIds}) async {
     synchronizeCalls++;
+    if (downloadGate != null) await downloadGate!.future;
+    if (super.paired) await super.synchronize(onlyEntryIds: onlyEntryIds);
   }
 
   @override
@@ -103,7 +117,11 @@ void main() {
             ),
             child: child!,
           ),
-          home: OfflineLibraryScreen(controller: sync, isHome: isHome),
+          home: OfflineLibraryScreen(
+            controller: sync,
+            isHome: isHome,
+            openLocalImports: () {},
+          ),
         ),
       ),
     );
@@ -123,8 +141,7 @@ void main() {
   Finder rotation() => find.byKey(const ValueKey('offline-sync-rotation'));
   Finder setListEntry() => find.byWidgetPredicate(
     (w) =>
-        (w is LibraryIconButton && w.label == '曲单') ||
-        (w is LibraryGroupLabel && w.text == '曲单'),
+        w is LibrarySetListButton || (w is LibraryGroupLabel && w.text == '曲单'),
   );
   void oneHeaderRow(WidgetTester tester) {
     // v2 replaces AppBar with a single 56dp header, with no bottom toolbar.
@@ -204,6 +221,214 @@ void main() {
     expect(sync.cancelCalls, 0);
     expect(tester.takeException(), isNull);
   });
+
+  testHeader('sync now on an unpaired iPad opens the pairing action', (
+    tester,
+  ) async {
+    final sync = await fixture(tester);
+    await show(tester, sync, width: 640);
+    await tester.tap(find.byTooltip('打开来源'));
+    await tester.pumpAndSettle();
+    await tester.tap(refresh());
+    await tester.pumpAndSettle();
+    final panel = find.byType(SyncScreen);
+    expect(panel, findsOneWidget);
+    expect(
+      find.descendant(of: panel, matching: find.text('扫描电脑二维码')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(sync.synchronizeCalls, 0);
+  });
+
+  for (final action in ['stay', 'close', 'folder during download']) {
+    testHeader('21 deferred chapter respects navigation: $action', (
+      tester,
+    ) async {
+      final reader = await fixture(tester)
+        ..pairedForTest = true;
+      final view = reader.collection!;
+      final bytes = syntheticPdf(3);
+      final item = CatalogItem(
+        sourceId: 's',
+        entryId: 'book',
+        revisionId: 'r1',
+        relativePath: 'Book.pdf',
+        length: bytes.length,
+        hash: sha256.convert(bytes).toString(),
+        format: 'pdf',
+      );
+      await tester.runAsync(() async {
+        await view.updateIndex(
+          CollectionIndex(
+            id: 'test',
+            sources: const [LibrarySourceInfo('s', '谱库')],
+            folders: const {
+              's': ['', '排练'],
+            },
+            entries: [item],
+          ),
+        );
+        await (await SongbookStore.open(reader.songbooks.directory)).put(
+          SongbookIndex(
+            key: const PageMetadataKey('book', 'r1'),
+            pageCount: 3,
+            items: [SongbookItem(id: 'chapter', title: '合成章节', pageNumber: 2)],
+          ),
+        );
+      });
+      reader.downloadGate = Completer<void>();
+      await show(tester, reader, width: 1280);
+      await tester.tap(find.byTooltip('搜索'));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '合成章节');
+      final row = find.byKey(
+        const ValueKey((
+          'songbook-result',
+          PageMetadataKey('book', 'r1'),
+          'chapter',
+        )),
+      );
+      await uiUntil(tester, () => row.evaluate().isNotEmpty);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '下载到iPad'));
+      await uiUntil(tester, () => reader.synchronizeCalls == 1);
+      await tester.pumpAndSettle();
+      if (action == 'folder during download') {
+        await tester.tap(find.widgetWithText(LibraryNavigationItem, '排练'));
+        await tester.pump();
+      }
+      reader.downloadGate!.complete();
+      await tester.pump();
+      if (action == 'close') {
+        await tester.tap(find.byTooltip('关闭搜索'));
+        await tester.pump();
+      }
+      expect(find.byType(LibraryReaderScreen), findsNothing);
+      if (action == 'stay') expect(find.byTooltip('关闭搜索'), findsOneWidget);
+      await tester.runAsync(() async {
+        await view.receive(item, Stream.value(bytes));
+        await view.flush();
+      });
+      reader.changed();
+      await tester.pump();
+      await tester.pump();
+      expect(reader.locateOffline(item.entryId)!.revisionId, item.revisionId);
+      if (action == 'stay') {
+        await uiUntil(
+          tester,
+          () => find.byType(LibraryReaderScreen).evaluate().isNotEmpty,
+        );
+        final screen = tester.widget<LibraryReaderScreen>(
+          find.byType(LibraryReaderScreen),
+        );
+        expect(screen.initialPageNumber, 2);
+        expect(screen.initialTarget.entryId, item.entryId);
+        Navigator.of(tester.element(find.byType(LibraryReaderScreen))).pop();
+        await tester.pumpAndSettle();
+      } else {
+        expect(find.byType(LibraryReaderScreen), findsNothing);
+        if (action == 'folder during download') {
+          expect(
+            tester
+                .widget<LibraryNavigationItem>(
+                  find.widgetWithText(LibraryNavigationItem, '排练'),
+                )
+                .selected,
+            isTrue,
+          );
+        } else {
+          expect(find.byTooltip('搜索'), findsOneWidget);
+        }
+      }
+    });
+  }
+  testHeader(
+    'dismiss one failed sync, see the next identical failure and retry successfully',
+    (tester) async {
+      final computer = await fixture(tester);
+      final reader = await fixture(tester);
+      final previousHttp = HttpOverrides.current;
+      HttpOverrides.global = _LoopbackHttp();
+      HttpServer? failingServer;
+      try {
+        await tester.runAsync(() async {
+          final scores = await Directory(
+            '${computer.library.dataDirectory.path}/scores',
+          ).create();
+          await File('${scores.path}/cached.pdf').writeAsBytes(syntheticPdf(2));
+          await computer.library.selectRoot(scores.path);
+          await idleLibrary(computer.library);
+          await computer.startServer();
+          final port = computer.port!;
+          await reader.pair('127.0.0.1:$port', computer.pairingCode!);
+          expect(reader.paired, isTrue);
+          await reader.synchronize();
+          expect(reader.phase, SyncPhase.complete);
+          await computer.stopServer();
+          failingServer = await HttpServer.bind(
+            InternetAddress.loopbackIPv4,
+            port,
+          );
+          failingServer!.listen((request) async {
+            request.response.statusCode = HttpStatus.serviceUnavailable;
+            await request.response.close();
+          });
+        });
+        await show(tester, reader);
+        await tester.tap(refresh());
+        await uiUntil(
+          tester,
+          () => !reader.busy && reader.phase == SyncPhase.partial,
+        );
+        await tester.pump();
+        expect(reader.paired, isTrue);
+        expect(find.text('已配对 · 电脑暂不可达'), findsOneWidget);
+        final cached = reader.offlineTargets.single;
+        await tester.runAsync(() async {
+          await cached.validateBeforeRead!();
+          expect(await File(cached.filePath).readAsBytes(), syntheticPdf(2));
+        });
+        final error = reader.message!;
+        expect(find.text(error), findsOneWidget);
+        await tester.tap(find.byTooltip('关闭提示'));
+        await tester.pump();
+        reader.changed();
+        await tester.pump();
+        expect(find.text(error), findsNothing);
+        await tester.tap(refresh());
+        await uiUntil(tester, () => find.text(error).evaluate().isNotEmpty);
+        expect(reader.message, error);
+        expect(find.text('重试'), findsOneWidget);
+        await tester.runAsync(() async {
+          await failingServer!.close(force: true);
+          failingServer = null;
+          await computer.startServer();
+        });
+        await tester.tap(find.text('重试'));
+        await uiUntil(
+          tester,
+          () =>
+              reader.phase == SyncPhase.complete &&
+              find
+                  .widgetWithText(SnackBar, reader.message!)
+                  .evaluate()
+                  .isNotEmpty,
+        );
+        expect(find.text(error), findsNothing);
+        expect(find.text('重试'), findsNothing);
+        expect(find.text('电脑 · 已连接'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        reader.didChangeAppLifecycleState(AppLifecycleState.paused);
+        await tester.runAsync(() async {
+          await failingServer?.close(force: true);
+          await computer.stopServer();
+        });
+        HttpOverrides.global = previousHttp;
+      }
+    },
+  );
 
   testHeader(
     'unpaired connection opens management without auto scanning or synchronizing',
@@ -330,7 +555,7 @@ void main() {
     (tester) async {
       final sync = await fixture(tester)
         ..pairedForTest = true;
-      for (final width in [640.0, 744.0, 1024.0]) {
+      for (final width in [390.0, 640.0, 744.0, 1024.0]) {
         for (final home in [true, false]) {
           await show(tester, sync, width: width, isHome: home);
           expect(

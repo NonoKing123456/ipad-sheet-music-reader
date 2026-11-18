@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:score_reader/reader/raster_plan.dart';
+import 'package:score_reader/reader/reader_continuous.dart';
 import 'package:score_reader/reader/sharp_pdf_page.dart';
 
 class _Token implements PdfPageRenderCancellationToken {
@@ -125,6 +126,124 @@ void main() {
     );
     expect(native, const Size(1200, 1600));
   });
+
+  testWidgets(
+    'retry renders only the failed continuous page and preserves its scroll position',
+    (tester) async {
+      final controller = ReaderContinuousController()..scale = 1.2;
+      final viewport = GlobalKey(), transform = TransformationController();
+      final pages = List.generate(8, (index) => _Page(index + 1));
+      final calls = <int, int>{}, presented = <int>[];
+      const target = 3;
+      var navigationTaps = 0;
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.white, BlendMode.src);
+      final picture = recorder.endRecording();
+      final image = (await tester.runAsync(() => picture.toImage(8, 8)))!;
+      picture.dispose();
+      final secondAttempt = Completer<ui.Image?>();
+      late ValueChanged<String?> failedAttempt;
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: ReaderContinuousView(
+                documentKey: 'synthetic-retry',
+                pageCount: pages.length,
+                requestedPage: target,
+                navigationToken: 0,
+                initialAnchor: const ReaderScrollAnchor(target, .2, .25),
+                controller: controller,
+                viewportKey: viewport,
+                aspectFor: (_) => 1,
+                onPresented: presented.add,
+                onCenterTap: () => navigationTaps++,
+                onNext: () => navigationTaps++,
+                onPrevious: () => navigationTaps++,
+                pageBuilder: (number, active, ready, failed) {
+                  if (number == target && !calls.containsKey(target)) {
+                    failedAttempt = failed;
+                  }
+                  return SharpPdfPage(
+                    key: ValueKey('paper-$number'),
+                    page: pages[number - 1],
+                    active: active,
+                    allowDetail: false,
+                    transform: transform,
+                    viewportKey: viewport,
+                    onRendered: ready,
+                    onError: failed,
+                    rasterizer: (page, plan, cancellation, neighbour) async {
+                      final count = calls.update(
+                        number,
+                        (n) => n + 1,
+                        ifAbsent: () => 1,
+                      );
+                      if (number != target) return image.clone();
+                      if (count == 1) {
+                        throw StateError('synthetic page failure');
+                      }
+                      return secondAttempt.future;
+                    },
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+        Future<void> frames() async {
+          for (var i = 0; i < 6; i++) {
+            await tester.pump(const Duration(milliseconds: 16));
+          }
+        }
+
+        await frames();
+        expect(calls[target], 1);
+        expect(calls.length, greaterThan(1));
+        expect(presented, isNot(contains(target)));
+        final scroll = tester
+            .widget<ListView>(find.byType(ListView))
+            .controller!;
+        final offset = scroll.offset, anchor = controller.anchor!;
+        final before = Map.of(calls);
+        final retry = find.widgetWithText(TextButton, '重试');
+        expect(retry.hitTestable(), findsOneWidget);
+        await tester.tap(retry);
+        await frames();
+        expect(calls, {...before, target: 2});
+        failedAttempt('obsolete failure');
+        await tester.pump();
+        expect(find.text('obsolete failure'), findsNothing);
+        expect(retry, findsNothing);
+        secondAttempt.complete(image.clone());
+        await frames();
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('paper-3')),
+            matching: find.byType(RawImage),
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('暂时无法渲染'), findsNothing);
+        expect(presented, [target]);
+        expect(scroll.offset, offset);
+        expect(controller.scale, 1.2);
+        expect(controller.anchor!.page, anchor.page);
+        expect(controller.anchor!.fraction, anchor.fraction);
+        expect(
+          controller.anchor!.horizontalFraction,
+          anchor.horizontalFraction,
+        );
+        expect(navigationTaps, 0);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        if (!secondAttempt.isCompleted) secondAttempt.complete(null);
+        image.dispose();
+        transform.dispose();
+      }
+    },
+  );
 
   testWidgets(
     'rapid zoom/pan, page replacement and disposal reject stale raster frames',

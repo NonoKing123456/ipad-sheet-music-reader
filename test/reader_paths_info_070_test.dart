@@ -3,7 +3,6 @@ import 'package:crypto/crypto.dart';
 import 'package:library_sync/library_sync.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_screen.dart';
-import 'package:score_reader/sync/sync_controller.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 
 import 'reader_fixture.dart';
@@ -21,6 +20,7 @@ import 'package:score_reader/reader/set_lists_screen.dart';
 import 'package:score_reader/reader/raster_plan.dart';
 
 import 'reader_color_070_test.dart' show setup, mount, until, flush;
+import 'support/score_fixture.dart' show deleteFixture;
 
 void main() {
   test('parent path labels support Windows and POSIX without changing full score identity or matching path', () {
@@ -146,7 +146,6 @@ void main() {
           await ReaderStateStore.open(statePath: '${dir.path}/reader.json'),
         ),
       ))!;
-      SyncController? sync;
       try {
         await tester.runAsync(() async {
           await library.initialize();
@@ -161,7 +160,6 @@ void main() {
               ),
             ),
           );
-          await Future<void>.delayed(const Duration(milliseconds: 30));
         });
         await until(tester, () => find.text('root').evaluate().isNotEmpty);
         expect(
@@ -179,9 +177,14 @@ void main() {
         expect(find.text('nested'), findsOneWidget);
         expect(find.text('scores / Band'), findsOneWidget);
         expect(find.text('Band/nested.png'), findsNothing);
-        await tester.pumpWidget(const SizedBox());
-        sync = SyncController(library: library, workspace: workspace);
-        await tester.runAsync(sync.initialize);
+        await tester.tap(find.byTooltip('打开来源'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('曲库操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('离线谱库'));
+        final offline = find.byType(OfflineLibraryScreen);
+        await until(tester, () => offline.evaluate().isNotEmpty);
+        final sync = tester.widget<OfflineLibraryScreen>(offline).controller;
         final bytes = (await tester.runAsync(
           () => File('${scores.path}/root.png').readAsBytes(),
         ))!;
@@ -199,9 +202,9 @@ void main() {
         ];
         await tester.runAsync(() async {
           for (final entry in entries) {
-            await sync!.replica!.receiveObject(entry, Stream.value(bytes));
+            await sync.replica!.receiveObject(entry, Stream.value(bytes));
           }
-          await sync!.replica!.commitManifest(
+          await sync.replica!.commitManifest(
             SyncManifest(
               libraryId: 'synthetic',
               entries: entries,
@@ -209,9 +212,8 @@ void main() {
             ),
           );
         });
-        await tester.pumpWidget(
-          MaterialApp(home: OfflineLibraryScreen(controller: sync)),
-        );
+        workspace.refreshFromStore(force: true);
+        await tester.pumpAndSettle();
         expect(find.text('root'), findsOneWidget);
         expect(
           tester
@@ -230,11 +232,10 @@ void main() {
         expect(find.text('Band/nested.png'), findsNothing);
       } finally {
         await tester.pumpWidget(const SizedBox());
-        sync?.dispose();
         await flush(tester, workspace);
         workspace.dispose();
         library.dispose();
-        await tester.runAsync(() => dir.delete(recursive: true));
+        await deleteFixture(tester, dir);
       }
     },
     variant: TargetPlatformVariant.only(TargetPlatform.windows),

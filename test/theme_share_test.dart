@@ -12,6 +12,9 @@ import 'package:score_reader/theme/reader_icons.dart';
 import 'package:score_reader/library/page_count_service.dart';
 import 'package:library_sync/library_sync.dart' show PageMetadataKey;
 
+import 'annotated_pdf_export_test.dart' show exportFixtureAnnotations;
+import 'reader_fixture.dart' show writeSyntheticPaper;
+
 class _ObservedThemeController extends ThemeController {
   _ObservedThemeController({super.directory});
   int pending = 0;
@@ -43,6 +46,127 @@ Future<void> _waitForThemeSaved(
 }
 
 void main() {
+  for (final (name, failExport, abandon) in const [
+    (
+      'retry system sharing with the same completed annotated PDF',
+      false,
+      false,
+    ),
+    ('retry a failed annotated export before handing off the PDF', true, false),
+    (
+      'abandon a failed annotated share and discard only the temporary copy',
+      false,
+      true,
+    ),
+  ]) {
+    testWidgets(name, (tester) async {
+      final root = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('annotated-share-retry-'),
+      ))!;
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox());
+        await tester.runAsync(() => root.delete(recursive: true));
+      });
+      final source = File(p.join(root.path, '排练.png'));
+      await writeSyntheticPaper(tester, source.path);
+      final originalBytes = source.readAsBytesSync();
+      final sent = <String>[];
+      var exports = 0;
+      var completed = false;
+      final service = ScoreShareService(
+        temporaryDirectory: root,
+        share: (params) async {
+          sent.add(params.files!.single.path);
+          if (!failExport && sent.length == 1)
+            throw StateError('share sheet failed');
+          return const ShareResult('sent', ShareResultStatus.success);
+        },
+      );
+      Future<void> until(bool Function() ready) async {
+        for (var i = 0; i < 300 && !ready(); i++) {
+          await tester.pump(const Duration(milliseconds: 16));
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 5)),
+          );
+        }
+        expect(ready(), isTrue);
+      }
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async {
+                  await shareScore(
+                    context,
+                    filePath: source.path,
+                    shareService: service,
+                    annotationsFor: (page) {
+                      exports++;
+                      if (failExport && exports == 1)
+                        throw StateError('unreadable annotations');
+                      return exportFixtureAnnotations(page);
+                    },
+                  );
+                  completed = true;
+                },
+                child: const Text('分享'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('分享'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('分享带批注的 PDF 副本'));
+      final retry = find.text(failExport ? '重新导出' : '重试分享');
+      await until(() => retry.evaluate().isNotEmpty || completed);
+      expect(retry, findsOneWidget);
+      final error = failExport ? '无法导出批注副本，请检查文件和可用空间。' : '批注 PDF 已生成，系统分享未成功。';
+      expect(find.text(error), findsOneWidget);
+      final cache = Directory(p.join(root.path, 'score-reader-shares'));
+      final entries = cache.listSync();
+      expect(exports, 1);
+      List<int>? preparedBytes;
+      if (failExport) {
+        expect(entries, isEmpty);
+        expect(sent, isEmpty);
+      } else {
+        expect(entries, hasLength(1));
+        preparedBytes = File(sent.single).readAsBytesSync();
+      }
+      if (abandon) {
+        final failureDialog = find.widgetWithText(AlertDialog, error);
+        await tester.tap(
+          find.descendant(
+            of: failureDialog,
+            matching: find.widgetWithText(TextButton, '取消'),
+          ),
+        );
+        await until(() => completed);
+        expect(exports, 1);
+        expect(sent, hasLength(1));
+        expect(cache.listSync(), isEmpty);
+        expect(source.readAsBytesSync(), orderedEquals(originalBytes));
+        expect(tester.takeException(), isNull);
+        return;
+      }
+      await tester.tap(retry);
+      await until(() => completed);
+      expect(exports, failExport ? 2 : 1);
+      expect(sent, hasLength(failExport ? 1 : 2));
+      expect(sent.toSet(), hasLength(1));
+      expect(p.basename(sent.last), '排练-批注.pdf');
+      final pdf = File(sent.last).readAsBytesSync();
+      expect(ascii.decode(pdf.take(5).toList()), '%PDF-');
+      if (preparedBytes != null) expect(pdf, orderedEquals(preparedBytes));
+      expect(source.readAsBytesSync(), orderedEquals(originalBytes));
+      expect(cache.listSync(), hasLength(1));
+      expect(tester.takeException(), isNull);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+  }
+
   test('shell theme disables ripple and retains light/dark token surfaces', () {
     final light = scoreReaderTheme(Brightness.light);
     final dark = scoreReaderTheme(Brightness.dark);

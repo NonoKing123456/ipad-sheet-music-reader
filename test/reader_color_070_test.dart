@@ -321,7 +321,7 @@ void main() {
         await tester.tap(find.byTooltip('颜色'));
         // The gated sample intentionally keeps its progress animation alive.
         await tester.pump(const Duration(milliseconds: 300));
-        await tester.tap(find.byTooltip('颜色 4'));
+        await tester.tap(find.byTooltip('蓝色'));
         await tester.pump();
         final manual = tester
             .widget<AnnotationCanvas>(canvasPage(1))

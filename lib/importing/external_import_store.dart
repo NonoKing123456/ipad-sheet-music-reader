@@ -173,6 +173,7 @@ class ImportedScore {
   final ImportRemoteTransaction? remoteTransaction;
   final String? localSaveBasename;
   bool get saved => disposition == ImportDisposition.saved;
+  bool get needsComputerRename => !saved && remoteTransaction?.conflict == true;
   bool get pendingComputer =>
       !saved && remoteTransaction != null && !remoteTransaction!.conflict;
   ImportedScore changed({
@@ -262,6 +263,8 @@ class ExternalImportStore extends ChangeNotifier {
   List<ImportedScore> get records =>
       _records.values.toList()
         ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
+  int get importNameConflicts =>
+      _records.values.where((score) => score.needsComputerRename).length;
   Directory get draftsDirectory => Directory(p.join(directory.path, 'drafts'));
   Directory get localLibrary =>
       Directory(p.join(directory.parent.path, 'local-imports', 'files'));
@@ -277,6 +280,14 @@ class ExternalImportStore extends ChangeNotifier {
       .firstOrNull;
   String draftPath(ImportedScore score) =>
       p.join(draftsDirectory.path, score.id, 'source${score.extension}');
+  void _validateSavedPath(ImportedScore score, String? path) {
+    if (path == null ||
+        path.trim().isEmpty ||
+        p.equals(path, draftPath(score))) {
+      throw const FormatException('Import has no separate saved destination');
+    }
+  }
+
   String pathFor(ImportedScore score) => score.savedPath ?? draftPath(score);
   ScoreTarget target(
     ImportedScore score, {
@@ -326,12 +337,13 @@ class ExternalImportStore extends ChangeNotifier {
         if (score.id != p.basename(entity.path)) {
           throw const FormatException('Import record identity mismatch');
         }
+        if (score.saved) _validateSavedPath(score, score.savedPath);
         // A killed reader is a recoverable draft, never an automatic deletion.
         _records[score.id] = score.disposition == ImportDisposition.temporary
             ? score.changed(disposition: ImportDisposition.retained)
             : score;
-        if (score.saved) await cleanupSavedPayload(score.id);
         _failedRecordIds.remove(score.id);
+        if (score.saved) await cleanupSavedPayload(score.id);
       } catch (_) {
         // Keep unreadable records/copies on disk and visible for later recovery.
         _failedRecordIds.add(p.basename(entity.path));
@@ -422,7 +434,7 @@ class ExternalImportStore extends ChangeNotifier {
   /// Called only after the active reader leaves, or during the next cold start.
   Future<void> cleanupSavedPayload(String id) async {
     final score = _records[id];
-    if (score?.saved != true) return;
+    if (score?.saved != true || _failedRecordIds.contains(id)) return;
     try {
       final temporary = File(draftPath(score!));
       if (await temporary.exists()) await temporary.delete();
@@ -617,6 +629,7 @@ class ExternalImportStore extends ChangeNotifier {
     if (queueOnly) return score;
     try {
       final result = await upload(transaction, score, draftPath(score));
+      _validateSavedPath(score, result.localPath);
       // Receipt and official identity are durable before annotation migration.
       transaction = transaction.withReceipt(result.receipt);
       score = score.changed(

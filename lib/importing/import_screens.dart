@@ -167,7 +167,11 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
       );
       if (!mounted) return;
       if (!confirmed) {
-        _message('请连接原配对电脑并确认原谱库后继续，曲谱与待传记录已保留。');
+        _message(
+          _score?.pendingComputer == true
+              ? '请连接原配对电脑并确认原谱库后继续，曲谱与待传记录已保留。'
+              : '曲谱已暂存在本机。请到“设备与同步”确认电脑配对并更新目录，再选择保存位置。',
+        );
         return;
       }
     }
@@ -333,8 +337,9 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             ? '保存中…'
             : _score?.saved == true
             ? '已保存'
-            : _score?.remoteTransaction != null &&
-                  _score?.remoteTransaction?.conflict != true
+            : _score?.needsComputerRename == true
+            ? '改名重试'
+            : _score?.pendingComputer == true
             ? (widget.queueComputerSaves
                   ? (widget.computerTargetMatches?.call(
                               _score!.remoteTransaction!,
@@ -367,6 +372,80 @@ class _ImportReaderScreenState extends State<ImportReaderScreen> {
             computerTargetMatches: widget.computerTargetMatches,
             confirmComputerDirectory: widget.confirmComputerDirectory,
           ),
+  );
+}
+
+class _NewImportFolderDialog extends StatefulWidget {
+  const _NewImportFolderDialog({required this.parent});
+  final Directory parent;
+
+  @override
+  State<_NewImportFolderDialog> createState() => _NewImportFolderDialogState();
+}
+
+class _NewImportFolderDialogState extends State<_NewImportFolderDialog> {
+  String _name = '';
+  String? _error;
+  bool _creating = false;
+
+  Future<void> _create() async {
+    if (_creating) return;
+    final name = _name.trim();
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        RegExp(r'[<>:"/\\|?*\x00-\x1f]').hasMatch(name)) {
+      setState(() => _error = '请使用有效的文件夹名称。');
+      return;
+    }
+    setState(() => _creating = true);
+    final folder = Directory(p.join(widget.parent.path, name));
+    String error;
+    try {
+      if (await FileSystemEntity.type(folder.path, followLinks: false) ==
+          FileSystemEntityType.notFound) {
+        await folder.create();
+        if (mounted) Navigator.pop(context, folder);
+        return;
+      }
+      error = '已有同名项目，请换一个名称。';
+    } on FileSystemException {
+      error = '新建失败，请检查空间与权限。';
+    }
+    if (mounted)
+      setState(() {
+        _error = error;
+        _creating = false;
+      });
+  }
+
+  @override
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_creating,
+    child: AlertDialog(
+      title: const Text('新建文件夹'),
+      content: TextField(
+        key: const ValueKey('import-new-folder-name'),
+        autofocus: true,
+        readOnly: _creating,
+        decoration: InputDecoration(labelText: '文件夹名称', errorText: _error),
+        onChanged: (value) {
+          _name = value;
+          if (_error != null) setState(() => _error = null);
+        },
+        onEditingComplete: _create,
+      ),
+      actions: [
+        TextButton(
+          onPressed: _creating ? null : () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _creating ? null : _create,
+          child: const Text('新建'),
+        ),
+      ],
+    ),
   );
 }
 
@@ -443,49 +522,12 @@ class _ImportFolderDialogState extends State<ImportFolderDialog> {
   }
 
   Future<void> _newFolder() async {
-    final input = TextEditingController();
-    final name = await showDialog<String>(
+    final root = _root!, parent = _folder!;
+    final created = await showDialog<Directory>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('新建文件夹'),
-        content: TextField(
-          key: const ValueKey('import-new-folder-name'),
-          controller: input,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '文件夹名称'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, input.text.trim()),
-            child: const Text('新建'),
-          ),
-        ],
-      ),
+      builder: (_) => _NewImportFolderDialog(parent: parent),
     );
-    // The route transition still reads the controller until its overlay leaves.
-    if (name == null || name.isEmpty || !mounted) return;
-    if (name == '.' ||
-        name == '..' ||
-        RegExp(r'[<>:"/\\|?*\x00-\x1f]').hasMatch(name)) {
-      setState(() => _error = '请使用有效的文件夹名称。');
-      return;
-    }
-    try {
-      final folder = Directory(p.join(_folder!.path, name));
-      if (await FileSystemEntity.type(folder.path, followLinks: false) !=
-          FileSystemEntityType.notFound) {
-        setState(() => _error = '已有同名项目，请换一个名称。');
-        return;
-      }
-      await folder.create();
-      await _navigate(_root!, folder);
-    } catch (_) {
-      if (mounted) setState(() => _error = '新建失败，请检查空间与权限。');
-    }
+    if (mounted && created != null) await _navigate(root, created);
   }
 
   @override

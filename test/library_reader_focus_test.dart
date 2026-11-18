@@ -116,7 +116,7 @@ void main() {
       expect(find.text('2 / 4'), findsOneWidget);
       await mouseClick(tester, find.byTooltip('颜色'));
       await tester.pumpAndSettle();
-      await mouseClick(tester, find.byTooltip('颜色 4'));
+      await mouseClick(tester, find.byTooltip('蓝色'));
       await tester.pumpAndSettle();
       await pageKey(tester, LogicalKeyboardKey.pageDown);
       expect(find.text('3 / 4'), findsOneWidget);

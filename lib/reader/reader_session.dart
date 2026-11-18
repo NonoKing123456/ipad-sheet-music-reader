@@ -7,7 +7,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:library_core/library_core.dart'
-    show ConcurrentCatalogWriteException;
+    show ConcurrentCatalogWriteException, physicalFileDisplayName;
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:pdfrx/pdfrx.dart';
@@ -531,6 +531,7 @@ class ReaderSession extends ChangeNotifier {
     int? pageNumber,
     bool restore = false,
   }) async {
+    final previousKey = current?.target.key;
     final epoch = ++_epoch;
     cancelPrewarm();
     _pendingTurns.clear();
@@ -558,6 +559,7 @@ class ReaderSession extends ChangeNotifier {
         setListItemId: itemId,
       );
       _savePosition();
+      _trimCache(keep: previousKey);
     } catch (failure, stack) {
       debugPrint('READER load_failed: $failure\n$stack');
       if (!_disposed && epoch == _epoch) {
@@ -571,6 +573,23 @@ class ReaderSession extends ChangeNotifier {
         _changed();
       }
     }
+  }
+
+  // Cancel the outstanding selection and reactivate the already-read score.
+  // The screen keeps its previous document in the cache until presentation.
+  void restorePresented(LoadedScore score, ReadingPosition previous) {
+    _epoch++;
+    _pendingTurns.clear();
+    _pendingActions.clear();
+    _navigationTask = null;
+    cancelPrewarm();
+    current = score;
+    position = previous;
+    message = null;
+    loading = false;
+    _updateSourceStatus();
+    _trimCache();
+    _changed();
   }
 
   Future<void> turn(NavigationDirection direction) {
@@ -757,7 +776,13 @@ class ReaderSession extends ChangeNotifier {
       } catch (failure, stack) {
         debugPrint('READER navigation_load_failed: $failure\n$stack');
         if (!_disposed && epoch == _epoch) {
-          message = '下一份曲谱暂时无法读取，已停留在当前页。请检查文件后重试。';
+          final neighbour = direction == NavigationDirection.forward
+              ? '下一份'
+              : '上一份';
+          final name = physicalFileDisplayName(
+            p.posix.basename(target.displayPath.replaceAll(r'\', '/')),
+          );
+          message = '${neighbour}曲谱暂时无法读取，已停留在当前页。请检查《$name》后重试。';
         }
         return;
       } finally {
@@ -834,9 +859,11 @@ class ReaderSession extends ChangeNotifier {
     _changed();
   }
 
-  void _trimCache() {
+  void _trimCache({DocumentKey? keep}) {
     while (_cache.length > 3) {
-      final key = _cache.keys.firstWhere((key) => key != current!.target.key);
+      final key = _cache.keys.firstWhere(
+        (key) => key != current!.target.key && key != keep,
+      );
       final old = _cache.remove(key)!;
       unawaited(old.dispose());
     }

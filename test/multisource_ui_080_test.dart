@@ -7,13 +7,16 @@ import 'package:reader_state/reader_state.dart';
 import 'package:score_reader/library/library_controller.dart';
 import 'package:score_reader/library/library_screen.dart';
 import 'package:score_reader/library/library_widgets.dart';
+import 'package:score_reader/library/score_file_icon.dart';
 import 'package:score_reader/reader/library_reader_screen.dart';
 import 'package:score_reader/reader/reader_workspace.dart';
 import 'package:score_reader/sync/offline_library_screen.dart';
 import 'package:score_reader/sync/sync_controller.dart';
+import 'package:score_reader/sync/sync_screen.dart';
 
 import 'reader_fixture.dart';
 import 'multisource_app_080_test.dart' show idleLibrary;
+import 'support/score_fixture.dart' show deleteFixture;
 
 class _LoopbackHttp extends HttpOverrides {}
 
@@ -26,6 +29,126 @@ Future<void> uiUntil(WidgetTester tester, bool Function() done) async {
     if (done()) return;
   }
   expect(done(), isTrue, reason: 'bounded synthetic UI/network operation');
+}
+
+Future<void> _checkFolderUpdate(
+  WidgetTester tester, {
+  required SyncController computer,
+  required SyncController reader,
+  required File original,
+}) async {
+  final item = reader.collection!.currentItems.singleWhere(
+    (item) => item.relativePath == 'foo/Piece.png',
+  );
+  final oldBytes = (await tester.runAsync(original.readAsBytes))!;
+  final folder = find.byKey(const ValueKey('offline-library-folder-foo'));
+  final file = find.byKey(ValueKey('offline-library-file-${item.entryId}'));
+  Future<void> checkPresentation({required bool updated}) async {
+    expect(
+      find.descendant(
+        of: file,
+        matching: find.byTooltip(updated ? '已离线' : '离线旧版可读，有更新待下载'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('directory-parent-button')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<ScoreFileIcon>(
+            find.descendant(of: folder, matching: find.byType(ScoreFileIcon)),
+          )
+          .state,
+      updated ? ScoreFileIconState.ready : ScoreFileIconState.partial,
+    );
+    expect(
+      find.descendant(
+        of: folder,
+        matching: find.byTooltip(
+          updated ? '全部已下载 · 1 / 1 份' : '部分已下载 · 1 / 1 份已有离线副本，1 份待更新',
+        ),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('offline-sync-management')));
+    await tester.pumpAndSettle();
+    final panel = find.byType(SyncScreen);
+    final progress = find.descendant(
+      of: panel,
+      matching: find.text(updated ? '1 / 1' : '0 / 1'),
+    );
+    await tester.scrollUntilVisible(
+      progress,
+      180,
+      scrollable: find
+          .descendant(of: panel, matching: find.byType(Scrollable))
+          .first,
+    );
+    expect(progress.hitTestable(), findsOneWidget);
+    expect(
+      find.descendant(
+        of: panel,
+        matching: find.text(updated ? '已完成' : '1 份待更新'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<LinearProgressIndicator>(
+            find.descendant(
+              of: panel,
+              matching: find.byType(LinearProgressIndicator),
+            ),
+          )
+          .value,
+      updated ? 1.0 : 0.0,
+    );
+    await tester.tap(find.byTooltip('关闭设备与同步'));
+    await tester.pumpAndSettle();
+    await tester.tap(folder);
+    await tester.pump();
+  }
+
+  // Hold background synchronization while inspecting the catalog-only refresh.
+  reader.setReaderActive(true);
+  try {
+    await writeSyntheticPaper(tester, original.path, width: 131);
+    final newBytes = (await tester.runAsync(original.readAsBytes))!;
+    expect(newBytes, isNot(orderedEquals(oldBytes)));
+    await tester.runAsync(() async {
+      await computer.library.refreshImportedSource(
+        item.sourceId,
+        relativePath: item.relativePath,
+      );
+      await reader.refreshCatalog();
+    });
+    await tester.pump();
+    final revision = reader.collection!.currentItems
+        .singleWhere((entry) => entry.entryId == item.entryId)
+        .revisionId;
+    expect(revision, isNot(item.revisionId));
+    final old = reader.locateOffline(item.entryId)!;
+    expect(old.revisionId, item.revisionId);
+    await tester.runAsync(() async {
+      await old.validateBeforeRead!();
+      expect(await File(old.filePath).readAsBytes(), orderedEquals(oldBytes));
+    });
+    await checkPresentation(updated: false);
+    await tester.runAsync(reader.synchronize);
+    await tester.pump();
+    final current = reader.locateOffline(item.entryId)!;
+    expect(current.revisionId, revision);
+    await tester.runAsync(() async {
+      await current.validateBeforeRead!();
+      expect(
+        await File(current.filePath).readAsBytes(),
+        orderedEquals(newBytes),
+      );
+    });
+    await checkPresentation(updated: true);
+  } finally {
+    reader.setReaderActive(false);
+  }
 }
 
 void main() {
@@ -93,6 +216,16 @@ void main() {
         );
         expect(find.text('bar'), findsWidgets);
         await tester.tapAt(const Offset(1000, 400));
+        await tester.pumpAndSettle();
+        final folderRow = find.byKey(const ValueKey('library-folder-bar'));
+        expect(tester.widget<LibraryFileRow>(folderRow).action, isNull);
+        await tester.tap(
+          find.descendant(of: folderRow, matching: find.text('bar')),
+        );
+        await tester.pumpAndSettle();
+        expect(library!.currentFolder, 'bar');
+        expect(find.widgetWithText(LibraryFileRow, 'Piece'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('directory-parent-button')));
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('搜索'));
         await tester.pump();
@@ -238,6 +371,8 @@ void main() {
         await tester.tap(find.text('下载整个谱库'));
         await tester.pumpAndSettle();
         expect(find.textContaining('3 份曲谱'), findsOneWidget);
+        expect(find.textContaining('以后新增的曲谱也会自动下载。'), findsOneWidget);
+        expect(find.textContaining('可在谱库菜单中关闭。'), findsOneWidget);
         await tester.tap(find.text('取消'));
         await tester.pumpAndSettle();
         expect(reader.collection!.selection.rules, isEmpty);
@@ -245,6 +380,20 @@ void main() {
         await tester.pump();
         expect(find.text('Piece'), findsOneWidget);
         expect(find.byTooltip('未下载'), findsOneWidget);
+        await tester.tap(find.byTooltip('曲谱选项'));
+        await tester.pumpAndSettle();
+        expect(find.text('停止这首谱的自动下载'), findsNothing);
+        expect(find.text('移除这台 iPad 上的副本'), findsNothing);
+        await tester.tapAt(const Offset(2, 2));
+        await tester.pumpAndSettle();
+        await tester.tap(folderRow('Piece'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsOneWidget);
+        expect(find.textContaining('1 份曲谱'), findsOneWidget);
+        expect(find.textContaining('自动下载'), findsNothing);
+        await tester.tap(find.text('取消'));
+        await tester.pumpAndSettle();
+        expect(reader.collection!.selection.rules, isEmpty);
         await tester.tap(
           find.byKey(const ValueKey('offline-current-folder-menu')),
         );
@@ -252,7 +401,9 @@ void main() {
         await tester.tap(find.text('下载此文件夹'));
         await tester.pumpAndSettle();
         expect(find.textContaining('1 份曲谱'), findsOneWidget);
-        await tester.tap(find.widgetWithText(FilledButton, '下载到iPad'));
+        expect(find.textContaining('以后新增的曲谱也会自动下载。'), findsOneWidget);
+        expect(find.textContaining('可在文件夹菜单中关闭。'), findsOneWidget);
+        await tester.tap(find.widgetWithText(FilledButton, '下载到 iPad'));
         await uiUntil(tester, () => reader.offlineCount == 1 && !reader.busy);
         expect(find.byTooltip('已离线'), findsOneWidget);
         final tile = tester.widget<LibraryFileRow>(folderRow('Piece'));
@@ -270,9 +421,16 @@ void main() {
           lessThanOrEqualTo(72),
         );
         expect(find.byTooltip('已离线'), findsOneWidget);
+        await _checkFolderUpdate(
+          tester,
+          computer: computer,
+          reader: reader,
+          original: File('${dir.path}/Scores/foo/Piece.png'),
+        );
         final item = reader.collection!.index!.entries.singleWhere(
           (e) => e.relativePath == 'foo/Piece.png',
         );
+        final downloaded = reader.collection!.readableItemFor(item.entryId)!;
         // Present a metadata-only newer version through the existing replica
         // boundary; the already verified offline revision remains readable.
         final readyIndex = reader.collection!.index!;
@@ -351,6 +509,17 @@ void main() {
           reader.workspace.refreshFromStore();
           await computer.stopServer();
         });
+        // Exercise local actions without retrying the intentionally offline server.
+        reader.cancel();
+        await tester.tap(find.byTooltip('曲谱选项'));
+        await tester.pumpAndSettle();
+        expect(find.text('移除这台 iPad 上的副本'), findsOneWidget);
+        expect(find.textContaining('断网仍可读'), findsNothing);
+        expect(find.textContaining('移除后需重新下载'), findsNothing);
+        await tester.tap(find.text('停止这首谱的自动下载'));
+        await uiUntil(tester, () => !reader.autoDownloadsEntry(item.entryId));
+        expect(reader.autoDownloadsFolder(item.sourceId, 'foo'), isTrue);
+        expect(reader.locateOffline(item.entryId), isNotNull);
         await tester.tap(find.text('Piece'));
         await uiUntil(
           tester,
@@ -362,10 +531,11 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('曲谱选项'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('移除本机下载'));
+        await tester.tap(find.text('移除这台 iPad 上的副本'));
         await uiUntil(
           tester,
           () =>
+              !reader.busy &&
               reader.offlineCount == 0 &&
               find.byTooltip('未下载').evaluate().isNotEmpty,
         );
@@ -383,6 +553,142 @@ void main() {
           item.entryId,
         );
         expect(reader.collection!.index!.entries, hasLength(3));
+        // A catalog row without a local file must not offer removal.
+        await tester.tap(find.byTooltip('曲谱选项'));
+        await tester.pumpAndSettle();
+        expect(find.text('移除这台 iPad 上的副本'), findsNothing);
+        await tester.tapAt(const Offset(2, 2));
+        await tester.pumpAndSettle();
+
+        // The next steps inject and damage older local revisions directly.
+        // Finish pending UI writes and keep the offline fixture isolated.
+        await uiUntil(tester, () => !reader.busy);
+        final view = reader.collection!;
+        final original = File('${dir.path}/Scores/foo/Piece.png');
+        final bytes = (await tester.runAsync(original.readAsBytes))!;
+        final copy = File(view.objects.objectPath(downloaded.object));
+        Future<void> prepareOlderCopy() async {
+          await view.updateIndex(readyIndex);
+          await view.receive(downloaded, Stream.value(bytes));
+          await view.updateIndex(
+            readyIndex.replacing(
+              CatalogItem(
+                sourceId: item.sourceId,
+                entryId: item.entryId,
+                revisionId: '${item.revisionId}-new',
+                relativePath: item.relativePath,
+                length: bytes.length + 10,
+                format: item.format,
+              ),
+            ),
+          );
+          expect(
+            view.readableItemFor(item.entryId)?.revisionId,
+            item.revisionId,
+          );
+          await reader.verifyOfflineLibrary();
+        }
+
+        await tester.runAsync(prepareOlderCopy);
+        await tester.pump();
+        expect(find.byTooltip('离线旧版可读，有更新待下载'), findsOneWidget);
+        await tester.runAsync(() async {
+          final damaged = bytes.toList();
+          damaged[0] ^= 0xff;
+          await copy.writeAsBytes(damaged, flush: true);
+          await reader.verifyOfflineLibrary();
+        });
+        await tester.pump();
+        expect(reader.locateOffline(item.entryId), isNull);
+        expect(find.byTooltip('本机内容不可读，请重新下载'), findsOneWidget);
+        expect(reader.message, contains('1 份离线文件无法读取'));
+        await tester.runAsync(reader.verifyOfflineLibrary);
+        expect(reader.message, contains('1 份离线文件无法读取'));
+
+        await tester.runAsync(() async {
+          await copy.writeAsBytes(bytes, flush: true);
+          await reader.verifyOfflineLibrary();
+        });
+        await tester.pump();
+        expect(reader.message, '离线文件校验完成。');
+        expect(find.byTooltip('离线旧版可读，有更新待下载'), findsOneWidget);
+        await tester.runAsync(() async {
+          await copy.delete();
+          await reader.verifyOfflineLibrary();
+        });
+        await tester.pump();
+        expect(reader.message, '离线文件校验完成。');
+        expect(find.byTooltip('未下载'), findsOneWidget);
+        expect(view.hasLocalDownload(item.entryId), isFalse);
+        await tester.runAsync(prepareOlderCopy);
+        await tester.runAsync(() async {
+          await copy.writeAsBytes([8, 0, 4], flush: true);
+          await expectLater(
+            reader.locateOffline(item.entryId)!.validateBeforeRead!(),
+            throwsStateError,
+          );
+          await view.flush();
+          final reopened = await ReplicaCollectionView.restoreCached(
+            rootDirectory: view.objects.rootDirectory,
+          );
+          while (reopened.backgroundVerificationPending) {
+            await reopened.verifyNextBatch();
+          }
+          expect(reopened.readableItemFor(item.entryId), isNull);
+          expect(reopened.hasLocalDownload(item.entryId), isTrue);
+        });
+        await tester.pump();
+        expect(reader.locateOffline(item.entryId), isNull);
+        expect(find.byTooltip('本机内容不可读，请重新下载'), findsOneWidget);
+        await tester.tap(find.byTooltip('曲谱选项'));
+        await tester.pumpAndSettle();
+        expect(find.text('下载后可分享'), findsOneWidget);
+        expect(find.text('移除这台 iPad 上的副本'), findsOneWidget);
+        await tester.tap(find.text('移除这台 iPad 上的副本'));
+        await uiUntil(
+          tester,
+          () => !reader.busy && find.byTooltip('未下载').evaluate().isNotEmpty,
+        );
+        expect(copy.existsSync(), isFalse);
+        expect(find.byTooltip('未下载'), findsOneWidget);
+        expect(
+          await tester.runAsync(original.readAsBytes),
+          orderedEquals(bytes),
+        );
+        expect(find.text('Piece'), findsOneWidget);
+        expect(reader.workspace.store.snapshot.strokesFor(page), hasLength(1));
+        await tester.tap(find.byTooltip('曲谱选项'));
+        await tester.pumpAndSettle();
+        expect(find.text('移除这台 iPad 上的副本'), findsNothing);
+        expect(find.text('停止这首谱的自动下载'), findsNothing);
+        await tester.tapAt(const Offset(2, 2));
+        await tester.pumpAndSettle();
+        // Reopen the same row with a single-file rule, then with a root rule.
+        for (final rule in [
+          OfflineRule(
+            sourceId: item.sourceId,
+            entryId: item.entryId,
+            selected: true,
+          ),
+          OfflineRule(sourceId: item.sourceId, folder: '', selected: true),
+        ]) {
+          await uiUntil(tester, () => !reader.busy);
+          await tester.runAsync(() => reader.selectOffline(rule));
+          await tester.tap(find.byTooltip('曲谱选项'));
+          await tester.pumpAndSettle();
+          expect(find.text('移除这台 iPad 上的副本'), findsNothing);
+          await tester.tap(find.text('停止这首谱的自动下载'));
+          await uiUntil(
+            tester,
+            () => !reader.busy && !reader.autoDownloadsEntry(item.entryId),
+          );
+          if (rule.folder == '') {
+            final sibling = readyIndex.entries.firstWhere(
+              (e) => e.entryId != item.entryId && e.sourceId == item.sourceId,
+            );
+            expect(reader.autoDownloadsEntry(sibling.entryId), isTrue);
+          }
+        }
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -398,8 +704,8 @@ void main() {
             c.library.dispose();
             c.workspace.dispose();
           }
-          await dir.delete(recursive: true);
         });
+        await deleteFixture(tester, dir);
         await tester.binding.setSurfaceSize(null);
         HttpOverrides.global = httpOverride;
       }

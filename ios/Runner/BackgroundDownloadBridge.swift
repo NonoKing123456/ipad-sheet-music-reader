@@ -392,31 +392,10 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
       guard Set(items.map { $0.entryId }).count == items.count,
             items.allSatisfy({ $0.length >= 0 && !$0.missing }) else { throw TransferError.invalid }
       let incoming = Dictionary(uniqueKeysWithValues: items.map { ($0.entryId, $0) })
-      // If one member was deselected or changed revision, dissolve its old
-      // batch before pruning. No surviving member can depend on a removed
-      // leader, and cancellation targets the old task ID, not its replacement.
-      for id in (byNamespace[namespace] ?? [:]).values {
-        guard let leader = jobs[id], let members = leader.batchMembers else { continue }
-        let unchanged = members.allSatisfy { memberId in
-          guard let old = jobs[memberId], let item = incoming[old.original.entryId] else { return false }
-          return item.revisionId == old.original.revisionId && item.sourceId == old.original.sourceId && item.hash == old.original.hash
-        }
-        if unchanged { continue }
-        if leader.taskId != nil { cancelTask(leader, resume: false) }
-        activeIDs.remove(id)
-        for memberId in members {
-          guard var member = jobs[memberId] else { continue }
-          member.batchMembers = nil; member.batchOwner = nil; member.batchId = nil; member.batchMask = nil
-          member.taskId = nil
-          if member.state != "staged" { member.state = "queued"; member.phase = "prepare" }
-          put(member)
-        }
-      }
-      for (entryId, id) in byNamespace[namespace] ?? [:] {
-        guard let job = jobs[id] else { continue }
-        if let item = incoming[entryId], item.revisionId == job.original.revisionId,
-           item.sourceId == job.original.sourceId, item.hash == job.original.hash { continue }
-        remove(id)
+      pruneJobs(namespace) { job in
+        guard let item = incoming[job.original.entryId] else { return false }
+        return item.revisionId == job.original.revisionId &&
+          item.sourceId == job.original.sourceId && item.hash == job.original.hash
       }
       // Reserve both staged content and the replica's atomic import, plus a
       // small safety margin. Existing stages need only their import copy.
@@ -459,6 +438,16 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
       fillWindow()
       notifyChanged()
       return nil
+    }
+    if call.method == "pruneUnselected" {
+      guard let rules = args["selection"] as? [[String: Any]] else { throw TransferError.invalid }
+      let decoded = try JSONDecoder().decode([SelectionRule].self, from: JSONSerialization.data(withJSONObject: rules))
+      let selection = SelectionIndex(decoded)
+      selections[namespace] = decoded; selectionIndexes[namespace] = selection
+      pruneJobs(namespace) { !$0.prepare || selection.includes($0.item) }
+      try save()
+      for id in (byNamespace[namespace] ?? [:]).values { queueJob(id) }
+      fillWindow(); notifyChanged(); return nil
     }
     if call.method == "activity" {
       let values = counts[namespace] ?? [:]
@@ -557,6 +546,31 @@ final class BackgroundDownloadBridge: NSObject, URLSessionDownloadDelegate, URLS
         let owner = member.batchOwner, jobs[owner] == nil || jobs[owner]?.state == "staged" else { continue }
       member.batchOwner = nil; member.batchMembers = nil; member.phase = "prepare"
       member.state = "queued"; member.taskId = nil; put(member)
+    }
+  }
+  // Dissolve a mixed batch before removing its leader or any member. Keep
+  // readable stages, paused jobs and unrelated batches in their current state.
+  private func pruneJobs(_ namespace: String, keeping keep: (Job) -> Bool) {
+    let ids = (byNamespace[namespace] ?? [:]).values
+    for id in ids {
+      guard let leader = jobs[id], let members = leader.batchMembers,
+        !members.allSatisfy({ member in jobs[member].map(keep) ?? false }) else { continue }
+      if leader.taskId != nil { cancelTask(leader, resume: false) }
+      activeIDs.remove(id)
+      for memberID in members {
+        guard var member = jobs[memberID] else { continue }
+        member.batchMembers = nil; member.batchOwner = nil; member.batchId = nil; member.batchMask = nil
+        member.taskId = nil
+        if member.state != "staged" {
+          if member.state == "running" { member.state = "queued" }
+          member.phase = "prepare"
+          try? files.removeItem(at: path(memberID, "resume"))
+        }
+        put(member)
+      }
+    }
+    for id in ids {
+      if let job = jobs[id], !keep(job) { remove(id) }
     }
   }
   private func fallbackBatch(_ leader: Job) {

@@ -21,6 +21,45 @@ typedef ReadyPageBuilder = Widget Function(
   ValueChanged<String?> failed,
 );
 
+class ReaderPageRenderError extends StatelessWidget {
+  const ReaderPageRenderError({
+    super.key,
+    required this.message,
+    required this.onRetry,
+  });
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = ScoreTokens.of(context);
+    return Material(
+      color: tokens.dangerBg,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.all(ScoreSpace.md),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Flexible(
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: tokens.dangerInk),
+              ),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: tokens.dangerInk),
+              onPressed: onRetry,
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class ReaderPrewarmPage {
   const ReaderPrewarmPage({
     required this.documentKey,
@@ -59,6 +98,7 @@ class ReaderPageWindow extends StatefulWidget {
     this.surfaceBackground = Colors.white,
     this.paperWidthTransition = false,
     this.shortPageTransition = false,
+    this.tabletPageTurn = false,
     this.onWillPresent,
     this.onWillPresentPage,
     this.onSelected,
@@ -87,6 +127,7 @@ class ReaderPageWindow extends StatefulWidget {
   /// Desktop replacement uses one opaque group with a short settling movement.
   /// The callback resets its viewport in the same frame that reveals the group.
   final bool shortPageTransition;
+  final bool tabletPageTurn;
   final VoidCallback? onWillPresent;
 
   /// Prepaint geometry for the exact surface being revealed, including a
@@ -167,7 +208,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
     super.initState();
     _animation = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 90),
+      duration: widget.tabletPageTurn
+          ? ScoreMotion.tabletPageSettle
+          : const Duration(milliseconds: 90),
     )..addStatusListener(_status);
     _requested = _displayed = _PageId(widget.documentKey, widget.pageNumber);
     _capture();
@@ -176,6 +219,9 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
   @override
   void didUpdateWidget(ReaderPageWindow oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _animation.duration = widget.tabletPageTurn
+        ? ScoreMotion.tabletPageSettle
+        : const Duration(milliseconds: 90);
     _requested = _PageId(widget.documentKey, widget.pageNumber);
     if (widget.direction == 0 && _incoming != null) {
       // Retire an obsolete transition before capturing the latest destination.
@@ -606,7 +652,11 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
                             offset: Offset(
                               widget.shortPageTransition
                                   ? (id == _incoming && _settleRevealed
-                                        ? _direction * (1 - t) * 10
+                                        ? _direction *
+                                              (1 - t) *
+                                              (widget.tabletPageTurn
+                                                  ? ScoreSpace.xl
+                                                  : 10)
                                         : 0)
                                   : _incoming == null
                                   ? 0
@@ -679,38 +729,15 @@ class _ReaderPageWindowState extends State<ReaderPageWindow>
 
   Widget _renderErrorDetails() {
     final surface = _surfaces[_requested]!;
-    return Material(
-      color: ScoreTokens.of(context).dangerBg,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Flexible(
-              child: Text(
-                surface.error!,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: ScoreTokens.of(context).dangerInk),
-              ),
-            ),
-            TextButton(
-              style: TextButton.styleFrom(
-                foregroundColor: ScoreTokens.of(context).dangerInk,
-              ),
-              onPressed: () => setState(() {
-                final s = surface;
-                s.error = null;
-                s.ready = false;
-                s.painted = false;
-                s.readySince = null;
-                s.retry++;
-              }),
-              child: const Text('重试'),
-            ),
-          ],
-        ),
-      ),
+    return ReaderPageRenderError(
+      message: surface.error!,
+      onRetry: () => setState(() {
+        surface.error = null;
+        surface.ready = false;
+        surface.painted = false;
+        surface.readySince = null;
+        surface.retry++;
+      }),
     );
   }
 

@@ -255,6 +255,7 @@ void main() {
     });
     final result = await h.client!.syncLibrary(h.replica);
     expect(result.failure, LibrarySyncFailure.sourceNotReady);
+    expect(result.serviceUnavailable, isFalse);
     expect(result.status, LibrarySyncStatus.partial);
     const secret = 'C:\\private-scores\\secret.pdf Bearer private-token';
     // Even a source throwing the public protocol exception cannot echo details.
@@ -266,6 +267,7 @@ void main() {
     expect(jsonDecode(generic.$2), {'error': 'Sync operation failed.'});
     final unknown = await h.client!.syncLibrary(h.replica);
     expect(unknown.failure, LibrarySyncFailure.unknown);
+    expect(unknown.serviceUnavailable, isTrue);
     expect(unknown.error, isNot(contains('private-token')));
     expect(h.replica.manifest, isNull);
   });
@@ -280,6 +282,7 @@ void main() {
         h, Uri(scheme: 'http', host: '127.0.0.1', port: port));
     final refused = await disconnected.syncLibrary(h.replica);
     expect(refused.failure, LibrarySyncFailure.connection);
+    expect(refused.serviceUnavailable, isTrue);
     final bytes = utf8.encode('score content');
     h.source.bytes['a'] = bytes;
     h.source.setEntries([entry('a', 'r', 'a.pdf', bytes)]);

@@ -90,6 +90,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   bool _setListCreate = false;
   int _setListEntry = 0;
   bool _directoryMutation = false;
+  bool _libraryMenuOpen = false;
   DesktopNavigationHistory? _history;
   final Set<String> _collapsedFolders = {};
   final Set<String> _knownTreeFolders = {};
@@ -473,19 +474,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         catalogIdentity: _canProvideLibrary ? _savedCatalogIdentity : null,
         computerDestinationProvider: sync == null
             ? null
-            : () => [
-                for (final source
-                    in sync.activeCollection?.index?.sources ?? [])
-                  ImportComputerDestination(
-                    id: source.id,
-                    name: source.name,
-                    computerKey: sync.importComputerKey,
-                    collectionId: sync.activeCollection?.index?.id,
-                    folders:
-                        sync.activeCollection!.index!.folders[source.id] ??
-                        const [],
-                  ),
-              ],
+            : () => ImportComputerDestination.forComputer(sync),
         saveToComputer: sync?.writeImportedScore,
         queueComputerSaves: sync != null,
         onComputerSaveQueued: sync?.requestComputerUpload,
@@ -518,6 +507,7 @@ class _LibraryScreenState extends State<LibraryScreen>
       MaterialPageRoute<void>(
         builder: (_) => ImportLibraryScreen(
           store: imports,
+          computer: _canProvideLibrary ? null : _sync,
           openScore: _openImportedScore,
           openFiles: () => unawaited(_openSingle()),
           initialDrafts: !_canProvideLibrary,
@@ -849,6 +839,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         context,
         controller: sync,
         openOffline: () => unawaited(_openOffline()),
+        openLocalImports: _canProvideLibrary ? null : _openImports,
         scanOnOpen: scan,
         syncOnOpen: syncNow,
       );
@@ -1157,11 +1148,7 @@ class _LibraryScreenState extends State<LibraryScreen>
             ),
             if (!wide) ...[
               const SizedBox(width: 8),
-              LibraryIconButton(
-                glyph: ReaderGlyph.downloadList,
-                label: '曲单',
-                onPressed: _openSetLists,
-              ),
+              LibrarySetListButton(onPressed: _openSetLists),
               const SizedBox(width: 8),
               _deviceSummary(compact: true),
             ],
@@ -1310,7 +1297,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     if (_navEntriesKey != key) {
       _navEntriesKey = key;
       _navEntries = [
-        const LibraryNavEntry(LibraryNavKind.group, label: '谱库来源'),
+        const LibraryNavEntry(LibraryNavKind.sourceHeading, label: '谱库来源'),
         for (final source in library.sources) ...[
           LibraryNavEntry(LibraryNavKind.source, value: source),
           if (source.id == library.selectedSourceId)
@@ -1325,7 +1312,6 @@ class _LibraryScreenState extends State<LibraryScreen>
             in _workspace?.store.snapshot.activeSetLists ?? <ScoreSetList>[])
           LibraryNavEntry(LibraryNavKind.setList, value: list),
         const LibraryNavEntry(LibraryNavKind.newSetList),
-        const LibraryNavEntry(LibraryNavKind.operations),
       ];
     }
     return LibrarySidebar(
@@ -1333,6 +1319,13 @@ class _LibraryScreenState extends State<LibraryScreen>
       device: _deviceSummary(),
       itemBuilder: (context, entry) {
         switch (entry.kind) {
+          case LibraryNavKind.sourceHeading:
+            return Row(
+              children: [
+                Expanded(child: LibraryGroupLabel(entry.label)),
+                _libraryOperations(library, inSidebar: true),
+              ],
+            );
           case LibraryNavKind.group:
             if (entry.label == '最近阅读') {
               return RecentNavigationItem(
@@ -1348,13 +1341,16 @@ class _LibraryScreenState extends State<LibraryScreen>
             );
           case LibraryNavKind.source:
             final source = entry.value! as CatalogSourceBinding;
+            final browsingSource =
+                !_recentOpen &&
+                !_setListsOpen &&
+                source.id == library.selectedSourceId;
             return LibraryNavigationItem(
               key: ValueKey('source-${source.id}'),
               label: source.name,
-              selected:
-                  !_recentOpen &&
-                  !_setListsOpen &&
-                  source.id == library.selectedSourceId,
+              closeDrawerOnTap: true,
+              selected: browsingSource && library.currentFolder.isEmpty,
+              highlightIcon: browsingSource,
               count: '${source.catalog.snapshot.availableEntries.length}',
               onTap: () => _selectSource(library, source.id),
             );
@@ -1382,8 +1378,6 @@ class _LibraryScreenState extends State<LibraryScreen>
               glyph: ReaderGlyph.plus,
               onTap: () => unawaited(_openSetLists(initialCreate: true)),
             );
-          case LibraryNavKind.operations:
-            return _libraryOperations(library);
           default:
             return const SizedBox.shrink();
         }
@@ -1391,50 +1385,62 @@ class _LibraryScreenState extends State<LibraryScreen>
     );
   }
 
-  Widget _libraryOperations(LibraryController library) =>
-      PopupMenuButton<String>(
-        tooltip: '曲库操作',
-        icon: const ReaderIcon(ReaderGlyph.more),
-        style: libraryIconButtonStyle(context),
-        constraints: const BoxConstraints.tightFor(
-          width: ScoreLayout.menuWidth,
+  Widget _libraryOperations(
+    LibraryController library, {
+    bool inSidebar = false,
+  }) => PopupMenuButton<String>(
+    tooltip: '曲库操作',
+    icon: const ReaderIcon(ReaderGlyph.more),
+    position: inSidebar ? PopupMenuPosition.under : null,
+    style: inSidebar && _libraryMenuOpen
+        ? libraryIconButtonStyle(context).copyWith(
+            backgroundColor: WidgetStatePropertyAll(
+              ScoreTokens.of(context).pineWash,
+            ),
+          )
+        : libraryIconButtonStyle(context),
+    onOpened: inSidebar ? () => setState(() => _libraryMenuOpen = true) : null,
+    onCanceled: inSidebar
+        ? () => setState(() => _libraryMenuOpen = false)
+        : null,
+    constraints: const BoxConstraints.tightFor(width: ScoreLayout.menuWidth),
+    onSelected: (value) {
+      if (inSidebar) setState(() => _libraryMenuOpen = false);
+      switch (value) {
+        case 'single':
+          unawaited(_openSingle());
+        case 'refresh':
+          unawaited(library.rescan());
+        case 'verify':
+          unawaited(library.rescan(verifyAll: true));
+        case 'offline':
+          unawaited(_openOffline());
+        case 'imports':
+          unawaited(_openImports());
+        case 'layout':
+          DeviceLayoutScope.maybeOf(context)?.toggle();
+      }
+    },
+    itemBuilder: (_) => [
+      const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
+      const PopupMenuItem(value: 'imports', child: Text('本机导入与暂存')),
+      if (library.rootPath != null)
+        PopupMenuItem(
+          value: 'refresh',
+          enabled: !library.scanning,
+          child: const Text('刷新谱库'),
         ),
-        onSelected: (value) {
-          switch (value) {
-            case 'single':
-              unawaited(_openSingle());
-            case 'refresh':
-              unawaited(library.rescan());
-            case 'verify':
-              unawaited(library.rescan(verifyAll: true));
-            case 'offline':
-              unawaited(_openOffline());
-            case 'imports':
-              unawaited(_openImports());
-            case 'layout':
-              DeviceLayoutScope.maybeOf(context)?.toggle();
-          }
-        },
-        itemBuilder: (_) => [
-          const PopupMenuItem(value: 'single', child: Text('打开单份曲谱')),
-          const PopupMenuItem(value: 'imports', child: Text('本机导入与暂存')),
-          if (library.rootPath != null)
-            PopupMenuItem(
-              value: 'refresh',
-              enabled: !library.scanning,
-              child: const Text('刷新谱库'),
-            ),
-          if (library.rootPath != null)
-            PopupMenuItem(
-              value: 'verify',
-              enabled: !library.scanning,
-              child: const Text('完整校验此谱库内容'),
-            ),
-          const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
-          if (defaultTargetPlatform == TargetPlatform.windows)
-            const PopupMenuItem(value: 'layout', child: Text('切换 iPad 预览')),
-        ],
-      );
+      if (library.rootPath != null)
+        PopupMenuItem(
+          value: 'verify',
+          enabled: !library.scanning,
+          child: const Text('完整校验此谱库内容'),
+        ),
+      const PopupMenuItem(value: 'offline', child: Text('离线谱库')),
+      if (defaultTargetPlatform == TargetPlatform.windows)
+        const PopupMenuItem(value: 'layout', child: Text('切换 iPad 预览')),
+    ],
+  );
 
   Widget _folderNode(LibraryController library, String folder, int depth) {
     final children = _hierarchy!.childrenOf(folder);
@@ -1442,6 +1448,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     return LibraryNavigationItem(
       key: ValueKey('folder-$folder'),
       label: p.posix.basename(folder),
+      closeDrawerOnTap: true,
       selected:
           !_recentOpen && !_setListsOpen && library.currentFolder == folder,
       indent: mathIndent(depth),
@@ -1465,7 +1472,12 @@ class _LibraryScreenState extends State<LibraryScreen>
   double mathIndent(int depth) =>
       (depth * ScoreLayout.treeIndent).clamp(0, 132);
 
-  Widget _content(LibraryController library, {required bool wide}) => Column(
+  Widget _contentWithSongbooks(
+    LibraryController library,
+    List<SongbookSearchHit> hits,
+    Widget? songbookStatus, {
+    required bool wide,
+  }) => Column(
     children: [
       if (!wide)
         Padding(
@@ -1480,7 +1492,7 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       if (library.searching)
         LibrarySearchContext(
-          count: library.visibleEntries.length,
+          count: library.visibleEntries.length + hits.length,
           withinFolder: library.searchCurrentFolder,
           onScopeChanged: library.setSearchScope,
         ),
@@ -1501,7 +1513,7 @@ class _LibraryScreenState extends State<LibraryScreen>
           '${library.lastScan?.issues.length ?? 0} 项读取提示 · ${library.lastScan?.ambiguities.length ?? 0} 项关联待确认${library.storageWarnings.isEmpty ? '' : ' · 索引恢复提示'}',
           () => _details(library),
         ),
-      Expanded(child: _entries(library)),
+      Expanded(child: _entriesWithSongbooks(library, hits, songbookStatus)),
     ],
   );
 
@@ -1531,25 +1543,33 @@ class _LibraryScreenState extends State<LibraryScreen>
     ),
   );
 
-  Widget _entries(LibraryController library) => SongbookSearchBuilder(
-    service: _sync?.songbooks,
-    query: library.searching ? library.query : '',
-    builder: (hits) => _entriesWithSongbooks(
-      library,
-      hits.where((hit) {
-        final entry = library.snapshot?.entryById(hit.key.entryId);
+  Widget _content(LibraryController library, {required bool wide}) {
+    final catalog = library.searching ? library.snapshot : null;
+    final source = library.searchCurrentFolder
+        ? library.selectedSourceId
+        : null;
+    final folder = library.searchCurrentFolder ? library.currentFolder : null;
+    return SongbookSearchBuilder(
+      service: _sync?.songbooks,
+      query: library.searching ? library.query : '',
+      scope: (catalog, source, folder),
+      includeBook: (key) {
+        final entry = catalog?.entryById(key.entryId);
         return entry != null &&
-            entry.currentRevisionId == hit.key.revisionId &&
-            (!library.searchCurrentFolder ||
-                (library.sourceIdFor(entry) == library.selectedSourceId &&
-                    folderContains(library.currentFolder, entry.relativePath)));
-      }).toList(),
-    ),
-  );
+            entry.currentRevisionId == key.revisionId &&
+            (folder == null ||
+                (library.sourceIdFor(entry) == source &&
+                    folderContains(folder, entry.relativePath)));
+      },
+      builder: (hits, status) =>
+          _contentWithSongbooks(library, hits, status, wide: wide),
+    );
+  }
 
   Widget _entriesWithSongbooks(
     LibraryController library,
     List<SongbookSearchHit> hits,
+    Widget? songbookStatus,
   ) {
     final entries = library.visibleEntries;
     final subfolders = library.searching ? <String>[] : library.listing.folders;
@@ -1576,19 +1596,22 @@ class _LibraryScreenState extends State<LibraryScreen>
       child: Column(
         children: [
           const LibraryColumnHeader(),
+          if (songbookStatus != null && entries.isNotEmpty) songbookStatus,
           Expanded(
             child: entries.isEmpty && subfolders.isEmpty && hits.isEmpty
                 ? Center(
-                    child: Text(
-                      library.scanning
-                          ? '正在扫描文件夹…'
-                          : library.searching
-                          ? '未找到曲谱'
-                          : '这个文件夹里还没有曲谱',
-                      style: ScoreText.body.copyWith(
-                        color: ScoreTokens.of(context).ink500,
-                      ),
-                    ),
+                    child:
+                        songbookStatus ??
+                        Text(
+                          library.scanning
+                              ? '正在扫描文件夹…'
+                              : library.searching
+                              ? '未找到曲谱'
+                              : '这个文件夹里还没有曲谱',
+                          style: ScoreText.body.copyWith(
+                            color: ScoreTokens.of(context).ink500,
+                          ),
+                        ),
                   )
                 : ListView.builder(
                     key: PageStorageKey((
@@ -1611,6 +1634,8 @@ class _LibraryScreenState extends State<LibraryScreen>
                         }
                         index--;
                         if (index == entries.length) {
+                          if (songbookStatus != null)
+                            return const SizedBox.shrink();
                           return songbookResultHeading(
                             context,
                             '谱本内曲目 · ${hits.length}',
@@ -1626,10 +1651,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                             pathLabel:
                                 '${library.sourceNameFor(entry)} / ${entry.relativePath}',
                             onOpen: () {
-                              if (!hit.item.canNavigate) {
-                                _message('文件已更新，请打开目录核对 PDF 页码。');
-                                return;
-                              }
                               unawaited(
                                 _openEntry(
                                   entry,
@@ -1648,11 +1669,6 @@ class _LibraryScreenState extends State<LibraryScreen>
                           leading: const _HostLibraryIcon.folder(),
                           name: p.posix.basename(folder),
                           subtitle: '${_folderCounts[folder] ?? 0} 项',
-                          action: LibraryIconButton(
-                            glyph: ReaderGlyph.more,
-                            label: '文件夹选项',
-                            onPressed: () => _folder(folder),
-                          ),
                           onTap: () => _folder(folder),
                         );
                       }

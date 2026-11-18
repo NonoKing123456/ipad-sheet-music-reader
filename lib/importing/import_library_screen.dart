@@ -6,9 +6,11 @@ import 'package:path/path.dart' as p;
 import '../library/library_widgets.dart';
 import '../library/directory_navigation.dart';
 import '../library/score_file_icon.dart';
+import '../sync/sync_controller.dart';
 import '../theme/reader_icons.dart';
 import '../theme/tokens.dart';
 import 'external_import_store.dart';
+import 'import_computer_dialog.dart';
 
 class ImportLibraryScreen extends StatefulWidget {
   const ImportLibraryScreen({
@@ -16,9 +18,11 @@ class ImportLibraryScreen extends StatefulWidget {
     required this.store,
     required this.openScore,
     required this.openFiles,
+    this.computer,
     this.initialDrafts = false,
   });
   final ExternalImportStore store;
+  final SyncController? computer;
   final Future<void> Function(String id) openScore;
   final VoidCallback openFiles;
   final bool initialDrafts;
@@ -27,9 +31,11 @@ class ImportLibraryScreen extends StatefulWidget {
 }
 
 class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
-  late String _folder = widget.store.localLibrary.path;
+  late String _root = widget.store.localLibrary.path;
+  late String _folder = _root;
   late bool _drafts = widget.initialDrafts;
   List<Directory> _folders = [];
+  int _folderRequest = 0;
   @override
   void initState() {
     super.initState();
@@ -37,24 +43,46 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
   }
 
   Future<void> _loadFolder(String path) async {
-    try {
-      final root = await widget.store.localLibrary.resolveSymbolicLinks();
-      final actual = await Directory(path).resolveSymbolicLinks();
-      if (!p.equals(root, actual) && !p.isWithin(root, actual)) return;
-      final folders = await Directory(actual)
-          .list(followLinks: false)
-          .where((entry) => entry is Directory)
-          .cast<Directory>()
-          .toList();
-      folders.sort((a, b) => a.path.compareTo(b.path));
-      if (mounted) {
+    final request = ++_folderRequest;
+    var candidate = path;
+    var unavailable = false;
+    while (true) {
+      try {
+        final root = await widget.store.localLibrary.resolveSymbolicLinks();
+        final actual = await Directory(candidate).resolveSymbolicLinks();
+        if (!p.equals(root, actual) && !p.isWithin(root, actual)) {
+          throw const FileSystemException('不在本机导入目录范围内');
+        }
+        final folders = await Directory(actual)
+            .list(followLinks: false)
+            .where((entry) => entry is Directory)
+            .cast<Directory>()
+            .toList();
+        folders.sort((a, b) => a.path.compareTo(b.path));
+        if (!mounted || request != _folderRequest) return;
         setState(() {
+          _root = root;
           _folder = actual;
           _folders = folders;
         });
+        break;
+      } on FileSystemException {
+        if (!mounted || request != _folderRequest) return;
+        unavailable = true;
+        if (p.isWithin(_root, candidate)) {
+          candidate = p.dirname(candidate);
+          continue;
+        }
+        setState(() {
+          _folder = _root;
+          _folders = [];
+        });
+        break;
       }
-    } catch (_) {
-      /* The saved records remain available even if a folder is offline. */
+    }
+    if (unavailable && !_drafts) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('文件夹已移动或不可访问。')));
     }
   }
 
@@ -93,12 +121,49 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
     }
   }
 
+  Future<void> _renameForComputer(ImportedScore score) async {
+    final computer = widget.computer!;
+    try {
+      final confirmed = await computer.confirmImportDirectory();
+      if (!mounted) return;
+      if (!confirmed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请连接电脑确认目标谱库后重试，曲谱仍在本机暂存。')),
+        );
+        return;
+      }
+      final selection = await showDialog<ImportComputerSelection>(
+        context: context,
+        builder: (_) => ImportComputerFolderDialog(
+          sources: ImportComputerDestination.forComputer(computer),
+          fileName: score.name,
+          previous: score.remoteTransaction,
+        ),
+      );
+      if (selection == null || !mounted) return;
+      await computer.retryImportWithName(
+        id: score.id,
+        sourceId: selection.source.id,
+        sourceName: selection.source.name,
+        folder: selection.folder,
+        basename: selection.basename,
+        computerKey: selection.source.computerKey,
+        collectionId: selection.source.collectionId,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('改名重试未完成，请确认目标谱库后重试。')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = ScoreTokens.of(context);
-    final root = widget.store.localLibrary.path;
+    final root = _root;
     final atRoot = p.equals(_folder, root);
-    return Scaffold(
+    final screen = Scaffold(
       backgroundColor: t.paper1,
       body: SafeArea(
         child: Column(
@@ -133,31 +198,30 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
               padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.lg),
               child: Row(
                 children: [
-                  TextButton(
+                  _ImportTab(
+                    label: '本机文件夹',
+                    selected: !_drafts,
                     onPressed: () {
                       setState(() => _drafts = false);
                       _loadFolder(_folder);
                     },
-                    child: Text(
-                      '本机文件夹',
-                      style: ScoreText.caption.copyWith(
-                        color: _drafts ? t.ink500 : t.pine,
-                      ),
-                    ),
                   ),
-                  TextButton(
-                    onPressed: () => setState(() => _drafts = true),
+                  Flexible(
                     child: AnimatedBuilder(
                       animation: widget.store,
                       builder: (context, _) {
                         final pending = widget.store.records
                             .where((score) => score.pendingComputer)
                             .length;
-                        return Text(
-                          pending == 0 ? '暂存' : '暂存 · $pending 待传',
-                          style: ScoreText.caption.copyWith(
-                            color: _drafts ? t.pine : t.ink500,
-                          ),
+                        final conflicts = widget.store.importNameConflicts;
+                        return _ImportTab(
+                          label: '暂存',
+                          selected: _drafts,
+                          onPressed: () => setState(() => _drafts = true),
+                          status: [
+                            if (pending > 0) '$pending 待传',
+                            if (conflicts > 0) '$conflicts 需改名',
+                          ].join(' · '),
                         );
                       },
                     ),
@@ -226,8 +290,9 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                             ? (atRoot && !p.isWithin(root, score.savedPath!)
                                   ? p.dirname(score.savedPath!)
                                   : null)
-                            : score.remoteTransaction != null &&
-                                  !score.remoteTransaction!.conflict
+                            : score.needsComputerRename
+                            ? '电脑已有同名曲谱 · 需改名'
+                            : score.pendingComputer
                             ? '本机可读 · 待传电脑 · ${score.remoteTransaction!.sourceName}'
                             : '暂存 · 尚未保存到曲库',
                         metadata: LibraryFileMetadata(
@@ -241,6 +306,25 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                         },
                         action: score.saved
                             ? null
+                            : score.needsComputerRename &&
+                                  widget.computer != null
+                            ? PopupMenuButton<String>(
+                                tooltip: '${score.name} 待传选项',
+                                icon: const ReaderIcon(ReaderGlyph.more),
+                                onSelected: (action) => action == 'rename'
+                                    ? _renameForComputer(score)
+                                    : _delete(score),
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                    value: 'rename',
+                                    child: Text('改名重试'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'delete',
+                                    child: Text('删除本机暂存'),
+                                  ),
+                                ],
+                              )
                             : LibraryIconButton(
                                 glyph: ReaderGlyph.trash,
                                 label: '删除暂存 ${score.name}',
@@ -252,6 +336,74 @@ class _ImportLibraryScreenState extends State<ImportLibraryScreen> {
                 },
               ),
             ),
+          ],
+        ),
+      ),
+    );
+    return DirectoryMetadataScope(enabled: !_drafts, child: screen);
+  }
+}
+
+class _ImportTab extends StatelessWidget {
+  const _ImportTab({
+    required this.label,
+    required this.selected,
+    required this.onPressed,
+    this.status = '',
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onPressed;
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = ScoreTokens.of(context);
+    return Semantics(
+      selected: selected,
+      child: TextButton(
+        onPressed: onPressed,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Stack(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: ScoreSpace.sm),
+                  child: Text(
+                    label,
+                    style: ScoreText.caption.copyWith(
+                      color: selected ? t.pine : t.ink500,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+                if (selected)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      key: ValueKey('import-tab-indicator-$label'),
+                      height: ScoreLayout.importTabUnderline,
+                      decoration: BoxDecoration(
+                        color: t.pine,
+                        borderRadius: BorderRadius.circular(
+                          ScoreLayout.importTabUnderline / 2,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            if (status.isNotEmpty)
+              Flexible(
+                child: Text(
+                  ' · $status',
+                  style: ScoreText.caption.copyWith(color: t.ink500),
+                ),
+              ),
           ],
         ),
       ),

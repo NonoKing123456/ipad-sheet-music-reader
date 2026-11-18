@@ -722,7 +722,7 @@ class _ContinuousPaper extends StatefulWidget {
 }
 
 class _ContinuousPaperState extends State<_ContinuousPaper> {
-  final _token = Object();
+  var _token = Object();
   String? _error;
   bool _ready = false;
   @override
@@ -746,28 +746,56 @@ class _ContinuousPaperState extends State<_ContinuousPaper> {
     super.dispose();
   }
 
+  void _retry() {
+    if (_error == null) return;
+    setState(() {
+      _token = Object();
+      _ready = false;
+      _error = null;
+      widget.mounted(_token);
+    });
+  }
+
   @override
-  Widget build(BuildContext context) => Stack(
-    fit: StackFit.expand,
-    children: [
-      ReaderPaintAcknowledgement(
-        onPainted: _ready ? () => widget.painted(_token) : null,
-        child: ColoredBox(
-          color: Colors.white,
-          child: widget.builder(
-            widget.number,
-            widget.active,
-            () {
-              if (mounted && !_ready) setState(() => _ready = true);
-              widget.ready(_token);
-            },
-            (error) {
-              if (mounted && error != _error) setState(() => _error = error);
-            },
+  Widget build(BuildContext context) {
+    final token = _token;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ReaderPaintAcknowledgement(
+          key: ObjectKey(token),
+          onPainted: _ready ? () => widget.painted(token) : null,
+          child: ColoredBox(
+            color: Colors.white,
+            child: ExcludeSemantics(
+              excluding: _error != null,
+              child: widget.builder(
+                widget.number,
+                widget.active,
+                () {
+                  if (!mounted || token != _token) return;
+                  if (!_ready || _error != null) {
+                    setState(() {
+                      _ready = true;
+                      _error = null;
+                    });
+                  }
+                  widget.ready(token);
+                },
+                (error) {
+                  if (mounted && token == _token && error != _error) {
+                    setState(() => _error = error);
+                  }
+                },
+              ),
+            ),
           ),
         ),
-      ),
-      if (_error != null) Center(child: Text(_error!)),
-    ],
-  );
+        if (_error case final error?)
+          Center(
+            child: ReaderPageRenderError(message: error, onRetry: _retry),
+          ),
+      ],
+    );
+  }
 }

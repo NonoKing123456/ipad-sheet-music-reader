@@ -9,6 +9,34 @@ import '../theme/device_layout.dart';
 import '../theme/tokens.dart';
 import 'page_count_service.dart';
 
+/// Applies only to ordinary compact directory listings.
+class DirectoryMetadataScope extends InheritedWidget {
+  const DirectoryMetadataScope({
+    super.key,
+    required this.enabled,
+    required super.child,
+  });
+  final bool enabled;
+
+  static bool compactOf(BuildContext context) =>
+      (context
+              .dependOnInheritedWidgetOfExactType<DirectoryMetadataScope>()
+              ?.enabled ??
+          false) &&
+      DeviceLayoutScope.isCompact(context);
+
+  static double scaled(BuildContext context, double width) =>
+      width *
+      (MediaQuery.textScalerOf(context).scale(13) / 13).clamp(
+        1.0,
+        double.infinity,
+      );
+
+  @override
+  bool updateShouldNotify(DirectoryMetadataScope oldWidget) =>
+      enabled != oldWidget.enabled;
+}
+
 /// One column definition for the header, files, folders and search results.
 class LibraryColumns extends StatelessWidget {
   const LibraryColumns({
@@ -33,7 +61,13 @@ class LibraryColumns extends StatelessWidget {
         ),
         Expanded(child: name),
         SizedBox(
-          width: ScoreLayout.typeColumn + ScoreLayout.pagesColumn,
+          width: DirectoryMetadataScope.compactOf(context)
+              ? DirectoryMetadataScope.scaled(
+                  context,
+                  ScoreLayout.directoryTypeColumn +
+                      ScoreLayout.directoryPagesColumn,
+                )
+              : ScoreLayout.typeColumn + ScoreLayout.pagesColumn,
           child: metadata,
         ),
         SizedBox(
@@ -59,22 +93,23 @@ class LibraryColumnHeader extends StatelessWidget {
       ),
       child: LibraryColumns(
         leading: const SizedBox.shrink(),
-        name: Row(
-          children: [
-            Text('名称', style: style),
-            const SizedBox(width: ScoreSpace.sm),
-            ReaderIcon(
-              ReaderGlyph.chevronDown,
-              size: ScoreLayout.iconSmallVisual,
-              color: tokens.ink500,
-            ),
-          ],
-        ),
+        name: Text('名称', style: style),
         metadata: Row(
           children: [
             SizedBox(
-              width: ScoreLayout.typeColumn,
-              child: Text('类型', style: style),
+              width: DirectoryMetadataScope.compactOf(context)
+                  ? DirectoryMetadataScope.scaled(
+                      context,
+                      ScoreLayout.directoryTypeColumn,
+                    )
+                  : ScoreLayout.typeColumn,
+              child: Text(
+                '类型',
+                textAlign: DirectoryMetadataScope.compactOf(context)
+                    ? TextAlign.right
+                    : TextAlign.left,
+                style: style,
+              ),
             ),
             Expanded(
               child: Text('页数', textAlign: TextAlign.right, style: style),
@@ -101,7 +136,7 @@ class LibraryFileRow extends StatelessWidget {
   final String name, query;
   final String? subtitle;
   final Widget? metadata, action;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   @override
   Widget build(BuildContext context) {
     final tokens = ScoreTokens.of(context);
@@ -148,7 +183,11 @@ class LibraryFileRow extends StatelessWidget {
                 child: LibraryColumns(
                   leading: leading,
                   name: Padding(
-                    padding: const EdgeInsets.only(right: ScoreSpace.lg),
+                    padding: EdgeInsets.only(
+                      right: DirectoryMetadataScope.compactOf(context)
+                          ? ScoreLayout.directoryNameGap
+                          : ScoreSpace.lg,
+                    ),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -262,8 +301,19 @@ class _LibraryFileMetadataState extends State<LibraryFileMetadata> {
     return Row(
       children: [
         SizedBox(
-          width: ScoreLayout.typeColumn,
-          child: Text(label, style: ScoreText.caption.copyWith(color: color)),
+          width: DirectoryMetadataScope.compactOf(context)
+              ? DirectoryMetadataScope.scaled(
+                  context,
+                  ScoreLayout.directoryTypeColumn,
+                )
+              : ScoreLayout.typeColumn,
+          child: Text(
+            label,
+            textAlign: DirectoryMetadataScope.compactOf(context)
+                ? TextAlign.right
+                : TextAlign.left,
+            style: ScoreText.caption.copyWith(color: color),
+          ),
         ),
         Expanded(
           child: Tooltip(
@@ -324,6 +374,43 @@ class LibraryIconButton extends StatelessWidget {
   );
 }
 
+class LibrarySetListButton extends StatelessWidget {
+  const LibrarySetListButton({super.key, required this.onPressed});
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!DeviceLayoutScope.isCompact(context)) {
+      return LibraryIconButton(
+        glyph: ReaderGlyph.downloadList,
+        label: '曲单',
+        onPressed: onPressed,
+      );
+    }
+    return Tooltip(
+      message: '曲单',
+      excludeFromSemantics: true,
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          foregroundColor: ScoreTokens.of(context).ink700,
+          minimumSize: const Size(
+            ScoreLayout.setListHeaderMinWidth,
+            ScoreLayout.touchTarget,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
+          shape: const RoundedRectangleBorder(
+            borderRadius: ScoreRadius.controlAll,
+          ),
+          textStyle: Theme.of(context).textTheme.bodyMedium,
+        ),
+        icon: const ReaderIcon(ReaderGlyph.list),
+        label: const Text('曲单'),
+      ),
+    );
+  }
+}
+
 class LibraryNavigationItem extends StatelessWidget {
   const LibraryNavigationItem({
     super.key,
@@ -331,6 +418,8 @@ class LibraryNavigationItem extends StatelessWidget {
     required this.onTap,
     this.glyph = ReaderGlyph.folder,
     this.selected = false,
+    this.highlightIcon = false,
+    this.closeDrawerOnTap = false,
     this.indent = 0,
     this.trailing,
     this.count,
@@ -339,6 +428,8 @@ class LibraryNavigationItem extends StatelessWidget {
   final VoidCallback onTap;
   final ReaderGlyph glyph;
   final bool selected;
+  final bool highlightIcon;
+  final bool closeDrawerOnTap;
   final double indent;
   final Widget? trailing;
   final String? count;
@@ -351,7 +442,10 @@ class LibraryNavigationItem extends StatelessWidget {
         color: selected ? t.pineWash : Colors.transparent,
         borderRadius: ScoreRadius.controlAll,
         child: InkWell(
-          onTap: onTap,
+          onTap: () {
+            if (closeDrawerOnTap) Scaffold.maybeOf(context)?.closeDrawer();
+            onTap();
+          },
           borderRadius: ScoreRadius.controlAll,
           child: SizedBox(
             height: ScoreLayout.touchTarget,
@@ -359,7 +453,10 @@ class LibraryNavigationItem extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.md),
               child: Row(
                 children: [
-                  ReaderIcon(glyph, color: selected ? t.pine : t.ink700),
+                  ReaderIcon(
+                    glyph,
+                    color: selected || highlightIcon ? t.pine : t.ink700,
+                  ),
                   const SizedBox(width: ScoreSpace.md),
                   Expanded(
                     child: Text(
@@ -487,7 +584,7 @@ class LibraryGroupLabel extends StatelessWidget {
   );
 }
 
-/// The result text keeps the scope action available without another toolbar.
+/// Shows the active search scope independently of its result count.
 class LibrarySearchContext extends StatelessWidget {
   const LibrarySearchContext({
     super.key,
@@ -499,36 +596,83 @@ class LibrarySearchContext extends StatelessWidget {
   final bool withinFolder;
   final ValueChanged<bool> onScopeChanged;
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: ScoreLayout.resultContextHeight,
-    child: Padding(
+  Widget build(BuildContext context) {
+    final tokens = ScoreTokens.of(context);
+    final scope = withinFolder ? '当前文件夹及子文件夹' : '全部谱库';
+    return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: ScoreLayout.listMargin + ScoreSpace.sm,
       ),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: LibraryOutsideTapExclusion(
-          child: PopupMenuButton<bool>(
-            tooltip: '搜索范围',
-            onSelected: onScopeChanged,
-            itemBuilder: (_) => [
-              CheckedPopupMenuItem(
-                value: !withinFolder,
-                checked: withinFolder,
-                child: const Text('当前文件夹及子文件夹'),
-              ),
-            ],
-            child: Text(
-              '$count 个结果 · 显示所属目录',
-              style: ScoreText.caption.copyWith(
-                color: ScoreTokens.of(context).ink500,
+      child: LibraryOutsideTapExclusion(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Flexible(
+              child: PopupMenuButton<bool>(
+                tooltip: '搜索范围',
+                onSelected: onScopeChanged,
+                itemBuilder: (_) => [
+                  CheckedPopupMenuItem(
+                    value: !withinFolder,
+                    checked: withinFolder,
+                    child: const Text('当前文件夹及子文件夹'),
+                  ),
+                ],
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minHeight: ScoreLayout.touchTarget,
+                  ),
+                  child: Align(
+                    widthFactor: 1,
+                    child: Container(
+                      constraints: const BoxConstraints(
+                        minHeight: ScoreLayout.searchScopeHeight,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: ScoreSpace.md,
+                        vertical: ScoreSpace.xs,
+                      ),
+                      decoration: BoxDecoration(
+                        color: tokens.pineWash,
+                        borderRadius: ScoreRadius.controlAll,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              '搜索范围：$scope',
+                              style: ScoreText.caption.copyWith(
+                                color: tokens.pineDeep,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: ScoreSpace.sm),
+                          ReaderIcon(
+                            ReaderGlyph.chevronDown,
+                            size: ScoreLayout.iconSmallVisual,
+                            color: tokens.pineDeep,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
+            Padding(
+              padding: const EdgeInsets.only(left: ScoreSpace.md),
+              child: Text(
+                '$count 个结果',
+                style: ScoreText.caption.copyWith(color: tokens.ink500),
+              ),
+            ),
+          ],
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 ButtonStyle libraryIconButtonStyle(BuildContext context) =>
@@ -584,13 +728,13 @@ class _LibrarySyncActivityIconState extends State<LibrarySyncActivityIcon>
 
 /// Cached navigation data; widgets are created only by the sliver's item builder.
 enum LibraryNavKind {
+  sourceHeading,
   group,
   source,
   folder,
   addSource,
   setList,
   newSetList,
-  operations,
   refresh,
   returnLibrary,
 }

@@ -3,9 +3,8 @@ import 'package:library_core/library_core.dart';
 import 'package:path/path.dart' as p;
 
 import '../library/directory_navigation.dart';
-import '../library/library_widgets.dart';
 import '../library/score_file_icon.dart';
-import '../theme/reader_icons.dart';
+import '../sync/sync_controller.dart';
 import '../theme/tokens.dart';
 import 'external_import_store.dart';
 
@@ -20,6 +19,21 @@ class ImportComputerDestination {
   final String id, name;
   final List<String> folders;
   final String? computerKey, collectionId;
+
+  static List<ImportComputerDestination> forComputer(SyncController sync) {
+    final index = sync.activeCollection?.index;
+    if (index == null) return const [];
+    return [
+      for (final source in index.sources)
+        ImportComputerDestination(
+          id: source.id,
+          name: source.name,
+          computerKey: sync.importComputerKey,
+          collectionId: index.id,
+          folders: index.folders[source.id] ?? const [],
+        ),
+    ];
+  }
 }
 
 class ImportComputerSelection {
@@ -65,6 +79,18 @@ class _ImportComputerFolderDialogState
       _source = widget.sources
           .where((source) => source.id == previous.sourceId)
           .firstOrNull;
+      if (previous.conflict &&
+          (_source == null ||
+              previous.targetComputerKey == null ||
+              previous.targetComputerKey != _source!.computerKey ||
+              previous.targetCollectionId == null ||
+              previous.targetCollectionId != _source!.collectionId ||
+              (previous.relativeFolder.isNotEmpty &&
+                  !_source!.folders.contains(previous.relativeFolder)))) {
+        _source = null;
+        _error = '原保存位置无法确认，请重新选择目标并确认文件名。';
+        return;
+      }
       if (_source?.folders.contains(previous.relativeFolder) == true) {
         _folder = previous.relativeFolder;
       }
@@ -126,35 +152,22 @@ class _ImportComputerFolderDialogState
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (source != null)
-              Row(
-                children: [
-                  if (_folder.isEmpty)
-                    LibraryIconButton(
-                      glyph: ReaderGlyph.back,
-                      label: '选择其他谱库',
-                      onPressed: () => setState(() => _source = null),
-                    ),
-                  Expanded(
-                    child: DefaultTextStyle(
-                      // Match the nested Material's text metrics when the
-                      // breadcrumb measures its logical directory labels.
-                      style: Theme.of(context).textTheme.bodyMedium!,
-                      child: DirectoryBreadcrumbs(
-                        rootLabel: source.name,
-                        currentPath: _folder,
-                        onNavigate: (path) => setState(() => _folder = path),
-                      ),
-                    ),
-                  ),
-                ],
+              DefaultTextStyle(
+                style: Theme.of(context).textTheme.bodyMedium!,
+                child: DirectoryBreadcrumbs(
+                  rootLabel: source.name,
+                  currentPath: _folder,
+                  onNavigate: (path) => setState(() => _folder = path),
+                  onChooseSource: () => setState(() => _source = null),
+                ),
               ),
-            const LibraryColumnHeader(),
             Expanded(
-              child: widget.sources.isEmpty
+              child:
+                  widget.sources.isEmpty || (source != null && folders.isEmpty)
                   ? Padding(
                       padding: const EdgeInsets.all(ScoreSpace.lg),
                       child: Text(
-                        '配对电脑并更新目录后，可选择保存位置。',
+                        source == null ? '配对电脑并更新目录后，可选择保存位置。' : '可直接保存到这里',
                         style: ScoreText.body.copyWith(color: t.ink500),
                       ),
                     )
@@ -165,10 +178,7 @@ class _ImportComputerFolderDialogState
                       itemBuilder: (context, index) {
                         if (source == null) {
                           final item = widget.sources[index];
-                          return LibraryFileRow(
-                            leading: const ScoreFileIcon.folder(
-                              showBadge: false,
-                            ),
+                          return _DestinationRow(
                             name: item.name,
                             onTap: () => setState(() {
                               _source = item;
@@ -177,8 +187,7 @@ class _ImportComputerFolderDialogState
                           );
                         }
                         final path = folders[index];
-                        return LibraryFileRow(
-                          leading: const ScoreFileIcon.folder(showBadge: false),
+                        return _DestinationRow(
                           name: p.posix.basename(path),
                           onTap: () => setState(() => _folder = path),
                         );
@@ -221,6 +230,46 @@ class _ImportComputerFolderDialogState
           child: const Text('保存到这里'),
         ),
       ],
+    );
+  }
+}
+
+class _DestinationRow extends StatelessWidget {
+  const _DestinationRow({required this.name, required this.onTap});
+
+  final String name;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = ScoreTokens.of(context);
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: ScoreSpace.sm),
+        child: Row(
+          children: [
+            const ScoreFileIcon.folder(showBadge: false),
+            const SizedBox(width: ScoreSpace.sm),
+            Expanded(
+              child: Container(
+                alignment: AlignmentDirectional.centerStart,
+                constraints: const BoxConstraints(
+                  minHeight: ScoreLayout.folderRowHeight,
+                ),
+                padding: const EdgeInsets.symmetric(vertical: ScoreSpace.sm),
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: tokens.hair)),
+                ),
+                child: Text(
+                  name,
+                  style: ScoreText.headline.copyWith(color: tokens.ink900),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

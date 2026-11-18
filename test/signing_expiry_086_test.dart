@@ -138,7 +138,11 @@ void main() {
         sync.addListener(() => notifications++);
         await tester.pumpWidget(
           MaterialApp(
-            home: OfflineLibraryScreen(controller: sync, isHome: true),
+            home: OfflineLibraryScreen(
+              controller: sync,
+              isHome: true,
+              openLocalImports: () {},
+            ),
           ),
         );
         await signingFrames(tester);
@@ -255,7 +259,11 @@ void main() {
           isNull,
           reason: 'the small chip does not overflow a narrow title',
         );
-        expect(tester.getTopLeft(find.byTooltip('搜索')).dy, lessThan(60));
+        for (final name in ['搜索', '曲单', '本机导入']) {
+          final button = find.byTooltip(name).hitTestable();
+          expect(button, findsOneWidget);
+          expect(tester.getTopLeft(button).dy, lessThan(60));
+        }
         debugPrint(
           'SIGNING_EXPIRY_086 startup_resume_singleflight=true unknown_and_error=true search_preserves_leaf=true full_snapshot_delta=0 full_catalog_delta=0 controller_notifications_delta=0 tap_target_at_least44=true',
         );

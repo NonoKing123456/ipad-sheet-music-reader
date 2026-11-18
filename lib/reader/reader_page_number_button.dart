@@ -32,6 +32,7 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
   final _input = TextEditingController();
   final _focus = FocusNode();
   final _tapGroup = Object();
+  bool _invalidPage = false;
 
   void _close() {
     if (!_overlay.isShowing) return;
@@ -42,6 +43,7 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
 
   void _toggle() {
     if (_overlay.isShowing) return _close();
+    _invalidPage = false;
     _input.value = TextEditingValue(
       text: '${widget.page}',
       selection: TextSelection(
@@ -58,7 +60,10 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
 
   void _submit(String value) {
     final page = int.tryParse(value.trim());
-    if (page == null || page < 1 || page > widget.pageCount) return;
+    if (page == null || page < 1 || page > widget.pageCount) {
+      setState(() => _invalidPage = true);
+      return;
+    }
     _close();
     widget.onJump(page);
   }
@@ -103,7 +108,6 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
             ),
             Positioned(
               width: ReaderNavigationTokens.pagePopoverWidth,
-              height: ReaderNavigationTokens.pagePopoverHeight,
               child: CompositedTransformFollower(
                 link: _link,
                 showWhenUnlinked: false,
@@ -118,7 +122,10 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
                       borderRadius: ScoreRadius.controlAll,
                       side: BorderSide(color: t.hair),
                     ),
-                    child: Padding(
+                    child: Container(
+                      constraints: const BoxConstraints(
+                        minHeight: ReaderNavigationTokens.pagePopoverHeight,
+                      ),
                       padding: const EdgeInsets.symmetric(
                         horizontal: ScoreSpace.sm,
                       ),
@@ -147,9 +154,18 @@ class _ReaderPageNumberButtonState extends State<ReaderPageNumberButton> {
                                   FilteringTextInputFormatter.digitsOnly,
                                 ],
                                 textInputAction: TextInputAction.go,
-                                onSubmitted: _submit,
+                                onEditingComplete: () => _submit(_input.text),
+                                onChanged: (_) {
+                                  if (_invalidPage) {
+                                    setState(() => _invalidPage = false);
+                                  }
+                                },
                                 decoration: InputDecoration(
                                   isDense: true,
+                                  errorText: _invalidPage
+                                      ? '请输入 1–${widget.pageCount}'
+                                      : null,
+                                  errorMaxLines: 2,
                                   border: OutlineInputBorder(
                                     borderRadius: ScoreRadius.controlAll,
                                     borderSide: BorderSide(color: t.hair),

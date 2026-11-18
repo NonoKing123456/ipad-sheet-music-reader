@@ -14,10 +14,16 @@ class SyncCancelled implements Exception {
 
 class SyncCancellation {
   bool _cancelled = false;
+  bool _pauseBackgroundTransfers = true;
   final _listeners = <void Function()>[];
   bool get isCancelled => _cancelled;
-  void cancel() {
+  bool get pausesBackgroundTransfers => _cancelled && _pauseBackgroundTransfers;
+
+  /// A scope change stops the foreground sync and prunes its native queue
+  /// separately, so downloads outside that scope can continue.
+  void cancel({bool pauseBackgroundTransfers = true}) {
     if (_cancelled) return;
+    _pauseBackgroundTransfers = pauseBackgroundTransfers;
     _cancelled = true;
     for (final listener in _listeners.toList()) {
       listener();
@@ -74,7 +80,7 @@ class LibraryContentIntegrityException extends FormatException {
 
 class LibrarySyncResult {
   const LibrarySyncResult(this.status, this.downloaded,
-      [this.error, this.failure]);
+      [this.error, this.failure, this.serviceUnavailable = false]);
   final LibrarySyncStatus status;
   final int downloaded;
 
@@ -83,6 +89,10 @@ class LibrarySyncResult {
 
   /// Null on success; callers can use this without parsing [error].
   final LibrarySyncFailure? failure;
+
+  /// A transport outage or a temporarily unavailable peer service. A server
+  /// can also be reachable while reporting an unknown or incomplete sync.
+  final bool serviceUnavailable;
 }
 
 class _DigestSink implements Sink<Digest> {
@@ -157,6 +167,7 @@ class ReplicaLibraryView {
   final _manifestIndex = <String, ManifestEntry>{};
   final _presentationPaths = <String, String>{};
   final _verified = <String, _VerifiedObject>{};
+  final _damagedObjects = <String>{};
   bool _verificationDirty = false;
   int _verificationRevision = 0;
 
@@ -185,7 +196,13 @@ class ReplicaLibraryView {
           if (_verified[_verificationKey(entry)] case final record?)
             _verificationKey(entry): record.toJson(),
       };
-  void restoreVerificationCache(Map<String, dynamic> records) {
+  void restoreVerificationCache(Map<String, dynamic> records,
+      {Iterable<ManifestEntry> replaced = const []}) {
+    // A newer checkpoint also supersedes an older positive fingerprint when
+    // verification failed and the new set has no record for this object.
+    for (final entry in replaced) {
+      if (!records.containsKey(_verificationKey(entry))) _forget(entry);
+    }
     for (final e in records.entries) {
       try {
         if (p.basename(e.key) == e.key) {
@@ -301,9 +318,20 @@ class ReplicaLibraryView {
         record?.length == entry.length;
   }
 
-  void _forget(ManifestEntry e) {
+  bool isKnownDamaged(ManifestEntry entry) =>
+      _damagedObjects.contains(_verificationKey(entry));
+
+  void forgetLocalCopy(ManifestEntry entry) => _forget(entry);
+
+  void _forget(ManifestEntry e, {bool damaged = false}) {
+    final key = _verificationKey(e);
+    if (damaged) {
+      _damagedObjects.add(key);
+    } else {
+      _damagedObjects.remove(key);
+    }
     if (_ready.remove(_objectPath(e))) _presentation = null;
-    if (_verified.remove(_verificationKey(e)) != null) {
+    if (_verified.remove(key) != null) {
       _verificationDirty = true;
       _verificationRevision++;
     }
@@ -317,6 +345,7 @@ class ReplicaLibraryView {
       return;
     }
     final key = _verificationKey(e);
+    _damagedObjects.remove(key);
     if (_verified[key]?.matches(e, stat) == true) return;
     _verified[key] = _VerifiedObject(
         e.hash!, stat.size, stat.modified.microsecondsSinceEpoch, stat.mode);
@@ -421,7 +450,7 @@ class ReplicaLibraryView {
         await _confirmAbsent(file);
       }
       if (before.size != e.length || e.hash == null) {
-        _forget(e);
+        _forget(e, damaged: before.type == FileSystemEntityType.file);
         return false;
       }
       if (!verifyAll &&
@@ -444,14 +473,14 @@ class ReplicaLibraryView {
               before.modified.microsecondsSinceEpoch, before.mode)
           .matches(e, after);
       if (hash != e.hash || !stable) {
-        _forget(e);
+        _forget(e, damaged: after.type == FileSystemEntityType.file);
         return false;
       }
       _remember(e, after);
       return true;
     } on FileSystemException {
       if (preserveOnIoError) rethrow;
-      _forget(e);
+      _forget(e, damaged: await file.exists());
       return false;
     }
   }
